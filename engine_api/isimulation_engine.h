@@ -22,12 +22,14 @@
 
 // ENGINE_API visibility macro (provided by engine, consumed by clients)
 #ifndef ENGINE_API
-  #if defined(_WIN32)
+  #if defined(_WIN32) && defined(ACUTESIM_ENGINE_SHARED)  // the engine is a static library unless built as a DLL
     #ifdef ACUTESIM_ENGINE_INTERNAL
       #define ENGINE_API __declspec(dllexport)
     #else
       #define ENGINE_API __declspec(dllimport)
     #endif
+  #elif defined(_WIN32)
+    #define ENGINE_API
   #else
     #define ENGINE_API __attribute__((visibility("default")))
   #endif
@@ -76,7 +78,7 @@ public:
 
     // === Factory function (defined in acutesim_engine/engine_impl.cpp) ===
     // The ONLY legal way to obtain an engine instance from outside.
-    static ENGINE_API std::unique_ptr<ISimulationEngine> create();
+    static std::unique_ptr<ISimulationEngine> create();  // exported with the class (MSVC refuses both)
 };
 
 } // namespace acutesim

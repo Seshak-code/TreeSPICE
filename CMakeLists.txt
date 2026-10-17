@@ -20,6 +20,9 @@ endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(WIN32)  # windows.h's min/max macros break std::min / std::max; M_PI needs _USE_MATH_DEFINES
+    add_compile_definitions(NOMINMAX _USE_MATH_DEFINES)
+endif()
 
 # The one version string: treespice --version and EngineCapabilities::engineVersionString
 set(TREESPICE_VERSION "1.0-alpha")

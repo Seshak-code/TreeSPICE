@@ -1,3 +1,4 @@
+#include <filesystem>
 #include "osdi_device.h"
 
 #include <algorithm>
@@ -91,7 +92,9 @@ void checkInit(const Descriptor *d, const InitInfo &r, const std::string &owner)
 
 std::string resolvePath(const std::string &path) {
     auto exists = [](const std::string &p) { FILE *f = std::fopen(p.c_str(), "rb"); if (f) std::fclose(f); return f != nullptr; };
-    if (exists(path)) return path;
+    // absolute: dlopen and LoadLibrary search their own lists, not the working directory, for a bare file name
+    auto abs = [](const std::string &p) { return std::filesystem::absolute(p).string(); };
+    if (exists(path)) return abs(path);
     if (const char *env = std::getenv("TREESPICE_OSDI_PATH")) {
         std::string dirs = env;
         size_t start = 0;
@@ -99,7 +102,7 @@ std::string resolvePath(const std::string &path) {
             size_t end = dirs.find(PATH_SEP, start);
             if (end == std::string::npos) end = dirs.size();
             const std::string cand = dirs.substr(start, end - start) + "/" + path;
-            if (end > start && exists(cand)) return cand;
+            if (end > start && exists(cand)) return abs(cand);
             start = end + 1;
         }
     }

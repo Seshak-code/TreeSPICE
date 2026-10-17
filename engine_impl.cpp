@@ -401,7 +401,10 @@ SimulationResponseDTO SessionImpl::dispatch_dc_internal(const SimulationRequestD
             return failure;
         }
         DcDim d{sw.sweepVariable, {}};
-        for (long k = 0, n = static_cast<long>(std::floor(span + 1e-9)); k <= n; ++k) d.values.push_back(sw.start + k * sw.step);
+        // accumulated as ngspice steps it (value += step): a comparison at a sweep point (V(a) > 0.5 at 0.1 * 5) then
+        // falls on the same side of its threshold on every platform as in ngspice
+        double v = sw.start;
+        for (long k = 0, n = static_cast<long>(std::floor(span + 1e-9)); k <= n; ++k, v += sw.step) d.values.push_back(v);
         dims.push_back(std::move(d));
     }
     if (parsed.tempsC.size() > 1) {  // .temp t1 t2 ...: the whole run once per temperature, outermost

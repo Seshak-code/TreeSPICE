@@ -121,7 +121,8 @@ def main():
         n, bad0 = 0, bad
         for k, ((wv, wf), (gv, gf)) in enumerate(zip(want, got)):
             at = f"{name}{f' step {k}' if step else ''}"
-            for m in sorted(set(wv) | wf | set(gv) | gf):
+            declared = {d.lower() for d in re.findall(r"^\.meas\w*\s+\w+\s+(\w+)", text, re.I | re.M)}
+            for m in sorted(x for x in set(wv) | wf | set(gv) | gf if x.lower() in declared):  # not ngspice's "Stack = ..."
                 n += 1
                 if m in expect: ok = m in gv and abs(gv[m] - expect[m]) <= ab + rel * abs(expect[m])
                 elif m in wf: ok = m in gf and m not in gv

@@ -4,22 +4,98 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
+# Build, engine tests and the differential test against ngspice 47 on each platform. The Xyce, IBM power-grid
+# and PDK cases need datasets kept out of the repository (datasets/, see ENGINE_HANDOFF.md): run_diff.py skips
+# what is missing, and those suites run locally.
 jobs:
-  test:
+  engine:
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - { name: linux-x86_64, os: ubuntu-24.04, openvaf: linux-x86_64.tar.gz }
+          - { name: windows-x86_64, os: windows-2022, openvaf: windows-x86_64-ucrt.zip }
+          - { name: macos-arm64, os: macos-14, openvaf: macos-aarch64.tar.gz }
+    env:
+      NGSPICE_VERSION: "47"
+      OPENVAF_VERSION: v24.0.2mob
+      OPENVAF_SRC_REF: 5ed9e63  # the reference .va models (integration_tests/) the OSDI libraries are built from
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
-      - name: Install ngspice
-        run: |
-          if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update -q && sudo apt-get install -y -q ngspice; else brew install ngspice; fi
+
       - name: Build
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j4
-      - name: Engine suites
-        run: ctest --test-dir build --output-on-failure
-      - name: Differential test vs ngspice
-        run: python3 tests/ngspice_diff/run_diff.py
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release -j4
+          # multi-config generators (Visual Studio) put binaries in build/Release
+          bin=build; [ -d build/Release ] && bin=build/Release
+          echo "BIN=$bin" >> "$GITHUB_ENV"
+          [ "$RUNNER_OS" = Windows ] && echo "EXE=.exe" >> "$GITHUB_ENV"
+          echo "PY=$(command -v python3 || command -v python)" >> "$GITHUB_ENV"
+
+      - name: Engine tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Cache ngspice (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: ~/ngspice
+          key: ngspice-${{ env.NGSPICE_VERSION }}-${{ matrix.os }}
+
+      - name: MSYS2 (Windows ngspice)
+        if: runner.os == 'Windows'
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-ngspice
+
+      - name: ngspice ${{ env.NGSPICE_VERSION }}
+        run: |
+          base="https://sourceforge.net/projects/ngspice/files/ng-spice-rework/$NGSPICE_VERSION"
+          case "$RUNNER_OS" in
+          Linux)  # distribution packages are older than the oracle: build it
+            if [ ! -x "$HOME/ngspice/bin/ngspice" ]; then
+              sudo apt-get install -y -q bison flex libreadline-dev
+              curl -sSL "$base/ngspice-$NGSPICE_VERSION.tar.gz/download" -o ng.tgz
+              tar xzf ng.tgz
+              (cd "ngspice-$NGSPICE_VERSION" && ./configure -q --prefix="$HOME/ngspice" --with-x=no --enable-xspice \
+                 --enable-osdi --disable-debug && make -j4 > /dev/null && make install > /dev/null)
+            fi
+            echo "NGSPICE=$HOME/ngspice/bin/ngspice" >> "$GITHUB_ENV" ;;
+          Windows)  # MSYS2's gcc build from the same source: the official MSVC build's numbers differ from it
+            # ngspice_con: the console build (ngspice.exe is the GUI one, which waits on its window)
+            echo "NGSPICE=$(cygpath -m '${{ steps.msys2.outputs.msys2-location }}')/ucrt64/bin/ngspice_con.exe" >> "$GITHUB_ENV" ;;
+          macOS)
+            brew install ngspice > /dev/null
+            echo "NGSPICE=$(brew --prefix)/bin/ngspice" >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: OSDI models
+        run: |
+          mkdir -p "$RUNNER_TEMP/openvaf" && cd "$RUNNER_TEMP/openvaf"
+          curl -sSL "https://github.com/OpenVAF/OpenVAF-Reloaded/releases/download/$OPENVAF_VERSION/openvaf-r-$OPENVAF_VERSION-${{ matrix.openvaf }}" -o pkg
+          case "${{ matrix.openvaf }}" in *.zip) 7z x -y pkg > /dev/null ;; *) tar xzf pkg ;; esac
+          exe="$(find "$PWD" -type f \( -name openvaf-r -o -name openvaf-r.exe \) | head -1)"
+          chmod +x "$exe"
+          git clone -q --filter=blob:none --no-checkout https://github.com/arpadbuermen/OpenVAF.git src
+          (cd src && git sparse-checkout set integration_tests && git checkout -q "$OPENVAF_SRC_REF")
+          cd "$GITHUB_WORKSPACE"
+          OPENVAF="$exe" OPENVAF_DIR="$RUNNER_TEMP/openvaf/src" sh tests/build_osdi.sh
+          ls -l datasets/osdi
+
+      - name: Differential test vs ngspice ${{ env.NGSPICE_VERSION }}
+        run: |
+          "$PY" tests/ngspice_diff/run_diff.py --engine "$BIN/acutesim_engine_dump$EXE" --ngspice "$NGSPICE"
+
+      - name: CLI against ngspice
+        run: |
+          "$PY" tests/cli_check.py --treespice "$BIN/treespice$EXE" --ngspice "$NGSPICE"
