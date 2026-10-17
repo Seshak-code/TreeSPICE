@@ -1,0 +1,8 @@
+* .pz: coupling-cap high-pass (zero at the origin) with a differential output, only zeros
+V1 1 0 DC 0 AC 1
+C1 1 2 100n
+R1 2 0 10k
+R2 2 3 5k
+C2 3 0 22n
+.pz 1 0 2 3 vol zer
+.end

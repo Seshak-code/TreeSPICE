@@ -1,0 +1,9 @@
+* MOS level 2: Id-Vgs (subthreshold NFS, mobility UCRIT/UEXP, short-channel XJ, body effect from NSUB) and Id-Vds family
+VDD d 0 DC 3
+VG g 0 DC 0
+VB b 0 DC 0
+M1 d g 0 b NM W=20u L=2u
+.model NM NMOS(LEVEL=2 VTO=0.8 KP=40u GAMMA=0.5 PHI=0.65 LAMBDA=0.03 TOX=50n UCRIT=2e4 UEXP=0.1 NFS=1e11 XJ=0.2u NSUB=1e16 DELTA=0.5)
+.dc VG 0 3 0.25 VB 0 -2 -1
+.print dc i(VDD)
+.end

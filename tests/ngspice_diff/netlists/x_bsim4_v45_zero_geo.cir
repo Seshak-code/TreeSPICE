@@ -1,0 +1,10 @@
+* BSIM4 version=4.5 (sky130), instance without AD/AS/PD/PS: ngspice's BSIM4v5 floors the junction current at 1e-14 A
+.lib lib/sky130_tt_min.lib tt
+.temp 27 125
+VD d 0 DC 0.9
+VG g 0 DC 0.9
+VB vb 0 DC 0
+RB vb b 10
+XM1 d g 0 b sky130_fd_pr__nfet_01v8 l=0.15 w=1
+.dc VB 0 1.2 0.05
+.end

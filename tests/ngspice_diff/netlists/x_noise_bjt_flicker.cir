@@ -1,0 +1,11 @@
+BJT flicker noise KF, AF with a bias-dependent base resistance
+Vcc vcc 0 10
+Rc vcc c 4k
+Vin in 0 DC 0 AC 1
+Rb in b 100k
+Vb bb 0 DC 1.5
+Rbb bb in 200k
+Q1 c b 0 QM
+.model QM NPN(BF=150 IS=1e-15 RB=300 RBM=40 IRB=50u KF=1e-14 AF=1.3 VAF=60)
+.noise v(c) Vin dec 5 1 1meg
+.end

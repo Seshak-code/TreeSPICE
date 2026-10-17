@@ -1,0 +1,14 @@
+R models: sheet resistance with geometry, SHORT/NARROW, DEFW, M, TNOM with TC1/TC2, instance AC and a given value
+V1 1 0 DC 5 AC 1
+R1 1 2 RM1 L=20u W=4u
+R2 2 0 RM2 L=30u
+R3 2 3 2k RM1 M=2 TC1=0
+R4 3 0 RM3 L=5u W=5u M=3
+R5 2 4 1k AC=250
+R6 4 0 1k
+C1 4 0 1n
+.model RM1 R(RSH=100 SHORT=1u NARROW=0.5u)
+.model RM2 R(RSH=50 DEFW=3u TC1=1e-3)
+.model RM3 R(RSH=200 TNOM=0 TC1=1e-3 TC2=1e-5)
+.ac dec 3 1k 10meg
+.end

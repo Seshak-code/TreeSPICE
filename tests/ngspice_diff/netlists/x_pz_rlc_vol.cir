@@ -1,0 +1,10 @@
+* .pz: same RLC driven by an existing voltage source (input pair held by V1), poles and zeros
+V1 1 0 DC 0 AC 1
+R1 1 2 10
+L1 2 3 1m
+C1 3 0 1u
+R2 3 0 10k
+C2 3 4 1n
+R3 4 0 1k
+.pz 1 0 3 0 vol pz
+.end

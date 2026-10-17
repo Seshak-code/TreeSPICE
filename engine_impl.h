@@ -49,6 +49,10 @@ public:
                                          const EngineCallbacks&) override;
     SimulationResponseDTO runNoise(const SimulationRequestDTO&,
                                     const EngineCallbacks&) override;
+    SimulationResponseDTO runPoleZero(const SimulationRequestDTO&,
+                                       const EngineCallbacks&) override;
+    SimulationResponseDTO runSens(const SimulationRequestDTO&,
+                                   const EngineCallbacks&) override;
     std::unique_ptr<TransientHandle> beginTransient(const SimulationRequestDTO&) override;
 
     JobID     jobId()  const override { return jobId_; }

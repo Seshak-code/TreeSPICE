@@ -1,0 +1,8 @@
+* Nested .dc: a current source (inner) against a voltage source (outer) through a diode
+I1 0 a DC 0
+V2 b 0 DC 0
+R1 a b 1k
+D1 a 0 DM
+.model DM D(IS=1e-14)
+.dc I1 0 2m 0.5m V2 -1 1 0.5
+.end

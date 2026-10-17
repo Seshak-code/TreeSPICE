@@ -1,0 +1,7 @@
+* .dc over a resistor value (with TC1, at 60 C)
+V1 1 0 DC 10
+R1 1 2 1k tc1=0.003
+R2 2 0 2k
+.temp 60
+.dc R1 1k 10k 1k
+.end

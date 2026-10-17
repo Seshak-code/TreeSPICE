@@ -1,0 +1,9 @@
+* BSIM4 rbodymod=1 (sky130): forward-biased body through 10 ohm; the body current sets v(b)
+.lib lib/sky130_tt_min.lib tt
+VD d 0 DC 0.9
+VG g 0 DC 0.9
+VB vb 0 DC 0
+RB vb b 10
+XM1 d g 0 b sky130_fd_pr__nfet_01v8 l=0.15 w=1 ad=0.29 as=0.29 pd=2.58 ps=2.58
+.dc VB 0 1.2 0.05
+.end

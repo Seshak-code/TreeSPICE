@@ -1,0 +1,11 @@
+* JFET at 125 C: CGS/CGD and PB by the junction law, IS by XTI/EG, in a common-source amplifier
+.temp 125
+VDD vdd 0 DC 12
+VIN in 0 DC 0 AC 1
+RG in g 1meg
+RD vdd d 2.2k
+RS s 0 470
+J1 d g s jx
+.model jx njf(vto=-2 beta=1.5m lambda=0.02 is=1e-14 cgs=5p cgd=2p pb=0.8 fc=0.5 xti=3 eg=1.11 tcv=2m bex=-1.5)
+.ac dec 10 1k 1g
+.end

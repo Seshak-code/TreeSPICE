@@ -1,0 +1,8 @@
+* Nested .dc: the output family of a MOS level 1 device (VDS inner, VGS outer)
+VDS dd 0 DC 0
+RD dd d 100
+VGS g 0 DC 0
+M1 d g 0 0 NM W=10u L=1u
+.model NM NMOS(VTO=0.7 KP=100u LAMBDA=0.05)
+.dc VDS 0 3 0.5 VGS 0.5 2.5 0.5
+.end

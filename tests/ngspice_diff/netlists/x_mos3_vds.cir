@@ -1,0 +1,7 @@
+* MOS level 3: Id-Vds family through the linear/saturation boundary and into reverse; XL, WD, XW, LD adjustments
+VD d 0 DC 0
+VG g 0 DC 0
+M1 d g 0 0 NM W=10u L=3u
+.model NM NMOS(LEVEL=3 VTO=0.7 KP=30u GAMMA=0.4 PHI=0.7 TOX=40n THETA=0.15 ETA=0.2 KAPPA=0.2 XJ=0.1u NSUB=2e16 LD=0.1u XL=-0.05u WD=0.2u XW=0.1u)
+.dc VD -3 5 0.25 VG 1 3 1
+.end

@@ -1,0 +1,20 @@
+x_meas_dc: .meas over a .dc sweep
+* meastol 0.005 1e-3
+V1 in 0 DC 0
+R1 in out 1k
+R2 out 0 3k
+D1 out 0 DX
+.model DX D(IS=1e-14 N=1)
+.dc V1 0 5 0.25
+.meas dc d1 FIND v(out) WHEN v(in)=2.2
+.meas dc d2 WHEN v(out)=0.6
+.meas dc d3 MAX v(out)
+.meas dc d4 AVG v(out)
+.meas dc d5 FIND v(out) AT=2.3
+.meas dc d6 TRIG v(in) VAL=1 RISE=1 TARG v(in) VAL=3 RISE=1
+.meas dc d7 INTEG v(out)
+.meas dc d8 FIND i(v1) AT=1.1
+.meas dc d9 PP v(out) FROM=1 TO=4
+.meas dc bad WHEN v(out)=100
+.print dc v(out)
+.end

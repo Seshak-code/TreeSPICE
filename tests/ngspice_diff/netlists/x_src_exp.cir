@@ -1,0 +1,11 @@
+EXP source into an RC; V2 takes TD1/TAU1/TD2/TAU2 from TSTEP (a 0 is "not given" too), I1 is a current EXP
+V1 1 0 EXP(0.2 3 1u 0.5u 6u 1u)
+R1 1 2 1k
+C1 2 0 1n
+V2 3 0 EXP(1 1.2 0 0 0 0)
+R2 3 4 1k
+C2 4 0 2n
+I1 0 5 EXP(0 1m 2u 1u 8u 2u)
+R3 5 0 1k
+.tran 20n 14u
+.end

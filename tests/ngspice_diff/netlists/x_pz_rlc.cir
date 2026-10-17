@@ -1,0 +1,11 @@
+* .pz: underdamped RLC with a shunt RC (complex pair + real pole + a zero), current input at the open node
+I1 0 1 DC 0 AC 1
+R1 1 2 10
+L1 2 3 1m
+C1 3 0 1u
+R2 3 0 10k
+C2 3 4 1n
+R3 4 0 1k
+R0 1 0 50k
+.pz 1 0 3 0 cur pz
+.end

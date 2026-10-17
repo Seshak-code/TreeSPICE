@@ -1,0 +1,16 @@
+MOS1 PHI, GAMMA and VTO from NSUB (and TOX) for NMOS and PMOS, GAMMA/VTO overrides
+Vdd vdd 0 3
+Vg g 0 2.0
+Vb b 0 -0.5
+M1 vdd g d1 b N1 W=10u L=1u
+M2 vdd g d2 b N2 W=10u L=1u
+Rd1 d1 0 1k
+Rd2 d2 0 1k
+M3 d3 gp vdd vdd P1 W=10u L=1u
+Vgp gp 0 1.0
+Rd3 d3 0 1k
+.model N1 NMOS(KP=50u TOX=2e-8 NSUB=1e16)
+.model N2 NMOS(KP=50u TOX=2e-8 NSUB=5e15 VTO=0.9)
+.model P1 PMOS(KP=25u TOX=2e-8 NSUB=2e16 GAMMA=0.4)
+.dc Vg 0 3 0.25
+.end

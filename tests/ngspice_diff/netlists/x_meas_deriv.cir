@@ -1,0 +1,13 @@
+x_meas_deriv: DERIV (ngspice 47 rejects it: "function 'deriv' currently not supported"), checked against the analytic slope
+* meastol 0.01 1e-3
+* expect d1 1.0e5
+* expect d2 -1.0e5
+* expect d3 1.0e5
+V1 in 0 PWL(0 0 10u 1 20u 0)
+R1 in 0 1k
+.tran 0.1u 20u
+.meas tran d1 DERIV v(in) AT=4u
+.meas tran d2 DERIV v(in) AT=14u
+.meas tran d3 DERIV v(in) WHEN v(in)=0.5 RISE=1
+.print tran v(in)
+.end

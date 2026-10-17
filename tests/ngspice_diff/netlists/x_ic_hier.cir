@@ -1,0 +1,22 @@
+.ic inside a .subckt (per instance) and on a hierarchical node v(x2.m) at the top level
+V1 in 0 0
+X1 in o1 sub
+X2 in o2 sub2
+X3 in o3 sub
+Rl1 o1 0 1k
+Rl2 o2 0 1k
+Rl3 o3 0 1k
+.subckt sub a b
+R1 a m 1k
+C1 m 0 1u
+R2 m b 1k
+.ic v(m)=3
+.ends
+.subckt sub2 a b
+R1 a m 1k
+C1 m 0 1u
+R2 m b 1k
+.ends
+.ic v(x2.m)=2 v(x3.m)=1
+.tran 10u 100u
+.end

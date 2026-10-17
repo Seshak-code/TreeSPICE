@@ -1,0 +1,8 @@
+* TEMPER in a .param follows the circuit temperature
+V1 1 0 1
+.param p={temper}
+R1 1 2 {p}
+R2 2 0 100
+.options temp=125
+.op
+.end

@@ -1,0 +1,8 @@
+* branch currents in .tran: i(V1), i(L1) through an RLC step
+V1 1 0 PULSE(0 1 0 1u 1u 50u 100u)
+R1 1 2 100
+L1 2 3 1m
+C1 3 0 100n
+R2 3 0 1k
+.tran 1u 200u
+.end

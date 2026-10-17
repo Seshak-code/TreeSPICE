@@ -51,15 +51,13 @@ struct CornerConfig {
     
     // Statistical
     VariationMode mode = VariationMode::NONE;
-    int monteCarloSeed = 0;
     int iterationIndex = 0; // 0 to N-1 for MC runs
     
     // Helper to generate a unique hash for caching
     size_t hash() const {
         return std::hash<double>{}(temperatureC) ^ 
                std::hash<double>{}(voltageScale) ^
-               static_cast<size_t>(process) ^
-               std::hash<int>{}(monteCarloSeed);
+               static_cast<size_t>(process);
     }
     
     // Factory methods

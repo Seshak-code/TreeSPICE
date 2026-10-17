@@ -1,0 +1,22 @@
+* .pz: two-stage BJT amplifier (RC coupled, with junction capacitances)
+VCC 6 0 DC 12
+VIN 1 0 DC 0 AC 1
+CIN 1 2 1u
+R1 6 2 47k
+R2 2 0 10k
+RC1 6 3 4.7k
+RE1 4 0 1k
+CE1 4 0 47u
+Q1 3 2 4 QN
+C12 3 5 470n
+R3 6 5 47k
+R4 5 0 10k
+RC2 6 7 2.2k
+RE2 8 0 470
+CE2 8 0 100u
+Q2 7 5 8 QN
+COUT 7 9 4.7u
+RL 9 0 10k
+.model QN NPN (IS=1e-14 BF=150 VAF=100 CJE=40p CJC=15p TF=2n RB=100)
+.pz 1 0 9 0 vol pz
+.end

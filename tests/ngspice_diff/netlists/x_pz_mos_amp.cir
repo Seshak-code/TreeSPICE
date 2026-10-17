@@ -1,0 +1,14 @@
+* .pz: MOS1 common-source amplifier with source degeneration bypass and load
+VDD 5 0 DC 5
+VIN 1 0 DC 0 AC 1
+CIN 1 2 100n
+RG1 5 2 200k
+RG2 2 0 100k
+RD 5 3 10k
+RS 4 0 2k
+CS 4 0 10u
+M1 3 2 4 0 NM W=20u L=2u
+CL 3 0 2p
+.model NM NMOS (LEVEL=1 VTO=0.8 KP=60u LAMBDA=0.02 CGSO=2e-10 CGDO=2e-10 CBD=10f CBS=10f)
+.pz 1 0 3 0 vol pz
+.end

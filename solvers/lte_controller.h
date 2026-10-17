@@ -44,6 +44,7 @@ struct LTEResult {
     int worstElementIndex;       // index of element with largest LTE
     bool worstIsCapacitor;       // true = capacitor, false = inductor
     bool requiresRejection;      // true if LTE > tolerance (timestep too large)
+    bool deviceRejects;          // ... by a diode / BJT branch, which the post-corner hold does not cover
     double safetyFactor;         // actual ratio tol/maxLTE (< 1 means reject)
 };
 
@@ -73,8 +74,9 @@ public:
         double dt,
         IntegrationType method,
         // Extra charge branches the netlist scan cannot see (diode/BJT charges on
-        // internal nodes): extra(visit) calls visit(v_now, {v[t-1], v[t-2], v[t-3]}).
-        const std::function<void(const std::function<void(double, const std::array<double, 3>&)>&)>& extra = nullptr) const
+        // internal nodes): extra(visit) calls visit(v_now, {v[t-1], v[t-2], v[t-3]}, C) with the
+        // branch's capacitance (< 0: unknown, the voltage error counts in full).
+        const std::function<void(const std::function<void(double, const std::array<double, 3>&, double)>&)>& extra = nullptr) const
     {
         LTEResult result{};
         result.maxLTE = 0.0;
@@ -82,6 +84,7 @@ public:
         result.worstElementIndex = -1;
         result.worstIsCapacitor = true;
         result.requiresRejection = false;
+        result.deviceRejects = false;
         result.safetyFactor = 1.0;
 
         if (dt <= 0.0) return result;
@@ -173,8 +176,16 @@ public:
             });
         }
         if (extra)
-            extra([&](double y0, const std::array<double, 3>& hist) {
-                const double lte_v = lteOf(y0, hist);
+            extra([&](double y0, const std::array<double, 3>& hist, double cap) {
+                // ngspice truncates on charge with a floor (CHGTOL): a branch whose charge error at the
+                // voltage tolerance stays under it cannot limit the step. A comparator's fF junction
+                // capacitances, switching volts in a step, otherwise rejected it down to femtoseconds.
+                // ponytail: a voltage LTE scaled by the branch's charge sensitivity, not ngspice's CKTterr
+                // (divided differences of the charge against max(volttol, chargetol)); .options chgtol is
+                // not read. A direct CKTterr port is on mac/conv-cktterr: it moved the diode snap-off and
+                // MOS1 edges (qa_d_rev_rec, qa3_*), needing ngspice's order and breakpoint control as well.
+                const double lte_v = lteOf(y0, hist) * (cap >= 0.0 ? std::min(1.0, cap * trtol_ * tolerance_ / CHGTOL) : 1.0);
+                result.deviceRejects |= cap >= 0.0 && lte_v > trtol_ * tolerance_;
                 if (lte_v > result.maxLTE) {
                     result.maxLTE = lte_v;
                     result.worstElementIndex = -1;
@@ -242,6 +253,7 @@ public:
     double getTolerance() const { return tolerance_; }
 
 private:
+    static constexpr double CHGTOL = 1e-14;  // C
     double tolerance_;     // absolute LTE tolerance (default 1e-4)
     double trtol_;         // SPICE TRTOL multiplier (default 7.0)
 

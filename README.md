@@ -75,7 +75,7 @@ honest expected scaling, not a claim of beating it.
 
 | Area | Supported |
 |---|---|
-| Analyses | `.op`, `.dc` sweeps, `.tran` (trapezoidal, LTE step control, breakpoints, `uic` / `.ic`), `.ac`, `.noise` |
+| Analyses | `.op`, `.dc` sweeps, `.tran` (trapezoidal, LTE step control, breakpoints, `uic` / `.ic`), `.ac`, `.noise`, `.pz` (poles/zeros, dense, up to 500 unknowns), `.sens` (DC adjoint sensitivity to top-level R, V and I values; device parameters and AC `.sens` are reported as not supported) |
 | Elements | R, C, L, K (mutual inductance), V/I sources (DC, PULSE, SIN, AC), E/F/G/H controlled sources, J (Shichman–Hodges), X subcircuits (nested, local node scoping) |
 | Diode | SPICE level 1: IS, N, RS (internal node), CJO/VJ/M/FC, TT, BV/IBV breakdown, instance AREA/M |
 | BJT | Gummel–Poon: IS, BF/BR, NF/NR, VAF/VAR, IKF/IKR, ISE/NE, ISC/NC, RB/RC/RE (internal nodes), CJE/CJC with XCJC, CJS (substrate node), TF/XTF/VTF/ITF, TR, AREA |
@@ -239,6 +239,21 @@ python3 bench/klu_bench.py                 # solver vs SuiteSparse KLU (needs KL
 build/acutesim_engine_dump <netlist> cpu tran <step> <stop>   # machine-readable waveforms
 ```
 
+### Command line
+
+```bash
+build/treespice circuit.cir                   # runs the netlist's .op/.dc/.ac/.tran/.noise/.pz/.sens cards, prints the .print tables
+build/treespice -b -o run.log -r out.raw circuit.cir   # batch, log to a file, ngspice raw file (--ascii for text)
+build/treespice --tran 1n 10u circuit.cir     # override the analysis; numbers take SI suffixes
+build/treespice --help
+cmake --install build --prefix ~/treespice    # bin/treespice, lib/libacutesim_engine.a, include/treespice/engine_api/
+python3 tests/cli_check.py                    # .print tables and raw files against ngspice
+```
+
+`.print`, `.save` and `.probe` take v(a), v(a,b), i(v1) (a V, L, E, H or B-voltage source), expressions over them
+(`v(a)*2`), and for `.ac` vdb(), vm(), vp(), vr(), vi(), db(), mag(), ph(), real(), imag(). Device currents
+(`i(r1)`, `@m1[id]`) are an explicit error. Subcircuit nodes and sources are named as in ngspice (`x1.n1`, `v.x1.v1`).
+
 `datasets/` is git-ignored. See `ENGINE_HANDOFF.md` for where to download the Xyce and IBM sets.
 
 ### Using TreeSPICE from another project
@@ -259,7 +274,7 @@ physics/       stateless device models, MNA stamps, KCL audit
 tensors/       structure-of-arrays storage of the linear elements; device-model resolvers
 solvers/       DC / transient / AC / noise, LTE control, analysis registry
 infrastructure/  scheduling, tracing, Monte Carlo
-cli/           acutesim_engine_cli, acutesim_engine_dump (machine-readable waveforms)
+cli/           treespice (the command-line simulator), acutesim_engine_dump (machine-readable waveforms)
 tests/         C++ suites, ngspice / Xyce / IBM power-grid differential harnesses
 engine_impl.*  session API (.op/.dc/.tran/.ac/.noise)
 ```

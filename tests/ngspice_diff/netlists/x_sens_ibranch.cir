@@ -1,0 +1,9 @@
+* .sens: sensitivity of a branch current i(v1) and of a differential output
+V1 1 0 DC 3
+V2 5 0 DC -2
+R1 1 2 1k
+R2 2 0 2k
+R3 2 5 3k
+R4 1 5 10k
+.sens i(v1)
+.end

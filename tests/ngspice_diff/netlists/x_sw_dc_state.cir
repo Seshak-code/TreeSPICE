@@ -1,0 +1,14 @@
+Switch DC: OFF/ON initial state decides inside the hysteresis window, control outside it wins
+V1 1 0 5
+R1 1 2 1k
+S1 2 0 c1 0 SM
+R2 1 3 1k
+S2 3 0 c2 0 SM ON
+R3 1 4 1k
+S3 4 0 c3 0 SM OFF
+Vc1 c1 0 1.0
+Vc2 c2 0 1.0
+Vc3 c3 0 2.0
+.model SM SW(VT=1 VH=0.5 RON=10 ROFF=1meg)
+.op
+.end

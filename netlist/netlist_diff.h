@@ -143,29 +143,6 @@ public:
             [](const JFET& j) { return std::vector<int>{j.drain, j.gate, j.source}; }
         );
 
-        diffByInstanceName<SchottkyDiode>(oldBlock.schottkyDiodes, newBlock.schottkyDiodes, "SchottkyDiode", report,
-            [](const SchottkyDiode& a, const SchottkyDiode& b) {
-                std::string details;
-                if (std::abs(a.saturationCurrent_I_S_A - b.saturationCurrent_I_S_A) > 1e-15)
-                    details += "Is: " + std::to_string(a.saturationCurrent_I_S_A) + " -> " + std::to_string(b.saturationCurrent_I_S_A) + "; ";
-                if (a.modelName != b.modelName) details += "model: " + a.modelName + " -> " + b.modelName + "; ";
-                return details;
-            },
-            [](const SchottkyDiode& d) { return std::vector<int>{d.anode, d.cathode}; }
-        );
-
-        diffByInstanceName<ZenerDiode>(oldBlock.zenerDiodes, newBlock.zenerDiodes, "ZenerDiode", report,
-            [](const ZenerDiode& a, const ZenerDiode& b) {
-                std::string details;
-                if (std::abs(a.breakdownVoltage_V - b.breakdownVoltage_V) > 1e-6)
-                    details += "Vz: " + std::to_string(a.breakdownVoltage_V) + " -> " + std::to_string(b.breakdownVoltage_V) + "; ";
-                if (std::abs(a.seriesResistance_Rs_ohms - b.seriesResistance_Rs_ohms) > 1e-6)
-                    details += "Rz: " + std::to_string(a.seriesResistance_Rs_ohms) + " -> " + std::to_string(b.seriesResistance_Rs_ohms) + "; ";
-                return details;
-            },
-            [](const ZenerDiode& d) { return std::vector<int>{d.anode, d.cathode}; }
-        );
-
         diffByInstanceName<OsdiDevice>(oldBlock.osdiDevices, newBlock.osdiDevices, "OSDI", report,
             [](const OsdiDevice& a, const OsdiDevice& b) {
                 std::string details;
@@ -315,7 +292,7 @@ private:
     }
 
     // ========================================================================
-    // Diff by .instanceName field (MOSFET, BJT, JFET, SchottkyDiode, ZenerDiode)
+    // Diff by .instanceName field (MOSFET, BJT, JFET)
     // Uses N-terminal node extraction (std::vector<int>).
     // ========================================================================
     template<typename T, typename ParamCheckFunc, typename NodeExtractFunc>

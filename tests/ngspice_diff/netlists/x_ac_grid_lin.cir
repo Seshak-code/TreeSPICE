@@ -1,0 +1,6 @@
+.ac lin 2: ngspice gives only the first frequency
+V1 in 0 DC 0 AC 1
+R1 in out 1k
+C1 out 0 100n
+.ac lin 2 100 5k
+.end

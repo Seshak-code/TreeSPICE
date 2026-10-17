@@ -1,0 +1,9 @@
+* nested .dc with a TEMP outer sweep: branch currents on every point, one raw plot of all points
+V1 a 0 0
+R1 a out 1k TC1=1m
+R2 out 0 2k
+D1 out 0 DM
+.model DM D(IS=1e-14)
+.dc V1 0 2 1 TEMP 0 50 25
+.print dc v(out) i(v1)
+.end

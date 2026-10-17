@@ -1,0 +1,7 @@
+Diode sidewall charge in a transient (pulse into a diode through a resistor)
+V1 1 0 PULSE(-2 1 1n 1n 1n 20n 50n)
+R1 1 a 500
+D1 a 0 DC1 PJ=1m
+.model DC1 D(IS=1e-14 CJO=1p CJSW=4p MJSW=0.4 TT=0.5n JSW=1e-12)
+.tran 0.2n 100n
+.end

@@ -1,0 +1,14 @@
+Switch in .ac: ngspice stamps ROFF for every switch in the small-signal matrix, whatever the OP state
+V1 1 0 DC 1 AC 1
+R1 1 2 1k
+S1 2 0 c 0 SM
+S2 2 3 c 0 SM
+R2 3 0 1k
+C1 3 0 1n
+Vc c 0 DC 1
+Vd d 0 DC 5
+S3 d e c d SM
+R3 e 0 100
+.model SM SW(VT=0.5 VH=0.1 RON=50 ROFF=1meg)
+.ac dec 3 1k 1meg
+.end

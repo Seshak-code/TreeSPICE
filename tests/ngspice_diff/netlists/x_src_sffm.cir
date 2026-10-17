@@ -1,0 +1,10 @@
+SFFM source: index below the deviation limit, and above it (ngspice limits MDI to FC/FS)
+V1 1 0 SFFM(0.5 2 1meg 5 100k)
+R1 1 2 1k
+C1 2 0 0.2n
+V2 3 0 SFFM(0 1 100k 4 200k)
+R2 3 0 1k
+I1 0 4 SFFM(1m 0.5m 500k 2 50k)
+R3 4 0 1k
+.tran 10n 20u
+.end

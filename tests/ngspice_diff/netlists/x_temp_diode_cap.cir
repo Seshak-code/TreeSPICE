@@ -1,0 +1,8 @@
+* Diode junction capacitance and transit time over temperature (VJ, CJO, M with TM1, TT with TTT1), transient at 100 C
+V1 in 0 PULSE(0 2 1u 1n 1n 5u 10u)
+R1 in a 1k
+D1 a 0 DM
+.model DM D(IS=1e-14 CJO=2p VJ=0.7 M=0.4 TM1=0.001 TT=2n TTT1=0.002 FC=0.5 RS=5)
+.temp 100
+.tran 0.1u 10u
+.end

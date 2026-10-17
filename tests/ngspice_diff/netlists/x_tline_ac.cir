@@ -1,0 +1,8 @@
+Lossless line AC sweep: 50 ohm line (F and NL form, 10 ns delay), mismatched ends
+V1 in 0 DC 0 AC 1
+R1 in a 25
+T1 a 0 b 0 Z0=50 F=25meg NL=0.25
+R2 b 0 200
+C2 b 0 2p
+.ac dec 20 1meg 1g
+.end

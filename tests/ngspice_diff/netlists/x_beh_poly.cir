@@ -1,0 +1,15 @@
+POLY(1) and POLY(2) for E and G
+V1 a 0 DC 0
+V2 b 0 DC 0.3
+R0 a 0 1k
+R00 b 0 1k
+E1 o1 0 POLY(1) a 0 0.1 2 3 4
+R1 o1 0 1k
+E2 o2 0 POLY(2) a 0 b 0 0 1 2 3 4 5 6 7 8 9 10
+R2 o2 0 1k
+G1 0 o3 POLY(2) a 0 b 0 1m 2m 3m
+R3 o3 0 1k
+E3 o4 0 POLY(3) a 0 b 0 a b 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20
+R4 o4 0 1k
+.dc V1 -0.5 0.5 0.1
+.end

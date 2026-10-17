@@ -1,0 +1,10 @@
+Solver options: reltol, abstol, vntol, itl1, itl2, gmin, trtol, rshunt, method=trap (diode divider, DC)
+V1 in 0 5
+R1 in a 1k
+D1 a b dm
+R2 b 0 2k
+R3 b c 1k
+.model dm D(is=1e-14)
+.options reltol=1e-4 abstol=1e-13 vntol=1e-7 itl1=150 itl2=60 gmin=1e-13 trtol=5 rshunt=1e9 method=trap chgtol=1e-14
+.op
+.end

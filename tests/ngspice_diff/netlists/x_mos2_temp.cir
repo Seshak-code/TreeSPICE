@@ -1,0 +1,9 @@
+* MOS level 2 temperature (-40 and 125 C): KP, PHI, VTO, junction saturation current with a forward body
+VDD d 0 DC 3
+VG g 0 DC 0
+VB b 0 DC 0
+M1 d g 0 b NM W=20u L=2u AD=40p AS=40p PD=24u PS=24u
+.model NM NMOS(LEVEL=2 VTO=0.8 KP=40u GAMMA=0.5 PHI=0.65 LAMBDA=0.03 TOX=50n NFS=1e11 NSUB=1e16 JS=1e-5 CJ=2e-4)
+.temp -40 125
+.dc VG 0 3 0.25 VB 0 0.5 0.25
+.end

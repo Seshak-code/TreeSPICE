@@ -1,0 +1,10 @@
+NJF switching transient: gate pulse, depletion charge of both junctions, RD/RS
+Vdd vdd 0 10
+Vg g 0 PULSE(-4 0 20n 5n 5n 100n 300n)
+Rd vdd d 2k
+Rgs g gi 200
+J1 d gi 0 JN
+Cl d 0 5p
+.model JN NJF(BETA=2e-3 VTO=-2 LAMBDA=0.01 CGS=6p CGD=3p PB=0.8 RS=5)
+.tran 1n 500n
+.end

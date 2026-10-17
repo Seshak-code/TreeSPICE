@@ -1,0 +1,12 @@
+MOS1 bulk junction saturation current density JS with AS/AD (separate drain and source currents)
+Vd d0 0 0.6
+Rd d0 d 1k
+Vs s0 0 0.3
+Rs s0 s 1k
+Vb b0 0 DC 0
+Rb b0 b 1k
+M1 d g s b NM W=10u L=1u AD=3e-11 AS=1e-11
+Vg g 0 0
+.model NM NMOS(VTO=0.7 KP=60u JS=1e-5 IS=1e-14)
+.dc Vb 0 0.9 0.05
+.end

@@ -74,6 +74,7 @@ public:
     // Where and how the last successful evaluate() ran (device bypass).
     std::vector<double> evalAt;
     uint32_t evalFlags = 0;
+    double gmin = 1e-12;  // $simparam gmin handed to the model (.options gmin, set per run by the solver)
 
 private:
     std::shared_ptr<Model> model_;

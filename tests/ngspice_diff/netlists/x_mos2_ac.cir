@@ -1,0 +1,11 @@
+* MOS level 2 AC: common-source amplifier, Meyer capacitances (TOX default), overlaps and junctions
+VDD 1 0 DC 5
+VIN 4 0 DC 0 AC 1
+C1 4 2 1u
+VB 5 0 DC 1.3
+RB 5 2 1meg
+RD 1 3 10k
+M1 3 2 0 0 NM W=20u L=2u AD=40p AS=40p PD=24u PS=24u
+.model NM NMOS(LEVEL=2 VTO=0.8 KP=40u GAMMA=0.5 PHI=0.65 LAMBDA=0.03 TOX=50n NSUB=1e16 CGSO=4e-10 CGDO=4e-10 CGBO=2e-10 CJ=3e-4 CJSW=5e-10)
+.ac dec 10 1k 10g
+.end

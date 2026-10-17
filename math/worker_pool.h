@@ -13,6 +13,9 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
 
 // Persistent workers for parallelFor, created on first use (spawning threads per
 // level was ~15 % of an hcircuit solve). One level runs at a time; a caller that
@@ -39,6 +42,11 @@ public:
 private:
     WorkerPool() {
         unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+#ifdef __APPLE__
+        // Apple Silicon: efficiency cores stall the level barrier; use the performance cores only
+        int perf = 0; size_t len = sizeof perf;
+        if (sysctlbyname("hw.perflevel0.physicalcpu", &perf, &len, nullptr, 0) == 0 && perf > 0) hw = (unsigned)perf;
+#endif
         if (const char* t = std::getenv("TREESPICE_THREADS"))  // e.g. 1 to compare with serial solvers
             hw = (unsigned)std::max(1, std::atoi(t));
         for (unsigned t = 1; t < hw; ++t) threads_.emplace_back([this] { loop(); });

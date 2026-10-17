@@ -1,0 +1,23 @@
+* JFET temperature laws (ngspice jfettemp): VTOTC/BETATCE, TCV/BEX, IS with N/XTI/EG (forward gate), PJF, TNOM
+.temp -40 125
+VDD vdd 0 DC 5
+VG g 0 DC -0.5
+R1 vdd d1 1k
+J1 d1 g 0 ja
+R2 vdd d2 1k
+J2 d2 g 0 jb
+R3 vdd d3 1k
+RG3 vdd g3 47k
+J3 d3 g3 0 jc
+R4 0 d4 1k
+VGP gp vdd DC 0.5
+J4 d4 gp vdd jp
+R5 vdd d5 1k
+J5 d5 g 0 jt
+.model ja njf(vto=-2 beta=1e-3 lambda=0.01 vtotc=-2.5m betatce=-0.5)
+.model jb njf(vto=-2 beta=1e-3 lambda=0.01 tcv=2.5m bex=-1.5)
+.model jc njf(vto=-2 beta=1e-3 is=1e-14 n=2 xti=2 eg=1.2)
+.model jp pjf(vto=-2 beta=1e-3 vtotc=2.5m betatce=0.3)
+.model jt njf(vto=-2 beta=1e-3 tnom=50 tcv=2m bex=-1)
+.dc VDD 0 5 0.5
+.end

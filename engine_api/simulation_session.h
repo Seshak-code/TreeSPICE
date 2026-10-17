@@ -73,6 +73,16 @@ public:
         const compute::orchestration::SimulationRequestDTO&,
         const EngineCallbacks& = {}) = 0;
 
+    // .pz: poles and/or zeros of the netlist's .pz card at the DC operating point (extended.pz).
+    virtual compute::orchestration::SimulationResponseDTO runPoleZero(
+        const compute::orchestration::SimulationRequestDTO&,
+        const EngineCallbacks& = {}) = 0;
+
+    // .sens: DC sensitivity of the netlist's .sens output to every supported element value (extended.sens).
+    virtual compute::orchestration::SimulationResponseDTO runSens(
+        const compute::orchestration::SimulationRequestDTO&,
+        const EngineCallbacks& = {}) = 0;
+
     // Starts a transient at t = 0 (request.transient.stepSizeS = max step, uic) and
     // returns it for lockstep stepping; check error() for a failed start.
     virtual std::unique_ptr<TransientHandle> beginTransient(

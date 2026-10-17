@@ -1,0 +1,7 @@
+Diode sidewall capacitance CJSW*PJ with MJSW and PHP: .ac (reverse bias) and bottom CJO together
+V1 1 0 DC -3 AC 1
+R1 1 a 1k
+D1 a 0 DC1 PJ=2m
+.model DC1 D(IS=1e-14 CJO=2p VJ=0.7 M=0.4 CJSW=3p MJSW=0.35 PHP=0.8)
+.ac dec 3 1k 1g
+.end

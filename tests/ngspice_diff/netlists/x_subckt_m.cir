@@ -1,0 +1,28 @@
+m= on a subcircuit instance multiplies every device inside; nested instances and own m= are overridden
+V1 in 0 2
+X1 in o1 dev m=2
+X2 in o2 dev
+X3 in o3 outer m=3
+Rl1 o1 0 1k
+Rl2 o2 0 1k
+Rl3 o3 0 1k
+.subckt dev a b
+R1 a b 2k
+I1 0 b 100u
+D1 b 0 dm
+G1 0 b a 0 1m
+V9 b2 0 0
+F1 0 b V9 0.5
+R9 a b2 5k
+J1 b 0 0 jm
+M1 b a 0 0 nm w=10u l=1u
+.ends
+.subckt outer a b
+X1 a b dev
+R2 a b 1k m=7
+.ends
+.model dm D
+.model jm NJF(beta=1m vto=-1)
+.model nm NMOS(vto=1 kp=1e-4)
+.op
+.end

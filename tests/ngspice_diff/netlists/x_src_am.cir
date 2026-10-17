@@ -1,0 +1,8 @@
+AM source with and without a delay (ngspice order: VO VMO VMA FM FC [TD])
+V1 1 0 AM(2 1 0.5 20k 1meg 2u)
+R1 1 2 1k
+C1 2 0 0.1n
+I1 0 3 AM(1m 0.5 0.2 50k 500k)
+R2 3 0 1k
+.tran 50n 60u
+.end

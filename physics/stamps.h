@@ -51,54 +51,6 @@ inline void stampVoltageSourceAsNorton(int nodePos, int nodeNeg, double voltage,
     }
 }
 
-/**
- * Stamp Power Rail (PDN Model)
- * Models: V_ideal -> ESR -> Node -> C_decap -> GND
- * 
- * At Node:
- * 1. Conductance G_esr = 1/ESR to V_ideal
- * 2. Conductance G_cap = 2C/h to GND
- * 
- * Matrix[Node, Node] += G_esr + G_cap
- * RHS[Node] += V_ideal * G_esr + I_cap_eq
- */
-inline void stampPowerRail(int node, double V_nom, double V_ripple, double freq,
-                          double ESR, double C, double h, double time,
-                          double v_prev, double i_prev_cap,
-                          MatrixConstructor& matrixBuilder, std::vector<double>& rhsVector)
-{
-    if (node == 0) return; // Cannot drive Ground
-    
-    // 1. Calculate Source Voltage V(t)
-    double V_source = V_nom;
-    if (V_ripple > 1e-9) {
-        V_source += (V_ripple / 2.0) * std::sin(2.0 * M_PI * freq * time);
-    }
-    
-    // 2. Conductances
-    double G_esr = 1.0 / ESR;
-    double G_cap_eq = (h > 1e-15) ? (2.0 * C / h) : 0.0;
-    
-    // 3. Current Sources
-    // I_from_source = (V_source - V_node) * G_esr => Stamped as Isrc = V_source * G_esr (Norton)
-    double I_norton_src = V_source * G_esr;
-    
-    // I_cap_eq (Trapezoidal)
-    // i_cap(t) = G_cap_eq * (v_node - 0) + I_eq_hist
-    // I_eq_hist = -G_cap_eq * v_prev - i_prev_cap
-    // MNA: G * v = I_injected
-    // I_injected_from_cap_model = -I_eq_hist = G_cap_eq * v_prev + i_prev_cap
-    double I_cap_inj = 0.0;
-    if (h > 1e-15) {
-        I_cap_inj = G_cap_eq * v_prev + i_prev_cap;
-    }
-    
-    // 4. Stamp Matrix
-    matrixBuilder.add(node - 1, node - 1, G_esr + G_cap_eq);
-    
-    // 5. Stamp RHS
-    rhsVector[node - 1] += I_norton_src + I_cap_inj;
-}
 
 inline void stampCapacitorTrapezoidal(int nodeI, int nodeJ, double C, double h, 
                                        double v_prev, double i_prev, 

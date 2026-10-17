@@ -133,6 +133,7 @@ struct SolverStep
     std::vector<double> nodeVoltages;
     SolverStats stats;
     uint64_t topologyHash = 0;
+    std::vector<double> branchCurrents;  // V/L/E/H/B-voltage branches, CircuitSim::branchNames order
 };
 
 class SolverTrace 

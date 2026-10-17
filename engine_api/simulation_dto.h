@@ -102,7 +102,7 @@ struct SimulationSourceDTO {
 };
 
 struct TransientConfigDTO {
-    double stopTimeS = 1e-6;
+    double stopTimeS = 1e-6;   // 0 (either): the netlist's .tran
     double stepSizeS = 1e-9;
     double maxStepS  = 1e-8;
     bool   uic       = false;   // start from .ic / IC= values, skip the DC bias
@@ -115,11 +115,13 @@ struct ACConfigDTO {
     double fStop  = 0.0;
 };
 
+// .dc sweepVariable: a V/I source, a resistor, or TEMP (Celsius)
 struct DCConfigDTO {
     std::string sweepVariable;
     double start = 0.0;
     double stop  = 1.8;
     double step  = 0.1;
+    std::vector<DCConfigDTO> outer;  // slower sweeps, next-slowest first (.dc V1 .. V2 ..: V2 is outer)
 };
 
 struct MonteCarloVariationDTO {
@@ -137,6 +139,14 @@ struct MonteCarloConfigDTO {
     std::vector<MonteCarloVariationDTO> variations;
 };
 
+// One value of a .step card, applied on top of the netlist: kind 'P' a .param, 'T' the temperature (Celsius),
+// 'E' the value of a V/I source or resistor.
+struct StepValueDTO {
+    char        kind;
+    std::string name;   // upper case
+    double      value;
+};
+
 struct SimulationRequestDTO {
     JobID    jobId;
     SimulationSourceDTO source;
@@ -151,6 +161,7 @@ struct SimulationRequestDTO {
     MonteCarloConfigDTO mc;
     
     uint32_t mcSeed = 0; 
+    std::vector<StepValueDTO> stepValues;  // set by the session for one run of a .step list; empty: the netlist's own
     uint64_t topologyHash = 0;
     std::string sessionToken;
 };
@@ -183,20 +194,37 @@ struct NoiseResultDTO {
     double inoiseTotal = 0.0;
 };
 
+struct PoleZeroResultDTO {
+    std::vector<double> poleRe, poleIm;  // every pole (conjugate pairs listed both), ngspice's pole(k) = re,im
+    std::vector<double> zeroRe, zeroIm;
+};
+
+struct SensResultDTO {
+    std::vector<std::string> names;     // ngspice's vector names, lower case: "r1", "r1_m", "r1_scale", "v1", "i1", "i1_m"
+    std::vector<double> values;         // d(output)/d(parameter), same order
+    std::vector<std::string> unsupported;  // device groups whose parameters were not computed, e.g. "2 BJT(s)" (never reported as 0)
+};
+
 struct ExtendedAnalysisResultsDTO {
     bool hasTF = false;
     TFResultDTO tf;
     bool hasNoise = false;
     NoiseResultDTO noise;
+    bool hasSens = false;
+    SensResultDTO sens;
+    bool hasPZ = false;
+    PoleZeroResultDTO pz;
     bool hasFourier = false;
     FourierResultDTO fourier;
 };
 
 struct WaveformDataPoint {
-    double              timeS;            // time (tran), swept value (.dc), frequency (.ac)
+    double              timeS;            // time (tran), swept value (.dc, the innermost sweep), frequency (.ac)
     std::vector<double> nodeVoltages;     // real part for .ac
     std::vector<double> nodeVoltagesImag; // .ac only
-    std::vector<double> branchCurrents;
+    std::vector<double> branchCurrents;     // SimulationResponseDTO::branchNames order; real part for .ac
+    std::vector<double> branchCurrentsImag; // .ac only
+    std::vector<double> outer;            // values of the slower sweeps (SimulationResponseDTO::outerNames)
 };
 
 struct ConvergenceTelemetryDTO {
@@ -219,6 +247,23 @@ struct ConvergenceTelemetryDTO {
     bool converged = false;
 };
 
+// A netlist .print (kind 'p') or .save/.probe (kind 's') card; analysis "" applies to every analysis.
+struct OutputRequestDTO {
+    char kind = 'p';
+    std::string analysis;
+    std::vector<std::string> specs;  // as written: "v(a,b)*2", "vdb(out)", "i(v1)", "all"
+};
+
+// One .meas result. step indexes the parts of a nested .dc / .temp / .step run (0 when there is one).
+struct MeasureResultDTO {
+    std::string name;      // lower case
+    double      value = 0.0;
+    bool        ok = false;
+    std::string extra;     // ngspice's trailing " targ=... trig=..." / " from=... to=..." / " at=..."
+    std::string error;     // ngspice's failure text when !ok
+    int         step = 0;
+};
+
 struct SimulationResponseDTO {
     JobID       jobId;
     int32_t     runIndex = -1;  
@@ -230,12 +275,21 @@ struct SimulationResponseDTO {
     std::string errorMessage; // Proto compatibility
     std::string errorDetail;  // Backend consistency
     std::string solverProvenance;
+    std::string backend;  // what actually ran: "cpu", or "gpu (...)"; says why when gpu was asked for and not used
 
     double      solveTimeMs = 0.0;
     AnalysisTypeDTO analysisType = AnalysisTypeDTO::DC;
     PrecisionMode   precisionMode = PrecisionMode::Mixed;
 
     std::vector<WaveformDataPoint> waveformPoints;
+    // Column names, lower case as ngspice prints them: nodeNames[i] is nodeVoltages[i] ("" if unnamed);
+    // branchNames[i] is branchCurrents[i] (the current into the + terminal of v1, l1, e1, h1, b1).
+    std::vector<std::string> nodeNames, branchNames;
+    std::string scaleName;  // what WaveformDataPoint::timeS is: "time", "frequency", "v-sweep", "i-sweep", "" (.op)
+    std::vector<OutputRequestDTO> outputRequests;
+    std::vector<std::string> outerNames;  // what WaveformDataPoint::outer holds: outer .dc sources, TEMP
+    bool stepped = false;  // the last outerNames are .step values (one plot per step in a raw file)
+    std::vector<MeasureResultDTO> measures;
     std::vector<double> timeVector;
     std::unordered_map<int, std::vector<double>> nodeVoltages;
     ExtendedAnalysisResultsDTO extended;

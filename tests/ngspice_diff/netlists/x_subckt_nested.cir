@@ -1,0 +1,30 @@
+Nested .subckt definitions are scoped to their parent: same inner name in two parents, a global one, parent params and models
+V1 in 0 5
+X1 in o1 p1
+X2 o1 o2 p2 rv=3k
+X3 o2 o3 inner
+Rl o3 0 1k
+.subckt inner a b
+R1 a b 100
+.ends
+.subckt p1 a b
+.subckt inner a b
+R1 a b 1k
+.ends
+X2 a b inner
+X3 b 0 inner
+.ends
+.subckt p2 a b rv=2k
+.model dd D (is=1e-14)
+.subckt inner p q
+R1 p q {rv}
+D1 q 0 dd
+.subckt deep x y
+R1 x y 10
+.ends
+X9 q 0 deep
+.ends
+X5 a b inner
+.ends
+.op
+.end

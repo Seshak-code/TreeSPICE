@@ -1,0 +1,17 @@
+B sources: operators and functions
+V1 a 0 DC 0.7
+R0 a 0 1k
+B1 o1 0 V=-V(a)^2+2**3+(V(a)>0.5)+(V(a)<=0.5)*10
+R1 o1 0 1k
+B2 o2 0 V=!(V(a)>1) + (V(a)>0.1 && V(a)<0.9) + (V(a)<0.1 || V(a)>0.9)
+R2 o2 0 1k
+B3 o3 0 V=pwr(-2,3)+pow(2,0.5)+floor(-2.5)+ceil(-2.5)+sgn(-V(a))+nint(2.5)
+R3 o3 0 1k
+B4 o4 0 V=sin(1)+cos(1)+tan(0.5)+asin(0.5)+acos(0.5)+atan(1)+log10(100)+log(100)
+R4 o4 0 1k
+B5 o5 0 V=1k+2m+3u+4meg+5n+6p+temper+pi
+R5 o5 0 1k
+B6 o6 0 V=1e3*(V(a)>0.5 ? (V(a)>0.6 ? 1 : 2) : 3)
+R6 o6 0 1k
+.op
+.end

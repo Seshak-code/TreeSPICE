@@ -1,0 +1,17 @@
+MOS1 series resistance: RD/RS, RSH with NRD/NRS, M, in a subckt and at the top level
+Vdd vdd 0 3
+Vg g 0 1.8
+.subckt cs d g
+M1 d g 0 0 NM W=20u L=2u NRD=2 NRS=3 M=2
+.ends
+M2 d2 g 0 0 NR W=10u L=1u
+M3 d3 g s3 0 NM W=10u L=1u NRD=4
+R3 s3 0 100
+X1 d1 g cs
+Rd1 vdd d1 1k
+Rd2 vdd d2 1k
+Rd3 vdd d3 1k
+.model NM NMOS(VTO=0.7 KP=60u LAMBDA=0.02 RSH=25 )
+.model NR NMOS(VTO=0.6 KP=80u RD=40 RS=15 RSH=999)
+.dc Vg 0 3 0.25
+.end

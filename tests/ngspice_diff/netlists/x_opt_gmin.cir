@@ -1,0 +1,17 @@
+.options gmin reaches every junction model: a reverse diode and a reverse BJT junction leak gmin*V
+V1 in 0 5
+R1 in a 1k
+D1 0 a dm
+R2 in b 1k
+Q1 0 b 0 qm
+R3 in c 1k
+J1 c 0 0 jm
+M1 d 0 0 0 nm w=10u l=1u
+R4 in d 1k
+.model dm D(is=1e-14)
+.model qm NPN(is=1e-16)
+.model jm NJF(beta=1m vto=-1)
+.model nm NMOS(vto=1 kp=1e-4)
+.options gmin=1e-4
+.op
+.end

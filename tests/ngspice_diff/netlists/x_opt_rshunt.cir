@@ -1,0 +1,9 @@
+rshunt loads every node: a floating capacitor node is pulled to ground
+V1 in 0 2
+R1 in a 1k
+R2 a 0 1k
+C1 in f 1p
+C2 f 0 1p
+.options rshunt=1k
+.op
+.end

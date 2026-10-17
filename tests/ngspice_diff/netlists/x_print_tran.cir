@@ -1,0 +1,9 @@
+* .print / .save on .tran
+V1 a 0 PULSE(0 1 0 1u 1u 5u 20u)
+R1 a out 1k
+C1 out 0 1n
+R2 out 0 10k
+.tran 0.5u 10u
+.print tran v(out) i(v1) v(a,out)
+.save v(out) i(v1)
+.end

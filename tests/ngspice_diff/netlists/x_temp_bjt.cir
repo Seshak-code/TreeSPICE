@@ -1,0 +1,12 @@
+* BJT bias sweep at -40, 27 and 125 C: IS (EG, XTI), BF/BR (XTB), ISE/ISC, VAF, RB/RC/RE
+VCC 1 0 DC 5
+VB b0 0 DC 0
+RB b0 b 10k
+RC 1 c 1k
+Q1 c b e NPN1
+RE e 0 100
+.model NPN1 NPN(IS=2e-16 BF=120 BR=2 NF=1.01 NR=1.02 VAF=80 ISE=3e-15 NE=1.6 ISC=1e-14 NC=1.8 XTB=1.5 EG=1.15 XTI=3.1 RB=100 RC=5 RE=1)
+.options reltol=1e-6
+.temp -40 27 125
+.dc VB 0 3 0.25
+.end

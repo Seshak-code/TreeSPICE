@@ -1,0 +1,12 @@
+* branch currents i(V), i(L), i(E), i(H), i(B voltage) at the operating point
+V1 1 0 DC 5
+R1 1 2 1k
+L1 2 3 1m
+R2 3 0 2k
+E1 4 0 3 0 2
+R3 4 5 1k
+H1 5 0 V1 100
+B1 6 0 V=v(3)*0.5
+R4 6 0 500
+.op
+.end

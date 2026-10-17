@@ -1,0 +1,14 @@
+m= on a subcircuit: C multiplies, L divides (transient)
+V1 in 0 PULSE(0 1 1u 1n 1n 20u 50u)
+X1 in o1 rcl m=3
+X2 in o2 rcl
+R1 o1 0 10k
+R2 o2 0 10k
+.subckt rcl a b
+R1 a m 5k
+C1 m 0 1n
+L1 m b 100u
+C2 b 0 100p
+.ends
+.tran 20n 40u
+.end

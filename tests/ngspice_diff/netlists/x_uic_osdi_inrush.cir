@@ -1,0 +1,13 @@
+* UIC start with an OSDI device: i(vdd) must settle, not ring through trapezoidal history
+.osdi bsim4.osdi
+VDD 1 0 DC 1.2
+VIN 2 0 DC 0.6
+NP 3 2 1 1 pch
+NN 3 2 0 0 nch
+R1 3 4 5k
+C4 4 0 20f
+.ic v(3)=0.6 v(4)=0.3
+.model nch bsim4va type=1 w=1u l=100n
+.model pch bsim4va type=-1 w=2u l=100n
+.tran 10p 1n uic
+.end

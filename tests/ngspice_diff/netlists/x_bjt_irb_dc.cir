@@ -1,0 +1,10 @@
+BJT bias-dependent base resistance (RBM, IRB) and the NK roll-off exponent: base voltage vs base current
+Vc c 0 5
+Ib 0 b 10u
+Q1 c b 0 QM
+Q2 c b2 0 QN
+Ib2 0 b2 10u
+.model QM NPN(BF=100 IS=1e-15 RB=300 RBM=20 IRB=200u IKF=2m NK=0.7 VAF=60)
+.model QN NPN(BF=80 IS=2e-15 RB=200 RBM=50 IKF=1m)
+.dc Ib 10u 3m 100u
+.end

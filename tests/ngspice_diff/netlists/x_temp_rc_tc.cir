@@ -1,0 +1,10 @@
+* .temp list on a resistor divider: TC1/TC2, TC=a,b, the instance TEMP/DTEMP and .options tnom
+V1 in 0 5
+R1 in out 1k tc1=0.003 tc2=1e-6
+R2 out mid 2k tc=-0.001, 2e-6
+R3 mid 0 1.5k tc1=0.002 temp=60
+R4 out 0 5k dtemp=15 tc1=-0.004
+.options tnom=30
+.temp -40 27 125
+.op
+.end

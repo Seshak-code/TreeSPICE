@@ -1,0 +1,11 @@
+* BJT junction capacitances (CJE, CJC, CJS with VJ and M) and the gain at 125 C
+VCC 1 0 DC 10
+VIN in 0 DC 0 AC 1
+CIN in b 1u
+R1 1 b 100k
+RC 1 c 4.7k
+Q1 c b 0 0 NPN1
+.model NPN1 NPN(IS=1e-16 BF=150 VAF=60 CJE=1p VJE=0.8 MJE=0.4 CJC=0.5p VJC=0.6 MJC=0.35 CJS=2p VJS=0.5 MJS=0.3 TF=0.3n)
+.temp 125
+.ac dec 4 1k 1g
+.end

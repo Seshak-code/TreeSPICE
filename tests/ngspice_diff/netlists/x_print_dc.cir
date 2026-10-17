@@ -1,0 +1,9 @@
+* .print on a .dc sweep: v(a), v(a,b), i(v1)
+V1 a 0 0
+R1 a out 1k
+R2 out 0 2k
+D1 out 0 DM
+.model DM D(IS=1e-14)
+.dc V1 0 5 1
+.print dc v(out) v(a,out) i(v1)
+.end

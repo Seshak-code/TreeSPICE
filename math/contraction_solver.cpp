@@ -873,6 +873,6 @@ SolverResult solve(const Csr_matrix& A, const std::vector<double>& b, const Cont
 }  // namespace
 
 SolverResult solveContraction(const Csr_matrix& A, const std::vector<double>& b,
-                              const ContractionPlan& plan, int refineSteps, ContractionCache* cache) {
-    return solve(A, b, plan, refineSteps, cache, true);
+                              const ContractionPlan& plan, int refineSteps, ContractionCache* cache, bool gpu) {
+    return solve(A, b, plan, refineSteps, cache, gpu);
 }

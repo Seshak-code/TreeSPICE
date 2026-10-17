@@ -1,0 +1,9 @@
+* PMOS level 1 junction and gate capacitances over temperature, small signal at 85 C with TNOM = 50
+VDD 1 0 DC 3
+VIN g 0 DC 1.2 AC 1
+RL d 0 20k
+M1 d g 1 1 PM W=40u L=1u AD=100p AS=100p PD=40u PS=40u
+.model PM PMOS(VTO=-0.7 KP=25u GAMMA=0.4 PHI=0.7 LAMBDA=0.03 CJ=2e-4 CJSW=3e-10 MJ=0.5 MJSW=0.33 PB=0.8 CGSO=3e-10 CGDO=3e-10 TOX=2e-8 IS=1e-14)
+.options temp=85 tnom=50
+.ac dec 4 1k 1g
+.end

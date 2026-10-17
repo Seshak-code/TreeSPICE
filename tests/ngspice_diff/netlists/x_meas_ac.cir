@@ -1,0 +1,18 @@
+x_meas_ac: .meas over an .ac sweep (vdb/vm/vp/real parts)
+* meastol 0.01 1e-6
+V1 in 0 DC 0 AC 1
+R1 in out 1k
+C1 out 0 1u
+R2 out 0 3k
+.ac dec 20 1 100k
+.meas ac a1 FIND vdb(out) AT=100
+.meas ac a2 WHEN vdb(out)=-6.0206 FALL=1
+.meas ac a3 MAX vm(out)
+.meas ac a4 FIND vp(out) AT=159
+.meas ac a5 FIND vm(out) WHEN vdb(out)=-10 FALL=1
+.meas ac a6 MIN vdb(out) FROM=1000 TO=10000
+.meas ac a7 TRIG vdb(out) VAL=-3 FALL=1 TARG vdb(out) VAL=-20 FALL=1
+.meas ac a8 PARAM='a2/2'
+.meas ac bad WHEN vdb(out)=10
+.print ac vdb(out)
+.end

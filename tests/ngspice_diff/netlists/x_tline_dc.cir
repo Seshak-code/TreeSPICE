@@ -1,0 +1,10 @@
+Lossless line at DC is a short, two cascaded lines with a resistive tap
+V1 in 0 DC 3
+R1 in a 100
+T1 a 0 b 0 Z0=75 TD=1n
+R2 b c 50
+T2 c 0 d 0 Z0=50 TD=2n
+R3 d 0 100
+R4 b 0 1k
+.op
+.end

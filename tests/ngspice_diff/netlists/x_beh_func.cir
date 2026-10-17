@@ -1,0 +1,23 @@
+Functions: .func at top level and in a subckt, in .param, B, E, R and X parameters
+.func sq(x) {x*x}
+.func g(x,y) = {sq(x)+y}
+.func k() {3}
+.param p=g(2,1)
+V1 a 0 DC 0.7
+R0 a 0 1k
+B1 o1 0 V=sq(V(a))+g(V(a),1)+k()
+R1 o1 0 1k
+E1 o2 0 VALUE={g(V(a),p)}
+R2 o2 0 1k
+R3 o3 0 {sq(10)}
+V2 o3 0 DC 1
+.subckt amp in out gain=2
+.func lin(x) {gain*x}
+B1 out 0 V=lin(V(in))+sq(1)
+.ends
+X1 a o4 amp gain={g(1,1)}
+R4 o4 0 1k
+X2 a o5 amp
+R5 o5 0 1k
+.op
+.end

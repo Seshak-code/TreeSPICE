@@ -1,0 +1,18 @@
+NJF common-source stage: DC sweep through linear and saturation, B (doping tail), LAMBDA, RD/RS, AREA, gate junction forward and a PJF mirror
+Vdd vdd 0 15
+Vin in 0 -1
+Rd vdd d 2k
+J1 d in s JN AREA=2
+Rs s 0 200
+Vdd2 vdd2 0 -12
+Vin2 in2 0 1.2
+Rd2 vdd2 d2 3k
+J2 d2 in2 0 JP
+Vin3 in3 0 -0.5
+Rd3 vdd d3 5k
+J3 d3 in3 0 JB
+.model JN NJF(BETA=1.2e-3 VTO=-2.5 LAMBDA=0.02 RD=20 RS=10 IS=1e-14 B=1.4 PB=0.9)
+.model JP PJF(BETA=8e-4 VTO=-1.8 LAMBDA=0.01 RD=15)
+.model JB NJF(BETA=1e-3 VTO=-3 B=0.6 PB=1.2)
+.dc Vin -3 0.6 0.2
+.end

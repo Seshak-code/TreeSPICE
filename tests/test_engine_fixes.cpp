@@ -297,7 +297,28 @@ int main() {
         check(r.converged && r.waveformPoints.size() == 2 && near(r.waveformPoints[1].nodeVoltages[0], 2.0, 1e-6),
               "DCConfigDTO sweep of a current source: V(1) = 2 V at 1 mA");
         r = run(mode, "* nested\nV1 1 0 1\nV2 2 0 1\nR1 1 2 1k\n.dc V1 0 1 0.5 V2 0 1 0.5\n");
-        check(!r.converged && r.errorDetail.find("one source") != std::string::npos, "nested .dc is a parse error");
+        check(r.converged && r.waveformPoints.size() == 9 && r.outerNames.size() == 1 &&
+                  near(r.waveformPoints[4].timeS, 0.5, 1e-12) && near(r.waveformPoints[4].outer[0], 0.5, 1e-12) &&
+                  near(r.waveformPoints[8].timeS, 1.0, 1e-12) && near(r.waveformPoints[8].outer[0], 1.0, 1e-12),
+              "nested .dc: 3 x 3 points, the first source innermost");
+        {   // a corner temperature is the netlist's .temp; a .temp list is for .op/.dc only
+            const std::string ckt = "* corner\nV1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DM\n.model DM D(IS=1e-14 EG=1.11 XTI=3)\n";
+            auto eng = ISimulationEngine::create();
+            eng->setPrecisionMode(mode);
+            SimulationRequestDTO cr;
+            cr.source.payload = ckt;
+            cr.corner.temperature = 85.0;
+            EngineCallbacks ccb;
+            auto a = eng->createSession()->runDC(cr, ccb);
+            auto b = run(mode, ckt + ".temp 85\n");
+            check(a.converged && b.converged && near(a.waveformPoints[0].nodeVoltages[1], b.waveformPoints[0].nodeVoltages[1], 1e-12) &&
+                      !near(a.waveformPoints[0].nodeVoltages[1], run(mode, ckt).waveformPoints[0].nodeVoltages[1], 1e-3),
+                  "corner temperature 85 equals .temp 85");
+            cr.corner.temperature = 27.0;
+            cr.source.payload = ckt + ".temp 10 20\n";
+            auto t = eng->createSession()->runTransient(cr, ccb, nullptr);
+            check(!t.converged && t.errorDetail.find(".temp list") != std::string::npos, ".temp list with .tran is an error");
+        }
         r = run(mode, "* missing\nV1 1 0 1\nR1 1 0 1k\n.dc V9 0 1 0.5\n");
         check(!r.converged && r.errorDetail.find("not found") != std::string::npos, ".dc of an unknown source is an error");
     }
@@ -421,7 +442,6 @@ int main() {
             {"V1 1 0 DC 1\nR1 1 2 1k\nQ1 2 2 0 NM\n.model NM NMOS\n", "is NMOS, not a NPN/PNP model"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 NM W=10u\n.model NM NMOS\n", "expected 4 nodes"},
             // QA round 2 and the parameter front end
-            {"V1 1 0 DC 1\nR1 1 0 1k\n.options temp=50\n", "TEMP is not supported"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DM\n.model DM D\n.model DM D IS=1e-15\n", "defined twice"},
             {"V1 1 0 DC {nosuch*2}\nR1 1 0 1k\n", "unknown parameter NOSUCH"},
             {".param a={b+1} b={a}\nV1 1 0 DC {a}\nR1 1 0 1k\n", "depends on itself"},
@@ -488,7 +508,8 @@ int main() {
         for (const auto& [e, want] : std::vector<std::pair<const char*, double>>{
                  {"2**3**2", 64}, {"2^3^2", 64}, {"-2**2", -4}, {"2**-1", 0.5}, {"nint(2.5)", 2}, {"nint(-2.5)", -2},
                  {"nint(3.5)", 4}, {"pwr(-2,3)", 8}, {"pow(-2,3)", -8}, {"5mil", 5e-3}, {"sqr(3)", 9}, {"2<>3", 1},
-                 {"-7%3", -1}, {"0?2:0?4:5", 5}, {"log(100)", std::log(100.0)}, {"temper", 27}, {"atanh(0.5)", std::atanh(0.5)}})
+                 {"-7%3", -1}, {"0?2:0?4:5", 5}, {"log(100)", std::log(100.0)}, {"temper", 27}, {"atanh(0.5)", std::atanh(0.5)},
+                 {"limit(5,0,1)", 1}, {"limit(-5,0,1)", 0}, {"limit(5,2)", 5}})
             if (std::abs(numparam::eval(e, none) - want) > 1e-12 * std::abs(want)) { std::printf("    %s\n", e); ++bad; }
         for (const char* e : {"1/0", "ln(0)", "1e400", "sqrt(-1)", "10%0", "min(3,1,2)"}) {
             bool threw = false;
@@ -496,6 +517,40 @@ int main() {
             if (!threw) { std::printf("    %s accepted\n", e); ++bad; }
         }
         check(bad == 0, ".param expressions: ngspice associativity, rounding, pwr, mil, errors for non-finite results");
+    }
+
+    {   // Monte Carlo: samples differ, the same seed reproduces, the spread follows the distribution
+        auto mcRun = [](uint32_t seed, const char* dist, double sigma, double tol) {
+            auto engine = ISimulationEngine::create();
+            auto session = engine->createSession();
+            SimulationRequestDTO req;
+            req.source.payload = "mc\nV1 1 0 10\nR1 1 2 1k\nR2 2 0 1k\n.end\n";
+            MonteCarloConfigDTO mc;
+            mc.sampleCount = 400; mc.seed = seed;
+            mc.variations = {{"R1", "resistance", sigma, dist, 0.0, tol}};
+            std::vector<double> v;
+            for (const auto& p : session->runMonteCarlo(req, mc).waveformPoints) v.push_back(p.nodeVoltages[1]);
+            return v;
+        };
+        const auto a = mcRun(7, "Gaussian", 0.05, 0), b = mcRun(7, "Gaussian", 0.05, 0), c = mcRun(8, "Gaussian", 0.05, 0);
+        const auto u = mcRun(7, "Uniform", 0, 0.10);
+        double lo = 1e9, hi = -1e9, mean = 0;
+        for (double x : u) { lo = std::min(lo, x); hi = std::max(hi, x); mean += x / u.size(); }
+        check(a.size() == 400 && a != std::vector<double>(400, a[0]), "Monte Carlo samples are not all identical");
+        check(a == b && a != c, "Monte Carlo: same seed reproduces, another seed differs");
+        // V2 = 10*R2/(R1+R2), R1 = 1k*(1 +/- 10%) -> V2 in [4.762, 5.263]
+        check(lo >= 4.76 && hi <= 5.27 && hi - lo > 0.4 && near(mean, 5.0, 0.05), "Monte Carlo: uniform stays within tolerance and fills it");
+        {   // a .dc TEMP sweep re-parses the netlist per temperature: each point keeps the sample's variation
+            auto engine = ISimulationEngine::create();
+            auto session = engine->createSession();
+            SimulationRequestDTO req;
+            req.source.payload = "mc\nV1 1 0 10\nR1 1 2 1k\nR2 2 0 1k\n.dc TEMP 0 100 100\n.end\n";
+            req.mc.variations = {{"R1", "resistance", 0.05, "Gaussian", 0.0, 0.0}};
+            req.mcSeed = 3;
+            const auto w = session->runDC(req).waveformPoints;
+            check(w.size() == 2 && w[0].nodeVoltages[1] == w[1].nodeVoltages[1] && std::abs(w[0].nodeVoltages[1] - 5.0) > 1e-6,
+                  "Monte Carlo variation survives the .dc TEMP re-parse");
+        }
     }
 
     std::printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASSED", g_fail, g_fail == 1 ? "" : "s");

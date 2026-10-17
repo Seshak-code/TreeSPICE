@@ -41,8 +41,6 @@ constexpr double BETA_F_DEFAULT = 100.0;
 /** Default BJT reverse beta */
 constexpr double BETA_R_DEFAULT = 1.0;
 
-/** Default Schottky diode Is (higher than PN) */
-constexpr double IS_DEFAULT_SCHOTTKY = 200e-9; // Amperes
 
 // =============================================================================
 // SOLVER HEURISTICS
@@ -102,9 +100,9 @@ constexpr int MAX_NR_ITER = 50;
 /** Maximum PCG iterations */
 constexpr int MAX_PCG_ITER = 1000;
 
-/** ngspice GMIN: 1e-12 S in parallel with every PN junction (diode, BJT, zener),
+/** ngspice GMIN: 1e-12 S in parallel with every PN junction (diode, BJT),
  *  in the AoS models, every SoA kernel and both KCL audits. Never node-to-ground. */
-constexpr double JUNCTION_GMIN = 1e-12;
+constexpr double JUNCTION_GMIN = 1e-12;  // the default; a run's .options gmin travels in each device's parameters (.gmin)
 
 /** GMIN stepping stages */
 constexpr int GMIN_STEPS = 10;

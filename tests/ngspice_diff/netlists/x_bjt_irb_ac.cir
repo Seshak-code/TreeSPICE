@@ -1,0 +1,11 @@
+BJT RBM/IRB in .ac: the base resistance frozen at the operating point (a common-emitter with a base source)
+Vcc vcc 0 10
+Rc vcc c 2k
+Vin in 0 DC 0 AC 1
+Ib 0 b 150u
+Rs in b 100
+Q1 c b 0 QM
+Cl c 0 5p
+.model QM NPN(BF=120 IS=1e-15 RB=500 RBM=30 IRB=100u VAF=80 CJE=1p CJC=0.5p TF=0.2n)
+.ac dec 4 1k 1g
+.end

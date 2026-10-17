@@ -388,10 +388,14 @@ From `Roadmap.md` Phase 2, with pointers:
 - BJT: bias-dependent base resistance (IRB, RBM != RB), excess phase (PTF), flicker noise (KF), temperature
   coefficients away from TNOM: explicit errors or no effect. JFET AREA, EXP/PWL/SFFM/AM, T lines: explicit errors.
 - `.options`: only `gminsteps` and `scale` are read (`temp`/`tnom` are errors), the rest ignored; `.temp` is an
-  error (the circuit always runs at 27 C); `.print` ignored (output only). `m=` on a subcircuit instance is an
+  error (the circuit always runs at 27 C); `m=` on a subcircuit instance is an
   error (ngspice scales every device inside). Errors inside `.lib` files carry the `.lib` card's line.
 - Junction-cap shortcut and other simplifications are marked `ponytail:` in code (grep for it).
-- Engine CLI (`acutesim_engine_cli`) parses `.tran 10u` with `istringstream` (no SI suffixes).
+- `treespice` (cli/engine_cli_main.cpp): `.print`/`.save`/`.probe` select columns; `.plot` is still ignored. `.meas` (tran/dc/ac;
+  infrastructure/measure.cpp) prints `name = value` and fills `SimulationResponseDTO::measures`; the engine's transient
+  has no t=0 point, so FIND AT=0 fails. `.step` (param, temp, V/I/R; ngspice 47 has none) reruns the analysis per value
+  via `SimulationRequestDTO::stepValues`, one block/raw plot per step; model-parameter steps and `.step` with `.noise` are
+  errors. Device terminal currents (`i(r1)`, `@m1[id]`) are errors. Raw output of `.noise` and `.four` is not supported.
 
 ## 7. Gotchas learned the hard way
 

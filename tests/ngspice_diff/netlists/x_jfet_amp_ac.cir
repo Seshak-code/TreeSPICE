@@ -1,0 +1,16 @@
+NJF amplifier .ac: gm, gds and the gate depletion capacitances CGS/CGD with PB, FC and a drain load
+Vdd vdd 0 12
+Vin in 0 DC 0 AC 1
+Cc in g 1u
+Rg g 0 1meg
+Vb gb 0 -1.2
+Rb gb g 1meg
+Rd vdd d 3k
+J1 d g s JN
+Rs s 0 500
+Cs s 0 100u
+Cl d o 1u
+Rl o 0 10k
+.model JN NJF(BETA=1e-3 VTO=-3 LAMBDA=0.02 CGS=5p CGD=2p PB=0.7 FC=0.4 RD=30 RS=20)
+.ac dec 4 10 1g
+.end

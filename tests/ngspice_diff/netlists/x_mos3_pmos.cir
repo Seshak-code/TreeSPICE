@@ -1,0 +1,9 @@
+* MOS level 3 PMOS: Id-Vds in both orientations, gate sweep, body bias, NSUB-derived VTO
+VS s 0 DC 5
+VD d 0 DC 0
+VG g 0 DC 5
+VB b 0 DC 5
+M1 d g s b PM W=20u L=2u
+.model PM PMOS(LEVEL=3 KP=15u TOX=50n NSUB=1e16 THETA=0.1 ETA=0.3 KAPPA=0.25 XJ=0.2u NFS=5e10)
+.dc VD 5 -1 -0.25 VG 5 2 -1.5
+.end

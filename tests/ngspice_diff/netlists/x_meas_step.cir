@@ -1,0 +1,13 @@
+x_meas_step: .step param + .meas on a transient, one measure per step (tests/cli_check.py checks each step against ngspice)
+* meastol 0.01 3e-8
+V1 in 0 PULSE(0 1 1u 1u 1u 5u 20u)
+R1 in out {r}
+C1 out 0 1n
+.param r=1k
+.step param r list 1k 2k 4k
+.tran 0.1u 20u
+.meas tran trise TRIG v(in) VAL=0.5 RISE=1 TARG v(out) VAL=0.5 RISE=1
+.meas tran mx MAX v(out)
+.meas tran av AVG v(out) FROM=2u TO=10u
+.print tran v(out)
+.end

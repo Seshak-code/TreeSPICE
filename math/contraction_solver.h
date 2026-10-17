@@ -78,4 +78,4 @@ struct ContractionCache {
  *  unchanged subtrees from the previous solve of the same plan. */
 SolverResult solveContraction(const Csr_matrix& A, const std::vector<double>& b,
                               const ContractionPlan& plan, int refineSteps = 2,
-                              ContractionCache* cache = nullptr);
+                              ContractionCache* cache = nullptr, bool gpu = true);

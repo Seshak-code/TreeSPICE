@@ -21,12 +21,33 @@
 #include "physics/circuitsim.h"
 #include "physics/corner_config.h"
 #include "netlist/circuit.h"
+#include "netlist/spice_parser.h"
 
 namespace acutesim {
 namespace compute {
 namespace solvers {
 
 using namespace orchestration;
+
+// The netlist a corner runs on: the caller's, or, when the corner asks for another temperature than
+// it was parsed at, the request's source parsed at the corner's (the parser resolves every
+// temperature-dependent value). A .temp list is for .op/.dc only.
+// ponytail: 27 is the DTO's default, so a corner asking for 27 C cannot override a netlist .temp.
+static bool cornerNetlist(const SimulationRequestDTO& req, const TensorNetlist& netlist, TensorNetlist& out,
+                          SimulationResponseDTO& errOut) {
+    out = netlist;
+    errOut.success = false;
+    if (netlist.environment.temp_count > 1) { errOut.errorDetail = TEMP_LIST_ERR; return false; }
+    if (req.corner.temperature == 27.0 || req.corner.temperature + 273.15 == netlist.environment.ambient_temp_K) {
+        errOut.success = true;
+        return true;
+    }
+    SPICEParseResult p = SPICEParser().parse(req.source.payload, req.source.baseDir, req.corner.temperature);
+    if (!p.success) { errOut.errorDetail = "SPICE parse error: " + p.errorMessage; return false; }
+    out = std::move(p.netlist);
+    errOut.success = true;
+    return true;
+}
 
 // ── Helper: apply corner and run DC ─────────────────────────────────────────
 static bool applyCornerAndDC(
@@ -57,8 +78,9 @@ static SimulationResponseDTO tfHandler(
     const TensorNetlist& netlist,
     CircuitSim& sim)
 {
-    TensorNetlist runNetlist = netlist;  // deep copy — handler owns this
+    TensorNetlist runNetlist;  // handler owns this
     SimulationResponseDTO errOut;
+    if (!cornerNetlist(req, netlist, runNetlist, errOut)) return errOut;
     SolverStep dc;
     if (!applyCornerAndDC(sim, runNetlist, req, dc, errOut)) return errOut;
     errOut.topologyHash = req.topologyHash;
@@ -72,7 +94,8 @@ static SimulationResponseDTO fourierHandler(
     CircuitSim& sim)
 {
     // Fourier requires a transient waveform — run transient first.
-    TensorNetlist runNetlist = netlist;
+    TensorNetlist runNetlist;
+    if (SimulationResponseDTO bad; !cornerNetlist(req, netlist, runNetlist, bad)) return bad;
     acutesim::physics::CornerConfig corner;
     corner.name           = req.corner.processCorner;
     corner.temperatureC   = req.corner.temperature;

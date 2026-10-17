@@ -1,0 +1,8 @@
+Relaxation oscillator: a switch across C with 1 V of hysteresis around 2 V (S, SW model)
+V1 1 0 5
+R1 1 2 10k
+C1 2 0 10n
+S1 2 0 2 0 SMOD
+.model SMOD SW(VT=2 VH=1 RON=200 ROFF=1e9)
+.tran 1u 140u uic
+.end

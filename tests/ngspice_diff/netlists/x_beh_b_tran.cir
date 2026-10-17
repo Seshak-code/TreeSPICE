@@ -1,0 +1,12 @@
+B sources: time and a nonlinear function in transient
+V1 a 0 SIN(0 1 1k)
+R0 a 0 1k
+B1 o1 0 V=0.5*sin(2*3.14159265358979*2k*time)+V(a)*V(a)
+R1 o1 x 1k
+C1 x 0 100n
+B2 o2 0 I=-1m*(time>0.2m ? 1 : 0)
+R2 o2 0 1k
+B3 o3 0 V=tanh(3*V(a))*(1+time*1k)
+R3 o3 0 10k
+.tran 10u 2m
+.end

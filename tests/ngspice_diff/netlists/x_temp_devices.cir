@@ -1,0 +1,19 @@
+New model parameters at .temp 70: R model TC with TNOM, diode sidewall JSW/CJSW, MOS1 JS and NSUB, BJT IRB/RBM
+.temp 70
+V1 1 0 DC 3
+R1 1 2 RM1 L=20u W=4u
+Dd 2 3 DS PJ=2m
+R2 3 0 1k
+Vg g 0 2
+Vd d0 0 2
+Rdd d0 d 100
+M1 d g 0 0 NM W=10u L=1u AD=2e-11 AS=2e-11
+Vc c 0 3
+Ib 0 b 50u
+Q1 c b 0 QM
+.model RM1 R(RSH=100 TC1=2e-3 TC2=1e-6 TNOM=20)
+.model DS D(IS=1e-14 JSW=1e-12 CJSW=1p)
+.model NM NMOS(KP=60u TOX=3e-8 NSUB=2e16 JS=1e-5)
+.model QM NPN(BF=100 IS=1e-15 RB=300 RBM=40 IRB=100u)
+.op
+.end

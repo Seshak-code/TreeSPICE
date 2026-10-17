@@ -1,0 +1,7 @@
+* Nested .dc with TEMP as the outer sweep: a BJT output curve at three temperatures
+VCE c 0 DC 0
+IB 0 b DC 20u
+Q1 c b 0 NPN1
+.model NPN1 NPN(IS=1e-16 BF=100 VAF=50 XTB=1.5)
+.dc VCE 0 5 0.5 TEMP -40 125 55
+.end

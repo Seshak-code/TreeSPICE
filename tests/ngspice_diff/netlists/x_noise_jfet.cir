@@ -1,0 +1,13 @@
+NJF noise: channel thermal 8kT gm/3, RD/RS thermal and flicker KF AF
+Vdd vdd 0 12
+Vin in 0 DC 0 AC 1
+Rg g 0 100k
+Vb gb 0 -1
+Rb gb g 100k
+Rin in g 10k
+Rd vdd d 3k
+J1 d g s JN
+Rs s 0 400
+.model JN NJF(BETA=1e-3 VTO=-3 LAMBDA=0.01 RD=40 RS=25 KF=1e-18 AF=1.2)
+.noise v(d) Vin dec 4 1 10meg
+.end

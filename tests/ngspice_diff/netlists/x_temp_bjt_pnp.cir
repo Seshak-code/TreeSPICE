@@ -1,0 +1,13 @@
+* PNP at 85 C with TNOM = 40: a card away from TNOM, the instance TEMP and DTEMP
+VCC 1 0 DC 5
+RB b 0 100k
+Q1 c b 1 PNP1
+Q2 c2 b 1 PNP1 temp=100
+Q3 c3 b 1 PNP1 dtemp=-30
+RC1 c 0 1k
+RC2 c2 0 1k
+RC3 c3 0 1k
+.model PNP1 PNP(IS=1e-15 BF=80 BR=3 XTB=1.2 TNOM=40 ISE=1e-14)
+.options temp=85
+.op
+.end

@@ -1,0 +1,7 @@
+B source as a half-wave rectifier diode, transient
+V1 in 0 SIN(0 5 1k)
+B1 in a I=1e-14*(exp(V(in,a)/0.026)-1)
+R1 a 0 1k
+C1 a 0 1u
+.tran 20u 2m
+.end

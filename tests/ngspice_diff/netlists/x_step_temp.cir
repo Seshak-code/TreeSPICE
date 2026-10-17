@@ -1,0 +1,9 @@
+x_step_temp: .step temp with a diode
+V1 in 0 DC 0.7
+R1 in out 100
+D1 out 0 DX
+.model DX D(IS=1e-14)
+.step temp 0 50 25
+.op
+.print op v(out)
+.end

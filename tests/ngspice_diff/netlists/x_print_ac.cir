@@ -1,0 +1,9 @@
+* .print on .ac: complex v(), vdb, vm, vp, vr, vi, db(), mag(), ph(), real(), imag(), i()
+V1 a 0 DC 0 AC 1
+R1 a out 1k
+C1 out 0 1u
+L1 out x 1m
+R2 x 0 10k
+.ac dec 2 100 10k
+.print ac v(out) vdb(out) vm(out) vp(out) vr(out) vi(out) db(v(out)) mag(v(out)) ph(v(out)) real(v(out)) imag(v(out)) i(v1) i(l1)
+.end

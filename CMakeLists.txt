@@ -21,6 +21,9 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# The one version string: treespice --version and EngineCapabilities::engineVersionString
+set(TREESPICE_VERSION "1.0-alpha")
+
 # ---------------------------------------------------------------------------
 # GPU (Phase 4): Dawn / WebGPU. OpenVLSI provides dawn_native when it builds the
 # engine as a subdirectory; standalone, -DTREESPICE_GPU=ON fetches the same Dawn
@@ -41,6 +44,15 @@ if(TREESPICE_STANDALONE AND TREESPICE_GPU AND NOT TARGET dawn_native)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w")  # Dawn / Tint / Abseil warnings
     FetchContent_MakeAvailable(dawn)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_SAVED}")
+    # Dawn's pinned Abseil lists "-Xarch_x86_64;-maes;-Xarch_x86_64;-msse4.1" on Apple without SHELL:,
+    # and CMake de-duplicates the repeated "-Xarch_x86_64", leaving a bare -msse4.1 that arm64 rejects.
+    foreach(t absl_random_internal_randen_hwaes absl_random_internal_randen_hwaes_impl)
+        if(APPLE AND TARGET ${t})
+            get_target_property(o ${t} COMPILE_OPTIONS)
+            string(REGEX REPLACE "(-Xarch_[a-z0-9_]+);([^;]+)" "SHELL:\\1 \\2" o "${o}")
+            set_property(TARGET ${t} PROPERTY COMPILE_OPTIONS "${o}")
+        endif()
+    endforeach()
     set(DAWN_INTERNAL_INCLUDES ${dawn_SOURCE_DIR} ${dawn_SOURCE_DIR}/src ${dawn_BINARY_DIR}/gen/src
         ${dawn_SOURCE_DIR}/third_party/abseil-cpp ${dawn_SOURCE_DIR}/third_party/partition_alloc)
 endif()
@@ -50,6 +62,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(acutesim_engine_objects OBJECT)
 target_compile_features(acutesim_engine_objects PUBLIC cxx_std_17)
+target_compile_definitions(acutesim_engine_objects PRIVATE TREESPICE_VERSION="${TREESPICE_VERSION}")
 
 # === HARDENING: Symbol Visibility Discipline ===
 target_compile_options(acutesim_engine_objects PRIVATE
@@ -60,16 +73,18 @@ target_compile_options(acutesim_engine_objects PRIVATE
 # No -ffast-math: it implies -ffinite-math-only, which deletes every
 # isnan/isfinite guard in the solver (NaN results were reported as converged),
 # and it breaks the project's cross-platform determinism rule (see CLAUDE.md).
-if(NOT EMSCRIPTEN)
-    target_compile_options(acutesim_engine_objects PRIVATE
-        -march=native     # Enables AVX-512 / NEON auto-detection at runtime
-    )
+# No FMA contraction either: a fused a*b+c rounds once instead of twice, so arm64 (where
+# clang contracts within expressions and GCC across them) and x86 gave different bits.
+# No -march=native: the binary must run, and give the same results, on any machine.
+# The engine and every later target (tests and tools compile header-only engine parts)
+if(MSVC)
+    set(TREESPICE_FP_FLAGS /fp:strict)
+else()
+    set(TREESPICE_FP_FLAGS -ffp-contract=off)
+    target_compile_options(acutesim_engine_objects PRIVATE -O3)
 endif()
-
-# Enable exceptions and RTTI for legacy solver logic
-set_target_properties(acutesim_engine_objects PROPERTIES
-    COMPILE_FLAGS "-O3 -march=native"
-)
+target_compile_options(acutesim_engine_objects PRIVATE ${TREESPICE_FP_FLAGS})
+add_compile_options(${TREESPICE_FP_FLAGS})
 
 target_compile_definitions(acutesim_engine_objects PRIVATE
     ACUTESIM_ENGINE_INTERNAL=1
@@ -90,7 +105,8 @@ target_include_directories(acutesim_engine_objects
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>              # "engine_api/x.h", "netlist/circuit.h"
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/engine_api>   # bare "simulation_dto.h"
-        $<INSTALL_INTERFACE:include>
+        $<INSTALL_INTERFACE:include/treespice>
+        $<INSTALL_INTERFACE:include/treespice/engine_api>
 )
 
 # ---------------------------------------------------------------------------
@@ -124,10 +140,13 @@ target_sources(acutesim_engine_objects PRIVATE
     # === Infrastructure ===
     ${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/postproc_engine.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/hardware_capabilities.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/output.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/measure.cpp
 
     # === Math ===
     ${CMAKE_CURRENT_SOURCE_DIR}/math/contraction_solver.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/math/gpu_front_lu.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/math/pole_zero.cpp
 
     # === Solvers ===
     ${CMAKE_CURRENT_SOURCE_DIR}/solvers/circuitsim_solver.cpp
@@ -168,8 +187,17 @@ endif()
 # ---------------------------------------------------------------------------
 # CLI — Engine Consumer
 # ---------------------------------------------------------------------------
-add_executable(acutesim_engine_cli cli/engine_cli_main.cpp)
-target_link_libraries(acutesim_engine_cli PRIVATE acutesim_engine)
+add_executable(treespice cli/engine_cli_main.cpp)
+target_link_libraries(treespice PRIVATE acutesim_engine)
+
+# cmake --install build --prefix X: bin/treespice, lib/libacutesim_engine.a, include/treespice/engine_api/*.h
+# (the static library carries every object, so the OBJECT target needs no install)
+if(TREESPICE_STANDALONE)
+    include(GNUInstallDirs)
+    install(TARGETS treespice RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(TARGETS acutesim_engine ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(DIRECTORY engine_api DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/treespice FILES_MATCHING PATTERN "*.h")
+endif()
 
 # ---------------------------------------------------------------------------
 # Waveform dump tool — machine-readable output for tests/ngspice_diff

@@ -1,0 +1,7 @@
+* .dc TEMP: a diode and a TC resistor over -40 to 125 C
+V1 1 0 DC 5
+R1 1 2 1k tc1=0.002
+D1 2 0 DM
+.model DM D(IS=1e-14 EG=1.11 XTI=3)
+.dc TEMP -40 125 15
+.end

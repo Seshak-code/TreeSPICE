@@ -1,0 +1,9 @@
+* MOS level 2 PMOS: Id-Vds family in forward and swapped orientation, gate sweep, body bias (PHI/GAMMA given, no NSUB)
+VS s 0 DC 5
+VD d 0 DC 0
+VG g 0 DC 5
+VB b 0 DC 5
+M1 d g s b PM W=20u L=2u
+.model PM PMOS(LEVEL=2 VTO=-0.9 KP=15u GAMMA=0.6 PHI=0.7 LAMBDA=0.04 TOX=50n UCRIT=3e4 UEXP=0.15 NFS=5e10)
+.dc VD 5 -1 -0.25 VG 5 2 -1.5
+.end

@@ -137,6 +137,8 @@ inline EmulatedF64 log(const EmulatedF64& x) { return EmulatedF64(std::log((doub
 inline EmulatedF64 pow(const EmulatedF64& b, const EmulatedF64& e) { return EmulatedF64(std::pow((double)b, (double)e)); }
 inline EmulatedF64 abs(const EmulatedF64& x) { return EmulatedF64(std::abs((double)x)); }
 inline EmulatedF64 sqrt(const EmulatedF64& x) { return EmulatedF64(std::sqrt((double)x)); }
+inline EmulatedF64 atan(const EmulatedF64& x) { return EmulatedF64(std::atan((double)x)); }  // MOS level 3 vmax
+inline EmulatedF64 cos(const EmulatedF64& x) { return EmulatedF64(std::cos((double)x)); }
 inline EmulatedF64 min(const EmulatedF64& a, const EmulatedF64& b) { return a < b ? a : b; }
 inline EmulatedF64 max(const EmulatedF64& a, const EmulatedF64& b) { return a > b ? a : b; }
 

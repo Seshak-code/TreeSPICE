@@ -1,0 +1,10 @@
+* MOS level 2 CMOS inverter, transient with a loading capacitor
+VDD 1 0 DC 5
+VIN 2 0 PULSE(0 5 2n 1n 1n 10n 25n)
+M1 3 2 0 0 NM W=10u L=2u AD=20p AS=20p PD=14u PS=14u
+M2 3 2 1 1 PM W=25u L=2u AD=50p AS=50p PD=29u PS=29u
+CL 3 0 1p
+.model NM NMOS(LEVEL=2 VTO=0.8 KP=40u GAMMA=0.5 PHI=0.65 LAMBDA=0.03 TOX=50n NSUB=1e16 CGSO=4e-10 CGDO=4e-10 CJ=2e-4 CJSW=3e-10)
+.model PM PMOS(LEVEL=2 VTO=-0.9 KP=15u GAMMA=0.6 PHI=0.7 LAMBDA=0.04 TOX=50n NSUB=2e16 CGSO=4e-10 CGDO=4e-10 CJ=2e-4 CJSW=3e-10)
+.tran 0.1n 40n
+.end

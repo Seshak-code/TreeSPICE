@@ -1,0 +1,6 @@
+.ac oct: steps of 2^(1/n) up to the last point <= fstop (no refit)
+V1 in 0 DC 0 AC 1
+R1 in out 1k
+C1 out 0 100n
+.ac oct 3 10 17k
+.end

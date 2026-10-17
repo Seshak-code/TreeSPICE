@@ -1,0 +1,10 @@
+* MOS level 2 with VTO, PHI and GAMMA from the doping (NSUB, NSS, TPG = 0 aluminium gate), TNOM 50 C, narrow-width DELTA, high VMAX
+VDD d 0 DC 3
+VG g 0 DC 0
+VB b 0 DC 0
+M1 d g 0 b NM W=5u L=2u
+M2 d g 0 b NP W=5u L=2u M=2
+.model NM NMOS(LEVEL=2 KP=40u TOX=50n NSUB=5e15 NSS=1e10 TNOM=50 DELTA=1 LAMBDA=0.02)
+.model NP NMOS(LEVEL=2 TOX=40n NSUB=1e17 TPG=-1 UO=400 NFS=2e11 VMAX=1e5 XJ=0.3u)
+.dc VG 0 3 0.25 VB 0 -1 -1
+.end

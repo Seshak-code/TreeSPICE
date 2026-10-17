@@ -1,0 +1,11 @@
+E and G VALUE in AC
+V1 a 0 DC 0.3 AC 1
+R0 a 0 1k
+E1 o1 0 VALUE={V(a)*V(a)*4}
+R1 o1 x 1k
+C1 x 0 1u
+G1 0 o2 VALUE={exp(V(a))*1m}
+R2 o2 0 1k
+C2 o2 0 1u
+.ac dec 5 10 100k
+.end

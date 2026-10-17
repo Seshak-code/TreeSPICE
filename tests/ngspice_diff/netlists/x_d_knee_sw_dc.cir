@@ -1,0 +1,16 @@
+Diode IKF/IKR knees, sidewall JSW with PJ and NS, AREA and M scaling: DC sweep
+V1 1 0 0
+R1 1 a 10
+D1 a 0 DK
+R2 1 b 10
+D2 b 0 DS PJ=3m
+R3 1 c 10
+D3 c 0 DKS AREA=2 PJ=1m M=2
+R4 1 d 10
+D4 d 0 DR
+.model DK D(IS=1e-12 N=1.2 IKF=2m RS=0)
+.model DS D(IS=1e-14 JSW=2e-11 NS=1.5)
+.model DKS D(IS=1e-13 IK=1m JSW=5e-12 CJO=1p CJSW=1p)
+.model DR D(IS=1e-6 IKR=5m)
+.dc V1 -2 1.2 0.1
+.end

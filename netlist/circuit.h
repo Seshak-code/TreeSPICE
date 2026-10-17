@@ -11,6 +11,7 @@
 #include <iostream>
 #include "../physics/physics_constants.h"
 #include "graph_canonical.h"
+#include "numparam.h"
 
 namespace osdi { class Model; class Instance; }
 
@@ -57,6 +58,14 @@ struct ModelCard {
  *   G[n1][n1] += 1/R, G[n2][n2] += 1/R
  *   G[n1][n2] -= 1/R, G[n2][n1] -= 1/R
  */
+inline constexpr const char* TEMP_LIST_ERR = "a .temp list is supported for .op/.dc only";
+
+// Instance temperature (ngspice TEMP in Celsius, DTEMP offset): TEMP wins, else DTEMP shifts the circuit's.
+struct InstTemp {
+    double temp = NAN, dtemp = 0.0;
+    double kelvin(double circuitK) const { return std::isnan(temp) ? circuitK + dtemp : temp + 273.15; }
+};
+
 struct Resistor {
     std::string name;             // e.g. "R1"
     int nodeTerminal1;            // First terminal (node index)
@@ -68,8 +77,14 @@ struct Resistor {
     double width_m = 0.0;
     double length_m = 0.0;
 
-    double tolerance_percent = 0.0; // Monte Carlo Tolerance (e.g. 1.0 = 1%)
     std::string expression;         // Symbolic override (e.g. "Rload", "2*Vbias/Iref")
+
+    double tc1 = 0.0, tc2 = 0.0;    // TC1, TC2: applied by the parser's resolve step, with inst
+    bool tc1Given = false, tc2Given = false;  // an instance TC overrides the model's
+    double m = 1.0;                 // M=: parallel copies (applied by the parser's model resolution)
+    double ac_ohms = NAN;           // AC=: the resistance .ac uses (NaN: resistance_ohms)
+    InstTemp inst;
+    double tcFactor = 1.0;          // resistance_ohms / nominal: .dc sweeps the nominal value
 };
 
 /*
@@ -80,6 +95,22 @@ struct Resistor {
  *   I_eq = G_eq * v_prev + i_prev
  * The capacitor is replaced by a conductance in parallel with a history current source.
  */
+/*
+ * Switch (S voltage-controlled, W current-controlled): a resistor of RON or ROFF with ngspice's
+ * hysteresis. The state is decided from the control value of the Newton iterate against the
+ * last accepted state (BlockState::swPrev): on above VT+VH, off below VT-VH, else unchanged.
+ */
+struct Switch {
+    std::string name;
+    int nodePos = 0, nodeNeg = 0;
+    int ctrlPos = 0, ctrlNeg = 0;   // S: control nodes
+    std::string ctrlName;           // W: the V source whose current controls it
+    int ctrlSource = -1;            // ... its index in the same block (resolveControlledSources)
+    std::string modelName;
+    double vt = 0.0, vh = 0.0, ron = 1.0, roff = 1e12;
+    bool init = false;              // ON: the state before the first decision
+};
+
 struct Capacitor {
     std::string name;             // e.g. "C1"
     int nodePlate1;               // Positive plate (node index)
@@ -91,12 +122,15 @@ struct Capacitor {
     double width_m = 0.0;
     double length_m = 0.0;
     double m = 1.0;               // Multiplier
-    
-    double tolerance_percent = 0.0;
+
     std::string expression;         // Symbolic override for capacitance
 
     bool   icGiven = false;           // IC= (initial voltage), used only with UIC
     double ic_V    = 0.0;
+
+    bool   tc1Given = false, tc2Given = false;  // instance TC1/TC2 override the model's
+    double tc1 = 0.0, tc2 = 0.0;
+    InstTemp inst;
 };
 
 /*
@@ -112,8 +146,6 @@ struct Inductor {
     int nodeCoil1;                // First coil terminal (node index)
     int nodeCoil2;                // Second coil terminal (node index)
     double inductance_henries;    // Inductance in Henries [H]
-    
-    double tolerance_percent = 0.0;
 
     // Generic PDK Support
     std::string model_name;       // e.g., "spiral_ind"
@@ -181,6 +213,9 @@ struct VoltageSource {
     std::vector<double> pwl_t, pwl_v;
     double pwl_td = 0.0, pwl_r = -1.0;  // r < 0: no repeat
 
+    // EXP v1 v2 td1 tau1 td2 tau2 | SFFM vo va fc mdi fs | AM vo vmo vma fm fc td (ngspice order)
+    std::vector<double> wf;
+
     std::string expression;  // Symbolic override for DC/main value
     std::string name;        // instance name (F/H cards reference it)
 };
@@ -218,6 +253,7 @@ struct CurrentSource {
 
     std::vector<double> pwl_t, pwl_v;
     double pwl_td = 0.0, pwl_r = -1.0;
+    std::vector<double> wf;  // EXP / SFFM / AM arguments, as VoltageSource::wf
 
     std::string expression;  // Symbolic override for DC/main value
 };
@@ -266,6 +302,22 @@ inline double waveformValue(const Src& s, double dcValue, double t) {
         if (tt < s.pulse_tf) return s.pulse_v2 + (s.pulse_v1 - s.pulse_v2) * (tt / s.pulse_tf);
         return s.pulse_v1;
     }
+    if (s.type == "EXP") {  // ngspice: the second rise starts at TD2, on top of the first
+        const auto& w = s.wf;
+        if (t <= w[2]) return w[0];
+        const double a = w[0] + (w[1] - w[0]) * (1.0 - std::exp(-(t - w[2]) / w[3]));
+        return t <= w[4] ? a : a + (w[0] - w[1]) * (1.0 - std::exp(-(t - w[4]) / w[5]));
+    }
+    if (s.type == "SFFM") {
+        const auto& w = s.wf;
+        const double kTwoPi = 6.283185307179586;
+        return w[0] + w[1] * std::sin(kTwoPi * w[2] * t + w[3] * std::sin(kTwoPi * w[4] * t));
+    }
+    if (s.type == "AM") {
+        const auto& w = s.wf;
+        const double kTwoPi = 6.283185307179586, tt = t - w[5];  // 0 (not VO) until TD, as ngspice
+        return tt <= 0.0 ? 0.0 : w[0] + std::sin(kTwoPi * w[4] * tt) * (w[1] + w[2] * std::sin(kTwoPi * w[3] * tt));
+    }
     if (s.type == "SINE") {
         const double kPi = 3.141592653589793;
         double phase = s.sine_phase * (kPi / 180.0);
@@ -286,6 +338,12 @@ template <class Src>
 inline double nextBreakpoint(const Src& s, double t) {
     const double inf = std::numeric_limits<double>::infinity();
     if (s.type == "SINE") return t < s.sine_td ? s.sine_td : inf;
+    if (s.type == "EXP") {  // the two rise starts
+        double b = inf;
+        for (double c : {s.wf[2], s.wf[4]}) if (c > t) b = std::min(b, c);
+        return b;
+    }
+    if (s.type == "AM") return t < s.wf[5] ? s.wf[5] : inf;
     if (s.type == "PWL") {  // the next corner, in absolute time
         const double tt = pwlLocalTime(s, t), shift = t - tt;
         const auto it = std::upper_bound(s.pwl_t.begin(), s.pwl_t.end(), tt);
@@ -321,6 +379,7 @@ struct VCVS {
     int ctrlPos, ctrlNeg;
     double gain;
     std::string role;
+    std::string name;          // instance name (i(name))
 };
 
 struct VCCS {
@@ -335,6 +394,7 @@ struct CCVS {
     int ctrlPos, ctrlNeg;      // unused by the solver (legacy sense-node fields)
     double rm;
     std::string role;
+    std::string name;          // instance name (i(name))
     int ctrlSource = -1;       // index of the controlling V source in the same block
     std::string ctrlName;      // its instance name (parser resolves ctrlSource from it)
 };
@@ -348,6 +408,24 @@ struct CCCS {
     std::string ctrlName;      // its instance name (parser resolves ctrlSource from it)
 };
 
+/*
+ * Behavioural source: B (V= / I=), E/G (VALUE, TABLE, POLY), F/H (POLY). The output (a voltage, which adds
+ * a branch current, or a current from + through the source to -) is expr over node voltages and branch
+ * currents; refs[k] binds expr->refs[k].
+ */
+struct Behavioural {
+    struct Ref {
+        int kind = 0;      // 0: V(a,b) over block-local nodes; I() of 1: V source a, 2: inductor a,
+        int a = 0, b = 0;  // 3: voltage behavioural source a (counted among the voltage ones)
+        std::string src;   // the source name I() gave, until the block is complete
+    };
+    std::string name;
+    int outPos = 0, outNeg = 0;
+    bool voltage = false;
+    std::shared_ptr<const acutesim::numparam::Expr> expr;
+    std::vector<Ref> refs;
+};
+
 // ============================================================================
 // SYSTEM SIMULATION SOURCES (Phase 2.9)
 // ============================================================================
@@ -357,21 +435,7 @@ struct CCCS {
  * Models a realistic power supply network (PDN).
  * Model: V_ideal -> [ESL] -> [ESR] -> Node_Chip -> [C_decap] -> GND
  */
-struct PowerRail {
-    std::string name;              // "Vdd", "Vcc", "Vio"
-    int nodeRail;                  // The chip-side node index
-    double nominal_V;              // 1.8V, 3.3V, 5V, 12V
-    double ripple_Vpp;             // Peak-to-peak ripple voltage
-    double frequency_Hz;           // Ripple frequency (e.g., 1MHz switching)
-    double ESR_ohms;               // Equivalent Series Resistance (package + regulator)
-    double ESL_henries;            // Equivalent Series Inductance (bond wires)
-    double capacitance_F;          // Decoupling capacitance (local)
-    
-    // Monte Carlo parameters
-    double tolerance_percent;      // ±5% for typical regulators
-    double temp_coefficient;       // Voltage drift with temperature [V/K]
-    
-};
+;
 
 /*
  * PDK Power Domain (Phase 1.3 Addition)
@@ -464,14 +528,19 @@ struct BusProbe {
  */
 struct SimulationEnvironment {
     double ambient_temp_K = 300.15;   // 27°C
+    int temp_count = 1;               // values in the netlist's .temp list: more than one is for .op/.dc only
     double temp_ramp_K_per_s = 0.0;   // For thermal cycling
     
     // Process Corners (Monte Carlo)
     enum Corner { TT, FF, SS, SF, FS } process = TT;
     double vdd_variation_sigma = 0.0; // σ for MC
     double global_voltage_scale = 1.0; // PVT Voltage Scale
-    int monte_carlo_seed = 0;          // Deterministic seed for MC runs
     bool gmin_stepping = true;         // .options gminsteps=0 (ngspice): DC goes straight to source stepping
+
+    // .options the solver honours (ngspice names and defaults). itl4 0: the engine's own transient limit (50).
+    double reltol = 1e-3, abstol = 1e-12, vntol = 1e-6, trtol = 7.0, gmin = 1e-12, rshunt = 0.0;
+    int itl1 = 100, itl2 = 50, itl4 = 0, maxord = 2;
+    bool gear = false;                 // .options method=gear
     
     // Noise Profile
     bool thermal_noise_enabled = false;
@@ -520,67 +589,14 @@ struct Diode {
     // parser with SPICE defaults; area = the instance AREA factor.
     struct Card {
         double rs = 0.0, cjo = 0.0, vj = 1.0, m = 0.5, fc = 0.5, tt = 0.0;
+        double jsw = 0.0, ns = 1.0, cjsw = 0.0, mjsw = 0.33, php = 1.0, ikf = 0.0, ikr = 0.0;  // sidewall, knees
+        double kf = 0.0, af = 1.0;                                                            // flicker noise
         double bv = 0.0, ibv = 1e-3;
         bool bvGiven = false;
     } card;
     double area = 1.0;
-};
-
-/*
- * Schottky Diode (D) - Metal-Semiconductor Junction
- * Lower forward voltage drop (~0.3V vs ~0.7V PN), faster switching.
- * SPICE Model: Same Shockley equation but different defaults:
- *   I_S = 100nA - 1µA (higher than PN)
- *   N = 1.05 (closer to ideal)
- *   Rs = Series resistance (significant for high current)
- *   Cj0 = Zero-bias junction capacitance
- *   Vj = Junction potential (~0.4V for Schottky)
- *   M = Grading coefficient (~0.5)
- */
-struct SchottkyDiode {
-    std::string instanceName;             // e.g., "D1"
-    int anode = -1;                       // Metal side (+)
-    int cathode = -1;                     // Semiconductor side (-)
-    std::string modelName = "BAT54";      // SPICE model reference
-    
-    // DC Parameters
-    double saturationCurrent_I_S_A = 200e-9;   // Higher than PN (~200nA typ)
-    double emissionCoefficient_N = 1.05;       // Closer to ideal
-    double seriesResistance_Rs_ohms = 1.0;     // Package/bond wire resistance
-    double thermalVoltage_V_T_V = PhysicsConstants::V_THERMAL_NOM;     // kT/q at 27 C
-    
-    // Junction Capacitance (AC/Transient)
-    double junctionCapacitance_Cj0_F = 2e-12;  // Zero-bias capacitance
-    double junctionPotential_Vj_V = 0.4;       // Lower than PN
-    double gradingCoefficient_M = 0.5;         // ~0.5 for abrupt junction
-    
-    double temperature_K = 300.15;
-};
-
-
-
-/*
- * Zener Diode (D) - Breakdown Diode
- * Operates in reverse breakdown region to regulate voltage.
- * Model:
- *   Forward: Standard PN junction
- *   Reverse: Breakdown at BV with impedance Rz
- */
-struct ZenerDiode {
-    std::string instanceName;             // e.g., "D1"
-    int anode = -1;                       // Anode (+)
-    int cathode = -1;                     // Cathode (-)
-    std::string modelName = "1N4733";     // default 5.1V
-    
-    // DC Parameters
-    double breakdownVoltage_V = 5.1;      // BV
-    double currentAtBreakdown_A = 0.049;  // Izt
-    double seriesResistance_Rs_ohms = 7.0; // Rz
-    double emissionCoefficient_N = 1.0;
-    double saturationCurrent_I_S_A = 1e-14;
-    double thermalVoltage_V_T_V = PhysicsConstants::V_THERMAL_NOM;
-    
-    double temperature_K = 300.15;
+    double pj = 0.0, mult = 1.0;  // PJ= (sidewall perimeter) and M= (the sidewall terms scale by M, not by AREA)
+    InstTemp inst;  // card and saturation current are held at the instance temperature (resolved by the parser)
 };
 
 struct Mosfet {
@@ -629,7 +645,15 @@ struct Mosfet {
         double cgso = 0.0, cgdo = 0.0, cgbo = 0.0;          // overlap [F/m]
         double cbd = 0.0, cbs = 0.0, cj = 0.0, cjsw = 0.0;  // bulk junctions [F, F/m^2, F/m]
         double mj = 0.5, mjsw = 0.33, pb = 0.8, fc = 0.5;
+        double js = 0.0;                                    // bulk junction saturation current density [A/m^2]
+        double kf = 0.0, af = 1.0;                          // flicker noise (AF is the frequency exponent in ngspice mos1noise)
+        double vt = PhysicsConstants::V_THERMAL_NOM;        // bulk junctions' kT/q at the instance temperature
+        // Levels 2 and 3 (0: level 1); vbi is tVbi, mu the surface mobility [m^2/Vs] the level's equations use
+        int level = 1;
+        double vbi = 0.0, mu = 0.0, nfs = 0.0, nsub = 0.0, xd = 0.0, xj = 0.0, delta = 0.0, wd = 0.0, xl = 0.0, xw = 0.0;
+        double ucrit = 1e4, uexp = 0.0, vmax = 0.0, neff = 1.0, eta = 0.0, theta = 0.0, kappa = 0.2, alpha = 0.0;
     } card;
+    InstTemp inst;  // card is held at the instance temperature (resolved by the parser)
 
     // Noise Parameters
     double KF = 0.0;     // Flicker noise coefficient
@@ -660,6 +684,8 @@ struct BJT {
         double nf = 1.0, nr = 1.0, vaf = 0.0, var = 0.0, ikf = 0.0, ikr = 0.0;
         double ise = 0.0, ne = 1.5, isc = 0.0, nc = 2.0;
         double rb = 0.0, rc = 0.0, re = 0.0;
+        double rbm = 0.0, irb = 0.0, nk = 0.5;                // RBM (= RB unless given), IRB, NK
+        double kf = 0.0, af = 1.0;                            // flicker noise
         double cje = 0.0, vje = 0.75, mje = 0.33, cjc = 0.0, vjc = 0.75, mjc = 0.33, xcjc = 1.0;
         double cjs = 0.0, vjs = 0.75, mjs = 0.0, fc = 0.5;
         double iss = 0.0, ns = 1.0;                        // substrate junction
@@ -667,6 +693,7 @@ struct BJT {
         double tf = 0.0, xtf = 0.0, vtf = 0.0, itf = 0.0, tr = 0.0;
     } card;
     double area = 1.0;
+    InstTemp inst;  // card, IS and betas are held at the instance temperature (resolved by the parser)
 
     double temperature_K = 300.15;
 };
@@ -703,13 +730,21 @@ struct JFET {
     int source = -1;                      // S terminal
     std::string modelName = "default";
     bool isNChannel = true;               // true=N-ch, false=P-ch
+    double m = 1.0;                       // parallel multiplier (scales beta)
     
     // Model Parameters
     double beta = 1e-4;                   // Transconductance parameter [A/V^2]
     double Vto = -2.0;                    // Pinch-off voltage [V] (negative for N-ch)
     double lambda = 0.01;                 // Channel-length modulation [1/V]
-    double thermalVoltage_V_T_V = PhysicsConstants::V_THERMAL_NOM; // For gate-source diode (optional)
-    
+    double thermalVoltage_V_T_V = PhysicsConstants::V_THERMAL_NOM; // gate junctions: Vt (N applied below)
+
+    // ngspice level 1 .model values beyond BETA/VTO/LAMBDA, resolved by the parser; area = AREA * M
+    // (scales BETA, IS, CGS, CGD; RD and RS become parser-added series resistors)
+    struct Card {
+        double is = 1e-14, n = 1.0, b = 1.0, cgs = 0.0, cgd = 0.0, pb = 1.0, fc = 0.5, kf = 0.0, af = 1.0;
+    } card;
+    double area = 1.0;
+
     double temperature_K = 300.15;
 };
 
@@ -728,6 +763,9 @@ struct TransmissionLine {
     int nodePort2Pos, nodePort2Neg;       // Port 2 terminals
     double characteristicImpedance_Z0_ohms; // Z_0 [Ω]
     double propagationDelay_Td_s;         // T_d [seconds]
+    std::string name;
+    bool icGiven = false;                 // IC=v1,i1,v2,i2 (with UIC): port voltages and currents into the line
+    double ic[4] = {0, 0, 0, 0};
 };
 
 /*
@@ -768,6 +806,7 @@ struct TensorBlock {
     
     // Passive Components
     std::vector<Resistor> resistors;
+    std::vector<Switch> switches;
     std::vector<Capacitor> capacitors;
     std::vector<Inductor> inductors;
     std::vector<MutualInductor> mutualInductors;
@@ -777,7 +816,6 @@ struct TensorBlock {
     std::vector<CurrentSource> currentSources;
 
     // System Simulation Sources (Phase 2.9)
-    std::vector<PowerRail> powerRails;
     std::vector<SignalSource> signalSources;
     
     // PDK Power Domains (Phase 1.3)
@@ -788,15 +826,14 @@ struct TensorBlock {
     std::vector<VCCS> voltageControlledCurrentSources;
     std::vector<CCVS> currentControlledVoltageSources;
     std::vector<CCCS> currentControlledCurrentSources;
+    std::vector<Behavioural> behavioural;
     
     // Semiconductors
     std::vector<Diode> diodes;
-    std::vector<SchottkyDiode> schottkyDiodes;
     std::vector<Mosfet> mosfets;
     std::vector<BJT> bjts;
     std::vector<JFET> jfets;
     std::vector<OsdiDevice> osdiDevices;
-    std::vector<ZenerDiode> zenerDiodes;
     
     // Interconnects
     std::vector<TransmissionLine> transmissionLines;
@@ -928,24 +965,6 @@ struct TensorBlock {
     }
     
     // System Simulation Helpers
-    void addPowerRail(const std::string& name, int node, double V, double ripple = 0.0) {
-        if (isFrozen) return;
-        PowerRail rail;
-        rail.name = name;
-        rail.nodeRail = node;
-        rail.nominal_V = V;
-        rail.ripple_Vpp = ripple;
-        // Defaults for simple model
-        rail.frequency_Hz = 1e6;
-        rail.ESR_ohms = 0.01;
-        rail.ESL_henries = 1e-9;
-        rail.capacitance_F = 100e-9;
-        rail.tolerance_percent = 5.0;
-        rail.temp_coefficient = 0.0;
-        
-        powerRails.push_back(rail);
-        updateNodeCount(node);
-    }
     
     void addSignalSource(const std::string& name, int nPos, int nNeg, 
                          SignalSource::WaveformType type, double amp, double freq) {
@@ -1041,41 +1060,9 @@ struct TensorBlock {
         jfets.push_back(newJfet);
         updateNodeCount(D); updateNodeCount(G); updateNodeCount(S);
     }
-    void addSchottkyDiode(const std::string& name, int anode, int cathode, 
-                          const std::string& model = "BAT54",
-                          double Is = 200e-9, double N = 1.05, double Rs = 1.0) {
+    void addTransmissionLine(int p1p, int p1n, int p2p, int p2n, double Z0, double Td, const std::string& name = "") {
         if (isFrozen) return;
-        
-        SchottkyDiode newD;
-        newD.instanceName = name;
-        newD.anode = anode;
-        newD.cathode = cathode;
-        newD.modelName = model;
-        newD.saturationCurrent_I_S_A = Is;
-        newD.emissionCoefficient_N = N;
-        newD.seriesResistance_Rs_ohms = Rs;
-        
-        schottkyDiodes.push_back(newD);
-        updateNodeCount(anode); updateNodeCount(cathode);
-    }
-    void addZenerDiode(const std::string& name, int anode, int cathode, 
-                       double Vz = 5.1, double Rz = 7.0, double Izt = 0.049) {
-        if (isFrozen) return;
-        
-        ZenerDiode newD;
-        newD.instanceName = name;
-        newD.anode = anode;
-        newD.cathode = cathode;
-        newD.breakdownVoltage_V = Vz;
-        newD.seriesResistance_Rs_ohms = Rz;
-        newD.currentAtBreakdown_A = Izt;
-        
-        zenerDiodes.push_back(newD);
-        updateNodeCount(anode); updateNodeCount(cathode);
-    }
-    void addTransmissionLine(int p1p, int p1n, int p2p, int p2n, double Z0, double Td) {
-        if (isFrozen) return;
-        transmissionLines.push_back({p1p, p1n, p2p, p2n, Z0, Td});
+        transmissionLines.push_back({p1p, p1n, p2p, p2n, Z0, Td, name});
         updateNodeCount(p1p); updateNodeCount(p1n); updateNodeCount(p2p); updateNodeCount(p2n);
     }
     void addProbe(const std::string& name, int nPos, int nNeg) {
@@ -1169,6 +1156,7 @@ struct BlockInstance {
     std::string blockName;                // Name of the TensorBlock template
     std::vector<int> nodeMapping;         // Maps local node index -> global node index
     std::map<std::string, double> parameters; // Instance-specific parameters (e.g. "W", "L")
+    std::string name;                     // hierarchical instance path (X1.X2), for branch-current names
 };
 
 // BlockState - Dynamic state for a block instance (Solving the Shared History Bug)
@@ -1195,8 +1183,12 @@ struct BlockState {
 
     std::vector<History> capacitorState;
     std::vector<History> inductorState;
-    std::vector<History> powerRailState;
-    std::vector<DeviceCharge> mosfetState, diodeState, bjtState;
+    std::vector<DeviceCharge> mosfetState, diodeState, bjtState, jfetState;
+    std::vector<char> swOn, swPrev;  // per Switch: the state the last stamp used / the last accepted one
+    // Lossless line: the outgoing waves w = v + Z0*i at both ports after every accepted step (t[0] = 0),
+    // read back TD later; breaks: where a kink in w reaches the far port (the transient lands on them)
+    struct LineHistory { std::vector<double> t, w1, w2; std::set<double> breaks; };
+    std::vector<LineHistory> lineState;
     std::vector<std::shared_ptr<osdi::Instance>> osdiState;  // per OsdiDevice (TensorNetlist::instantiateOsdi)
     std::vector<std::vector<BusProbe::DigitalSample>> busProbeState; 
     // Future: BJT OP, etc.
@@ -1209,14 +1201,16 @@ struct BlockState {
         inductorState.resize(block.inductors.size());
         for(auto& h : inductorState) h.resize(3);
 
-        powerRailState.resize(block.powerRails.size());
-        for(auto& h : powerRailState) h.resize(3);
-
+        swOn.resize(block.switches.size());
+        swPrev.resize(block.switches.size());
+        for (size_t i = 0; i < block.switches.size(); ++i) swOn[i] = swPrev[i] = block.switches[i].init;
         mosfetState.resize(block.mosfets.size());
         diodeState.resize(block.diodes.size());
         bjtState.resize(block.bjts.size());
+        jfetState.resize(block.jfets.size());
         osdiState.resize(block.osdiDevices.size());
         busProbeState.resize(block.busProbes.size());
+        lineState.resize(block.transmissionLines.size());
     }
 };
 
@@ -1253,6 +1247,12 @@ public:
     // node voltages with UIC
     std::vector<std::pair<int, double>> nodeICs;
 
+    // .nodeset V(node)=value: held at value through the first DC solve, then released
+    std::vector<std::pair<int, double>> nodeSets;
+
+    // Node names for messages: [i] = name of global node i, hierarchical for subcircuit internals ("x1.n"); "" if none
+    std::vector<std::string> nodeNames;
+
     void addModelCard(const ModelCard& card) {
         modelCards[card.name] = card;
     }
@@ -1272,7 +1272,7 @@ public:
         blockDefinitions[block.name] = block;
     }
     
-    void addInstance(const std::string& blockName, std::vector<int> nodeMap) {
+    void addInstance(const std::string& blockName, std::vector<int> nodeMap, const std::string& name = "") {
         // Sync numGlobalNodes with user-supplied mapping to avoid collisions
         for (int n : nodeMap) if (n > numGlobalNodes) numGlobalNodes = n;
 
@@ -1303,7 +1303,7 @@ public:
              }
         }
         
-        instances.push_back({blockName, nodeMap});
+        instances.push_back({blockName, nodeMap, {}, name});
         
         // Initialize state for new instance
         BlockState newState;
@@ -1360,13 +1360,6 @@ public:
         if (nPos > numGlobalNodes) numGlobalNodes = nPos;
         if (nNeg > numGlobalNodes) numGlobalNodes = nNeg;
     }
-    void addPowerRail(const std::string& name, int node, double V, double ripple = 0.0) {
-        globalBlock.addPowerRail(name, node, V, ripple);
-        globalState.powerRailState.emplace_back();
-        globalState.powerRailState.back().resize(3);
-
-        if (node > numGlobalNodes) numGlobalNodes = node;
-    }
     void addSignalSource(const std::string& name, int nPos, int nNeg, 
                          SignalSource::WaveformType type, double amp, double freq) {
         globalBlock.addSignalSource(name, nPos, nNeg, type, amp, freq);
@@ -1382,13 +1375,6 @@ public:
     void addDiode(int anode, int cathode, double Is) {
         globalBlock.addDiode(anode, cathode, Is);
         globalState.diodeState.emplace_back();
-        if (anode > numGlobalNodes) numGlobalNodes = anode;
-        if (cathode > numGlobalNodes) numGlobalNodes = cathode;
-    }
-    void addSchottkyDiode(const std::string& name, int anode, int cathode,
-                          const std::string& model = "BAT54",
-                          double Is = 200e-9, double N = 1.05, double Rs = 1.0) {
-        globalBlock.addSchottkyDiode(name, anode, cathode, model, Is, N, Rs);
         if (anode > numGlobalNodes) numGlobalNodes = anode;
         if (cathode > numGlobalNodes) numGlobalNodes = cathode;
     }
@@ -1412,13 +1398,8 @@ public:
         globalBlock.addJFET(name, D, G, S, model, isNChannel, beta, Vto, lambda);
         numGlobalNodes = std::max({numGlobalNodes, D, G, S});
     }
-    void addZenerDiode(const std::string& name, int anode, int cathode, 
-                       double Vz = 5.1, double Rz = 7.0, double Izt = 0.049) {
-        globalBlock.addZenerDiode(name, anode, cathode, Vz, Rz, Izt);
-        numGlobalNodes = std::max({numGlobalNodes, anode, cathode});
-    }
-    void addTransmissionLine(int p1p, int p1n, int p2p, int p2n, double Z0, double Td) {
-        globalBlock.addTransmissionLine(p1p, p1n, p2p, p2n, Z0, Td);
+    void addTransmissionLine(int p1p, int p1n, int p2p, int p2n, double Z0, double Td, const std::string& name = "") {
+        globalBlock.addTransmissionLine(p1p, p1n, p2p, p2n, Z0, Td, name);
         numGlobalNodes = std::max({numGlobalNodes, p1p, p1n, p2p, p2n});
     }
     void addProbe(const std::string& name, int nPos, int nNeg) {

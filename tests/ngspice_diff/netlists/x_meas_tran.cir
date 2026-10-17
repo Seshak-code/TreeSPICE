@@ -1,0 +1,35 @@
+x_meas_tran: .meas TRIG/TARG, FIND/WHEN, AT, AVG/RMS/MIN/MAX/PP/INTEG with FROM/TO, PARAM, failures
+* meastol 0.01 3e-8
+V1 in 0 PULSE(0 1 1u 1u 1u 5u 20u)
+R1 in out 1k
+C1 out 0 1n
+V2 b 0 PWL(0 0.4 40u 0.4)
+R2 b 0 1k
+.tran 0.1u 40u
+.meas tran trise TRIG v(in) VAL=0.5 RISE=1 TARG v(out) VAL=0.5 RISE=1
+.meas tran tfall TRIG v(in) VAL=0.5 FALL=1 TARG v(out) VAL=0.5 FALL=1
+.meas tran t2 TRIG v(in) VAL=0.5 RISE=1 TARG v(out) VAL=0.5 RISE=2
+.meas tran tlast TRIG v(in) VAL=0.5 RISE=1 TARG v(out) VAL=0.5 CROSS=LAST
+.meas tran td1 TRIG v(in) VAL=0.5 RISE=1 TD=5u TARG v(out) VAL=0.5 RISE=1
+.meas tran tat TRIG AT=2u TARG v(out) VAL=0.5 FALL=1
+.meas tran av AVG v(out) FROM=2u TO=20u
+.meas tran rm RMS v(out) FROM=2u TO=20u
+.meas tran mx MAX v(out) FROM=2u TO=10u
+.meas tran mn MIN v(out) FROM=10u TO=20u
+.meas tran pp PP v(out) FROM=2u TO=20u
+.meas tran it INTEG v(out) FROM=2u TO=10u
+.meas tran f1 FIND v(out) AT=3u
+.meas tran f2 FIND v(out) WHEN v(in)=0.5 RISE=1
+.meas tran f3 FIND v(out) WHEN v(in)=0.5 CROSS=LAST
+.meas tran w1 WHEN v(out)=0.3 RISE=1
+.meas tran w2 WHEN v(out)=0.3 FALL=1
+.meas tran w3 WHEN v(out)=v(b) FALL=1
+.meas tran w5 WHEN v(out)=0.3 CROSS=LAST
+.meas tran p1 PARAM='trise*2+1e-6'
+.meas tran bad WHEN v(out)=5
+.meas tran bad2 FIND v(out) AT=100u
+.meas tran bad3 TRIG v(in) VAL=0.5 RISE=9 TARG v(out) VAL=0.5 RISE=1
+.meas tran bad4 WHEN v(out)=0.3 RISE=3
+.meas dc notrun MAX v(out)
+.print tran v(out)
+.end

@@ -1,0 +1,9 @@
+x_step_dc: .step param list + .dc (ngspice 47 has no .step: run_diff runs each value on its own)
+V1 in 0 DC 0
+R1 in out {r}
+R2 out 0 1k
+.param r=1k
+.step param r list 1k 2k 5k
+.dc V1 0 2 0.5
+.print dc v(out)
+.end

@@ -1,0 +1,12 @@
+* .sens: divider with a current source and a source-to-source node, v(out) sensitivity to R, V and I values
+V1 1 0 DC 5
+R1 1 2 1k
+R2 2 0 3k
+R3 2 3 2.2k
+R4 3 0 4.7k
+I1 0 3 DC 1m
+C1 3 0 1u
+L1 2 4 1m
+R5 4 0 10k
+.sens v(3)
+.end

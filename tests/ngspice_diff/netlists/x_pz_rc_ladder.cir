@@ -1,0 +1,10 @@
+* .pz: 3-stage RC ladder, voltage input (vol): 3 real poles, no zeros
+V1 1 0 DC 0 AC 1
+R1 1 2 1k
+C1 2 0 1u
+R2 2 3 2k
+C2 3 0 470n
+R3 3 4 4.7k
+C3 4 0 100n
+.pz 1 0 4 0 vol pz
+.end

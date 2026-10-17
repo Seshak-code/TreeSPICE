@@ -174,6 +174,17 @@ constexpr Dual<T> operator-(Dual<T> x) { return { -x.val, -x.grad }; }
     }
 
     template <typename T>
+    inline Dual<T> atan(const Dual<T>& x) {
+        return { std::atan(x.val), x.grad / (1 + x.val * x.val) };
+    }
+
+    template <typename T>
+    inline Dual<T> pow(const Dual<T>& x, T e) {
+        using std::pow;
+        return { pow(x.val, e), e * pow(x.val, e - 1) * x.grad };
+    }
+
+    template <typename T>
     inline Dual<T> sqrt(const Dual<T>& x) {
         // d/dx sqrt(u) = u' / (2*sqrt(u))
         T s = std::sqrt(x.val);

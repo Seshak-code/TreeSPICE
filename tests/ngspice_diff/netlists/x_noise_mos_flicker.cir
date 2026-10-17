@@ -1,0 +1,8 @@
+MOS1 flicker noise KF (AF has no effect in ngspice's mos1noise) with RD/RS thermal noise
+Vdd vdd 0 3
+RL vdd d 2k
+Vg g 0 DC 1.5 AC 1
+M1 d g 0 0 NM W=10u L=2u
+.model NM NMOS(VTO=0.7 KP=1e-4 TOX=1e-7 KF=1e-24 AF=1.5 RD=100 RS=50)
+.noise v(d) Vg dec 3 1 1meg
+.end

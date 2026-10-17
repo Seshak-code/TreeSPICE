@@ -1,0 +1,10 @@
+* branch currents in .ac: complex i(V1), i(L1), i(E1)
+V1 1 0 DC 1 AC 1
+R1 1 2 1k
+C1 2 0 1u
+L1 2 3 10m
+R2 3 0 100
+E1 4 0 2 0 3
+R3 4 0 1k
+.ac dec 3 10 100k
+.end

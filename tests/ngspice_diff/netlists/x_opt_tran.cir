@@ -1,0 +1,7 @@
+Solver options in a transient: method=trap maxord=1 (backward Euler), itl4, tight reltol
+V1 in 0 PULSE(0 1 1u 10n 10n 20u 50u)
+R1 in a 1k
+C1 a 0 1n
+.options method=trap itl4=20 reltol=1e-4 maxord=2
+.tran 50n 40u
+.end

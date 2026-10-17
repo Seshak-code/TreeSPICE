@@ -54,9 +54,8 @@ extern "C" void treespiceOsdiLog(void *handle, char *msg, uint32_t lvl) {
 // $simparam values the models may ask for (ngspice passes the same gmin).
 char kGmin[] = "gmin";
 char *kSimNames[] = {kGmin, nullptr};
-double kSimVals[] = {1e-12};
 char *kSimStrNames[] = {nullptr};
-SimParas simParas() { return SimParas{kSimNames, kSimVals, kSimStrNames, nullptr}; }
+SimParas simParas(double *gmin) { return SimParas{kSimNames, gmin, kSimStrNames, nullptr}; }
 
 // The parameter of d named `name` (any alias, case-insensitive), or NONE.
 uint32_t findParam(const Descriptor *d, const std::string &name) {
@@ -149,7 +148,8 @@ Model::Model(const Descriptor *desc, const std::string &cardName, const std::map
         if (id == NONE) throw std::runtime_error("model " + name + ": parameter " + k + " is not a " + d->name + " parameter");
         writeParam(d, nullptr, data, id, v, 0, "model " + name);
     }
-    SimParas sp = simParas();
+    double gminVal = 1e-12;  // setup sees the default; evaluate() gets the run's gmin
+    SimParas sp = simParas(&gminVal);
     InitInfo r{0, 0, nullptr};
     d->setup_model((void *)name.c_str(), data, &sp, &r);
     checkInit(d, r, "model " + name);
@@ -175,7 +175,8 @@ Instance::Instance(std::shared_ptr<Model> model, const std::string &name,
             throw std::runtime_error(name + ": " + k + " is not an instance parameter of " + d->name);
         writeParam(d, data_, model_->data, id, v, ACCESS_FLAG_INSTANCE, name);
     }
-    SimParas sp = simParas();
+    double gminVal = 1e-12;  // setup sees the default; evaluate() gets the run's gmin
+    SimParas sp = simParas(&gminVal);
     InitInfo r{0, 0, nullptr};
     d->setup_instance((void *)name_.c_str(), data_, model_->data, tempK, connected, &sp, &r);
     checkInit(d, r, name);
@@ -246,7 +247,8 @@ bool Instance::evaluate(const double *v, uint32_t analysisFlags, double abstime)
     std::fill(qBuf_.begin(), qBuf_.end(), 0.0);
     std::fill(G_.begin(), G_.end(), 0.0);
     std::fill(C_.begin(), C_.end(), 0.0);
-    SimInfo info{simParas(), abstime, solve_.data(), nullptr, nullptr,
+    double gminVal = gmin;
+    SimInfo info{simParas(&gminVal), abstime, solve_.data(), nullptr, nullptr,
                  analysisFlags | CALC_RESIST_RESIDUAL | CALC_REACT_RESIDUAL | CALC_RESIST_JACOBIAN |
                      CALC_REACT_JACOBIAN};
     const uint32_t ret = d->eval((void *)name_.c_str(), data_, model_->data, &info);

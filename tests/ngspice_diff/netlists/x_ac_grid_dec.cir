@@ -1,0 +1,6 @@
+.ac dec over a non-integer number of decades: ngspice refits the step so the last point is fstop
+V1 in 0 DC 0 AC 1
+R1 in out 1k
+C1 out 0 100n
+.ac dec 10 1 3.3meg
+.end

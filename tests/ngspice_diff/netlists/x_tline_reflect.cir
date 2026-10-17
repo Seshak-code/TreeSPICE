@@ -1,0 +1,7 @@
+Lossless line TD=5n, 50 ohm source, mismatched 150 ohm load: reflections bounce back and forth
+V1 in 0 PULSE(0 1 1n 1n 1n 30n 100n)
+R1 in a 50
+T1 a 0 b 0 Z0=50 TD=5n
+R2 b 0 150
+.tran 0.5n 60n
+.end

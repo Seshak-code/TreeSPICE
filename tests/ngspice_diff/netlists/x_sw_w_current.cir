@@ -1,0 +1,10 @@
+Current-controlled switch: the sense current of Vs closes W1 (CSW hysteresis), a ramp drives it up and down
+Vin 1 0 PWL(0 0 1m 5 2m 0)
+Rs 1 s 1k
+Vs s 0 0
+V2 7 0 3
+R2 7 8 1k
+W1 8 0 Vs CM
+.model CM CSW(IT=2m IH=1m RON=10 ROFF=1meg)
+.tran 5u 2m
+.end

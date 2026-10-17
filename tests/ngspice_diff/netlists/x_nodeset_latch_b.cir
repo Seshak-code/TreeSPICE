@@ -1,0 +1,10 @@
+Bistable latch (cross-coupled NMOS, resistor loads): .nodeset picks the state
+VDD vdd 0 5
+R1 vdd q 10k
+R2 vdd qb 10k
+M1 q qb 0 0 nm w=10u l=1u
+M2 qb q 0 0 nm w=10u l=1u
+.model nm NMOS(vto=1 kp=1e-4)
+.nodeset v(q)=0 v(qb)=5
+.op
+.end

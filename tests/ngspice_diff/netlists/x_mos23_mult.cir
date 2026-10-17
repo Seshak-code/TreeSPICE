@@ -1,0 +1,14 @@
+* MOS levels 2 and 3 with M=3 (oxide capacitance and DELTA narrow factor carry M), RD/RS series resistance, AC
+VDD 1 0 DC 5
+VIN 4 0 DC 0 AC 1
+C1 4 2 1u
+VB 5 0 DC 1.4
+RB 5 2 1meg
+RD2 1 3 10k
+RD3 1 6 10k
+M2 3 2 0 0 N2 W=10u L=2u M=3 AD=20p AS=20p PD=14u PS=14u
+M3 6 2 0 0 N3 W=10u L=2u M=3 AD=20p AS=20p PD=14u PS=14u
+.model N2 NMOS(LEVEL=2 VTO=0.8 KP=40u GAMMA=0.5 PHI=0.65 LAMBDA=0.03 TOX=50n DELTA=1 NFS=1e11 RD=30 RS=30 CGSO=4e-10 CGDO=4e-10 CJ=3e-4)
+.model N3 NMOS(LEVEL=3 VTO=0.8 KP=40u GAMMA=0.5 PHI=0.65 TOX=50n DELTA=1 NFS=1e11 RSH=10 CGSO=4e-10 CGDO=4e-10 CJ=3e-4)
+.ac dec 5 1k 1g
+.end
