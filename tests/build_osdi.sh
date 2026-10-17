@@ -24,8 +24,13 @@ perl -0pe 's/(if \(!BSIM4wk1Given\)\s*BSIM4wk1 = 0\.0;\s*)if \(!BSIM4wk1Given\)\
   "$OPENVAF_DIR/integration_tests/BSIM4/bsim4.va" > "$tmp/bsim4.va"
 "$OPENVAF" "$tmp/bsim4.va" -o "$out/bsim4.osdi"
 "$OPENVAF" "$OPENVAF_DIR/integration_tests/BSIMCMG/bsimcmg.va" -o "$out/bsimcmg.osdi"
-# BSIM-SOI 4.6 (ngspice's native B4SOI, LEVEL 10/58, is 4.4; at SHMOD=0 they agree to 0.01 %, Gemini QA).
-"$OPENVAF" "$OPENVAF_DIR/integration_tests/BSIMSOI/bsimsoi.va" -o "$out/bsimsoi.osdi"
+# BSIM-SOI 4.6 (ngspice's native B4SOI, LEVEL 10/58, is 4.4). bsimsoi.va adds the overlap charges to qgate
+# (for the QG/CGG outputs) and then stamps ddt(qgate) from gate to body, beside its own gate-drain and gate-source
+# overlap branches: the overlap capacitance counted twice and pumped into a floating body (Gemini's finding; native
+# b4soild.c loads only the intrinsic charge there). Gate to body takes the intrinsic qgi:
+perl -0pe 's/I\(gi,b\)\s*<\+\s*B4SOItype \* ddt\(qgate\);/I(gi,b)  <+ B4SOItype * ddt(qgi);/ or die "bsimsoi.va: qgate patch no longer applies\n"' \
+  "$OPENVAF_DIR/integration_tests/BSIMSOI/bsimsoi.va" > "$tmp/bsimsoi.va"
+"$OPENVAF" "$tmp/bsimsoi.va" -o "$out/bsimsoi.osdi"
 # EKV 2.6 has no native ngspice model: ngspice runs it through OSDI only. ekv.va defaults TNOM to 25 C
 # (ngspice: 27), and declares L, W, M, NS, AS, AD, PS and PD as model parameters, so an instance cannot give them.
 perl -0pe 's/`define DEFAULT_TNOM 25\b/`define DEFAULT_TNOM 27/ or die "ekv.va: TNOM patch no longer applies\n";
