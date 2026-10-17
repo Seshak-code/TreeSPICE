@@ -1,9 +1,10 @@
 name: CI
 
+# Weekly (owner's choice), plus a manual run from the Actions tab. GitHub disables a scheduled workflow after
+# 60 days without repository activity; re-enable it there.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  schedule:
+    - cron: '0 6 * * 1'  # Mondays 06:00 UTC
   workflow_dispatch:
 
 # Build, engine tests and the differential test against ngspice 47 on each platform. The Xyce, IBM power-grid
