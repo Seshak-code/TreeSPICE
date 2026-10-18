@@ -1,0 +1,8 @@
+* reverse-biased diode with ISR (IHP's antenna diodes): AC with junction capacitance through a resistor
+V1 1 0 DC 2 AC 1
+R1 1 2 10k
+D1 0 2 dm
+D2 0 2 dm area=3
+.model dm d is=2.3e-19 n=1.009 ik=1.4e-7 rs=2e5 cj0=9.4e-16 m=0.3 vj=0.7 fc=0.5 bv=11.6 ibv=3.5e-7 nbv=48.9 isr=7.4e-19 xti=5 tt=7e-7
+.ac dec 10 1k 10g
+.end

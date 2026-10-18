@@ -526,6 +526,7 @@ def compare(args, text, an, mode, nm, ref):
     else:
         tstep, tstop = an[1], an[2]
         r = run_engine(args, text, mode, "tran", tstep, tstop)
+        tstep = tstep or tstop / 50  # .tran 0 tstop: ngspice's (and the engine's) default step, for the tolerances
         if unsupported(r): return "ENGINE-UNSUPPORTED", 0, 0, r["err"]
         if not r["pts"]: return "FAIL", math.inf, math.inf, f"engine produced no waveform: {r['err']}"
         ts = col(r, 0)

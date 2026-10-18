@@ -509,11 +509,13 @@ struct DiodeModel {
     P cjsw = 0.0, mjsw = 0.33, vjsw = 1.0;                 // CJSW*PJ, MJSW, PHP
     P ikf = 0.0, ikr = 0.0;                                // knee currents (IKF*AREA, IKR*AREA); 0: none
     bool breakdown = false; P xbv = 0.0;                    // BV adjusted so I(-BV) = IBV (diotemp)
+    P vtb = PhysicsConstants::V_THERMAL_NOM;               // NBV*Vt: the breakdown slope
+    P isr = 0.0, vtr = 2.0 * PhysicsConstants::V_THERMAL_NOM;  // recombination: ISR*AREA, NR*Vt
     P gmin = PhysicsConstants::JUNCTION_GMIN;
 };
 
 // Breakdown voltage xbv such that the reverse current at -BV is IBV (ngspice
-// diotemp, NBV = N): returns BV unchanged when IBV is below the knee current.
+// diotemp; vte = NBV*Vt): returns BV unchanged when IBV is below the knee current.
 inline double diode_breakdown_xbv(double bv, double ibv, double is, double vte, double reltol = 1e-3)
 {
     double cbv = ibv;
@@ -534,17 +536,29 @@ template <typename T, typename P>
 inline std::pair<T, T> diode_iq(T vd, const DiodeModel<P>& p)
 {
     using std::exp;
+    // Recombination current (ISR, NR; probed on ngspice 47): ISR (exp(vd/(NR Vt)) - 1) ((1 - vd/VJ)^2 + 0.005)^(M/2),
+    // held at its -3 N Vt value below that (ngspice's reverse region does not recompute it), also in breakdown
+    T crec = T(0.0);
+    if (p.isr != P(0.0)) {
+        using std::pow;
+        const T v = vd < T(-3.0 * p.vte) ? T(-3.0 * p.vte) : vd;
+        const T a = 1.0 - v / p.vj;
+        crec = p.isr * (exp(v / p.vtr) - 1.0) * pow(a * a + 0.005, p.m / 2.0);
+    }
     T cdb;
-    if (p.breakdown && vd < -p.xbv) cdb = -p.is * exp(-(p.xbv + vd) / p.vte);
+    // breakdown only below the forward region (ngspice dioload's order): a large NBV makes xbv negative (IHP's
+    // antenna diodes: xbv = -18 V), and the forward branch still applies there
+    if (p.breakdown && vd < -p.xbv && vd < T(-3.0 * p.vte)) cdb = -p.is * exp(-(p.xbv + vd) / p.vtb) + crec;
     else {
-        cdb = spice_junction(vd, p.is, p.vte);
+        cdb = spice_junction(vd, p.is, p.vte) + crec;  // the knees act on both (probed)
         // high-injection knees (ngspice dioload): forward IKF, reverse IKR; the bottom current only
         using std::sqrt;
         if (p.ikf > P(0.0) && cdb > T(0.0)) cdb = cdb / (1.0 + sqrt(cdb / p.ikf));
         else if (p.ikr > P(0.0) && cdb < T(0.0)) cdb = cdb / (1.0 + sqrt(-cdb / p.ikr));
         if (p.isw != P(0.0)) cdb = cdb + spice_junction(vd, p.isw, p.vtesw);
     }
-    const T q = depletion_charge(vd, p.cjo, p.m, p.vj, p.fc) + depletion_charge(vd, p.cjsw, p.mjsw, p.vjsw, p.fc) + p.tt * cdb;
+    // the transit-time charge follows the junction current with its GMIN (ngspice: TT*GMIN of capacitance at any bias)
+    const T q = depletion_charge(vd, p.cjo, p.m, p.vj, p.fc) + depletion_charge(vd, p.cjsw, p.mjsw, p.vjsw, p.fc) + p.tt * (cdb + p.gmin * vd);
     return {cdb + p.gmin * vd, q};
 }
 

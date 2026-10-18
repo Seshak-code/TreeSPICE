@@ -1042,8 +1042,8 @@ public:
       const double vcrit = compute_vcrit(m.vte, m.is), raw = V(2) - V(1);
       double vl = vcrit;
       if (st->jvState) {
-        vl = (m.breakdown && raw < std::min(0.0, -m.xbv + 10.0 * m.vte))
-                 ? -(pnjlim(-(raw + m.xbv), -(st->jv[0] + m.xbv), m.vte, vcrit) + m.xbv)
+        vl = (m.breakdown && raw < std::min(0.0, -m.xbv + 10.0 * m.vtb))
+                 ? -(pnjlim(-(raw + m.xbv), -(st->jv[0] + m.xbv), m.vtb, vcrit) + m.xbv)
                  : pnjlim(raw, st->jv[0], m.vte, vcrit);
       }
       st->jv[0] = vl; st->jvState = 1;

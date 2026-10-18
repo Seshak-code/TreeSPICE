@@ -1102,7 +1102,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 cap.model_name.clear();
             } else if (std::isnan(cap.capacitance_farads)) throw std::runtime_error(cap.name + ": no value and no model");
             cap.capacitance_farads *= devtemp::poly(tc1, tc2, instK(cap.inst) - tnom);
-            cap.capacitance_farads *= cap.m;  // was parsed and never applied
+            cap.capacitance_farads *= cap.m * cap.scale;
             cap.m = 1.0;
         }
         std::vector<Mosfet> level1;
@@ -1218,8 +1218,9 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             sensList(blk, d.instanceName, *c);
             supported(c, {"IS", "N", "RS", "CJO", "CJ0", "CJ", "VJ", "PB", "M", "MJ", "FC", "TT", "BV", "IBV",
                           "EG", "XTI", "TNOM", "TM1", "TM2", "TCV", "TTT1", "TTT2", "TRS", "TRS1", "TRS2",
-                          "JSW", "NS", "CJSW", "MJSW", "PHP", "IKF", "IK", "IKR", "KF", "AF"});
-            bounded(c, {"IS", "RS", "CJO", "CJ0", "CJ", "M", "MJ", "TT", "JSW", "CJSW", "MJSW", "IKF", "IK", "IKR", "KF"}, {"N", "BV", "NS", "PHP"});  // ngspice: BV = 0 breaks down at 0 V
+                          "JSW", "NS", "CJSW", "MJSW", "PHP", "IKF", "IK", "IKR", "KF", "AF", "ISR", "NR", "NBV"});
+            bounded(c, {"IS", "RS", "CJO", "CJ0", "CJ", "M", "MJ", "TT", "JSW", "CJSW", "MJSW", "IKF", "IK", "IKR", "KF", "ISR"},
+                    {"N", "BV", "NS", "PHP", "NR", "NBV"});  // ngspice: BV = 0 breaks down at 0 V
             d.saturationCurrent_I_S_A = c->get("IS", 1e-14);
             d.emissionCoefficient_N   = c->get("N", 1.0);
             auto& k = d.card;
@@ -1232,6 +1233,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             k.kf = c->get("KF", 0.0); k.af = c->get("AF", 1.0);
             k.bvGiven = c->params.count("BV") > 0;  // BV > 0 (checked above)
             k.bv = c->get("BV", 0.0); k.ibv = c->get("IBV", 1e-3);
+            k.isr = c->get("ISR", 0.0); k.nr = c->get("NR", 2.0); k.nbv = c->get("NBV", NAN);
             if (!(k.m < 1.0 && k.mjsw < 1.0 && k.vj > 0.0 && k.fc < 1.0 && k.rs >= 0.0 && k.ibv > 0.0))
                 throw std::runtime_error("model " + c->name + ": needs M, MJSW < 1, VJ > 0, FC < 1, RS >= 0, IBV > 0");
             using namespace devtemp;
@@ -1242,6 +1244,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 d.saturationCurrent_I_S_A *= isFactor(T, Tn, std::max(c->get("EG", 1.11), 0.1), c->get("XTI", 3.0), d.emissionCoefficient_N);
                 k.cjo *= junctionAt(k.vj, k.m, Tn, T);
                 k.jsw *= isFactor(T, Tn, std::max(c->get("EG", 1.11), 0.1), c->get("XTI", 3.0), d.emissionCoefficient_N);
+                k.isr *= isFactor(T, Tn, std::max(c->get("EG", 1.11), 0.1), c->get("XTI", 3.0), k.nr);  // probed: the NR law
                 k.cjsw *= junctionAt(k.php, k.mjsw, Tn, T);
             }
             if (k.fc * k.vj > 1.0) k.vj = 1.0 / k.fc;  // diotemp: the depletion knee stays below 1 V
@@ -1485,19 +1488,23 @@ void SPICEParser::parseCapacitor(const std::vector<std::string>& tok, TensorBloc
     c.nodePlate2 = nodeIndex(tok[2]);
     // C a b <value> [model] | C a b <model> (semiconductor capacitor), then KEY val pairs:
     // an even count of words after the nodes means value + model; odd, value or model
+    // or C a b c=<value> ... (ngspice's keyword form)
     size_t i = 3;
     const char c0 = tok[3][0];
-    const bool valueFirst = (tok.size() - 3) % 2 == 0 || std::isdigit((unsigned char)c0) || c0 == '.' || c0 == '-' || c0 == '+';
+    const bool keyword = (toUpper(tok[3]) == "C" || toUpper(tok[3]) == "CAPACITANCE") && tok.size() > 4;
+    const bool valueFirst = !keyword && ((tok.size() - 3) % 2 == 0 || std::isdigit((unsigned char)c0) || c0 == '.' || c0 == '-' || c0 == '+');
     c.capacitance_farads = valueFirst ? parseValue(tok[i++]) : NAN;  // NAN: from the model (resolveBlock)
-    if ((tok.size() - i) % 2 == 1) c.model_name = tok[i++];
+    if (!keyword && (tok.size() - i) % 2 == 1) c.model_name = tok[i++];
 
     // tokenize() turns "KEY=val" into ["KEY", "val"]. IC= applies with UIC.
     for (; i < tok.size(); ++i) {
         std::string upper = toUpper(tok[i]);
         if (i + 1 >= tok.size()) throw std::runtime_error(tok[0] + ": parameter " + upper + " has no value");
-        if (upper == "W")      c.width_m  = parseValue(tok[++i]);
+        if (upper == "C" || upper == "CAPACITANCE") c.capacitance_farads = parseValue(tok[++i]);
+        else if (upper == "W") c.width_m  = parseValue(tok[++i]);
         else if (upper == "L") c.length_m = parseValue(tok[++i]);
         else if (upper == "M") c.m        = parseValue(tok[++i]);
+        else if (upper == "SCALE") c.scale = parseValue(tok[++i]);
         else if (upper == "TC1") { c.tc1 = parseValue(tok[++i]); c.tc1Given = true; }
         else if (upper == "TC2") { c.tc2 = parseValue(tok[++i]); c.tc2Given = true; }
         else if (upper == "TEMP") c.inst.temp = parseValue(tok[++i]);
@@ -1514,9 +1521,11 @@ void SPICEParser::parseInductor(const std::vector<std::string>& tok, TensorBlock
     ind.name = tok[0];
     ind.nodeCoil1 = nodeIndex(tok[1]);
     ind.nodeCoil2 = nodeIndex(tok[2]);
-    ind.inductance_henries = parseValue(tok[3]) / mult_;
+    // L a b <value> | L a b l=<value> (ngspice's keyword form)
+    const bool keyword = (toUpper(tok[3]) == "L" || toUpper(tok[3]) == "INDUCTANCE") && tok.size() > 4;
+    ind.inductance_henries = parseValue(tok[keyword ? 4 : 3]) / mult_;
     // IC= (initial current) applies with UIC; anything else used to be ignored silently
-    for (size_t i = 4; i < tok.size(); ++i) {
+    for (size_t i = keyword ? 5 : 4; i < tok.size(); ++i) {
         if (toUpper(tok[i]) != "IC" || i + 1 >= tok.size())
             throw std::runtime_error(tok[0] + ": unsupported inductor parameter '" + tok[i] + "'");
         ind.ic_A = parseValue(tok[++i]);

@@ -457,6 +457,25 @@ std::string substitute(const std::string &line, Scope &sc) {
                     continue;
                 }
             }
+            // An unbraced expression (C1 1 2 cmim_core l=l/sf, IHP's cells), as ngspice evaluates it: the value up to a
+            // space, or a ')' / ',' outside its own parentheses. Left as it is when it does not evaluate.
+            size_t e = j;
+            for (int depth = 0; e < line.size() && line[e] != ' ' && line[e] != '\t'; ++e) {
+                if (line[e] == '(') ++depth;
+                else if ((line[e] == ')' || line[e] == ',') && depth-- == 0) break;
+            }
+            const std::string val = line.substr(j, e - j);
+            bool expr = val.find_first_of("*/+^(") != std::string::npos;
+            for (size_t m = 1; m < val.size() && !expr; ++m)  // a binary minus, not an exponent's sign (1e-6)
+                expr = val[m] == '-' && !((val[m - 1] == 'e' || val[m - 1] == 'E') && m >= 2 && std::isdigit((unsigned char)val[m - 2]));
+            if (expr && val.find_first_of("{'") == std::string::npos) {
+                try {
+                    const double v = sc.evaluate("{" + val + "}");
+                    out += num(v);
+                    i = e;
+                    continue;
+                } catch (const std::exception &) {}
+            }
             i = j;
             continue;
         }

@@ -131,6 +131,7 @@ struct Capacitor {
     double width_m = 0.0;
     double length_m = 0.0;
     double m = 1.0;               // Multiplier
+    double scale = 1.0;           // SCALE= (ngspice: multiplies the capacitance)
 
     std::string expression;         // Symbolic override for capacitance
 
@@ -603,6 +604,8 @@ struct Diode {
         double kf = 0.0, af = 1.0;                                                            // flicker noise
         double bv = 0.0, ibv = 1e-3;
         bool bvGiven = false;
+        double isr = 0.0, nr = 2.0;  // recombination current (ISR at the temperature)
+        double nbv = NAN;            // breakdown emission coefficient (NaN: N)
     } card;
     double area = 1.0;
     double pj = 0.0, mult = 1.0;  // PJ= (sidewall perimeter) and M= (the sidewall terms scale by M, not by AREA)
