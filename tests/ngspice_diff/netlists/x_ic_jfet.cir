@@ -1,0 +1,8 @@
+* JFET IC=vds,vgs under UIC: the gate charges start there
+VDD d0 0 DC 10
+RD d0 d 2k
+RG 0 g 1meg
+J1 d g 0 jn IC=5,-1
+.model jn njf vto=-2 beta=1m cgs=2p cgd=1p
+.tran 1n 1u uic
+.end

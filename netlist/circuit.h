@@ -580,6 +580,7 @@ struct SimulationEnvironment {
 struct Diode {
     std::string instanceName;         // e.g. "D1"
     bool off = false;                 // OFF: held at 0 V until the operating point converges without it (ngspice)
+    double ic[1] = {NAN};             // IC=vd: the junction's state at t = 0 under UIC (NaN: from the node voltages)
     int anode;                        // P-type side (+)
     int cathode;                      // N-type side (-)
     // Defaults match SPICE3 D-model defaults and addDiode(); left uninitialised
@@ -686,6 +687,7 @@ struct BJT {
     int substrate = 0;                         // S terminal (ground when not given, as SPICE)
     int thermal = -1;                          // T terminal of a HICUM (LEVEL 8) device; -1: not given (internal)
     bool off = false;                          // OFF, as Diode::off
+    double ic[2] = {NAN, NAN};                 // IC=vbe,vce: the junctions' state at t = 0 under UIC (NaN: nodes)
     std::string modelName = "default";
     bool isNPN = true;                           // true=NPN, false=PNP
     
@@ -750,6 +752,7 @@ struct JFET {
     bool isNChannel = true;               // true=N-ch, false=P-ch
     double m = 1.0;                       // parallel multiplier (scales beta)
     bool off = false;                     // OFF, as Diode::off
+    double ic[2] = {NAN, NAN};            // IC=vds,vgs: the junctions' state at t = 0 under UIC (NaN: nodes)
     
     // Model Parameters
     double beta = 1e-4;                   // Transconductance parameter [A/V^2]

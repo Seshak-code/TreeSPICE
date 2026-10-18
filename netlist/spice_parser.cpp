@@ -198,7 +198,8 @@ double SPICEParser::takeMultiplier(std::vector<std::string>& tok) const {
 // scale the device (currents, capacitances; resistances divide). OFF and IC=
 // steer which operating point SPICE finds (ngspice holds OFF junctions at 0 V
 // through MODEINITFIX) and the UIC start: errors until they are modelled, not dropped.
-double SPICEParser::instanceArea(const std::vector<std::string>& tok, size_t from, InstTemp* t, bool* off) const {
+double SPICEParser::instanceArea(const std::vector<std::string>& tok, size_t from, InstTemp* t, bool* off,
+                                 double* ic, int nIc) const {
     double area = 1.0;
     for (size_t i = from; i < tok.size(); ++i) {
         const std::string k = toUpper(tok[i]);
@@ -206,6 +207,11 @@ double SPICEParser::instanceArea(const std::vector<std::string>& tok, size_t fro
         else if (t && (k == "TEMP" || k == "DTEMP") && i + 1 < tok.size() && isValue(tok[i + 1])) (k == "TEMP" ? t->temp : t->dtemp) = parseValue(tok[++i]);
         else if ((k == "AREA" || k == "M") && i + 1 < tok.size() && isValue(tok[i + 1])) area *= parseValue(tok[++i]);
         else if (k == "OFF" && off) *off = true;
+        else if (k == "IC" && ic) {
+            int n = 0;
+            while (n < nIc && i + 1 < tok.size() && isValue(tok[i + 1])) ic[n++] = parseValue(tok[++i]);
+            if (n == 0) throw std::runtime_error(tok[0] + ": IC needs a value");
+        }
         else if (k == "OFF" || k == "IC") throw std::runtime_error(tok[0] + ": " + k + " is not supported yet");
         else throw std::runtime_error(tok[0] + ": parameter " + k + " is not supported yet");
     }
@@ -1736,7 +1742,7 @@ void SPICEParser::parseDiode(const std::vector<std::string>& tok, TensorBlock& b
         if (k == "PJ" && i + 1 < tok.size() && isValue(tok[i + 1])) d.pj = parseValue(tok[++i]);
         else { if (k == "M" && i + 1 < tok.size() && isValue(tok[i + 1])) d.mult = parseValue(tok[i + 1]); rest.push_back(tok[i]); }
     }
-    d.area = instanceArea(rest, 4, &d.inst, &d.off);
+    d.area = instanceArea(rest, 4, &d.inst, &d.off, d.ic, 1);
     d.instanceName = tok[0];
     d.anode = nodeIndex(tok[1]);
     d.cathode = nodeIndex(tok[2]);
@@ -1773,7 +1779,7 @@ void SPICEParser::parseMosfet(const std::vector<std::string>& tok, TensorBlock& 
     // .option scale multiplies the lengths (areas by scale^2), as in ngspice.
     for (size_t i = mi + 1; i < tok.size(); ++i) {
         std::string upper = toUpper(tok[i]);
-        if (upper == "OFF") throw std::runtime_error(tok[0] + ": OFF is not supported yet");
+        if (upper == "OFF" || upper == "IC") throw std::runtime_error(tok[0] + ": " + upper + " is not supported yet");
         if (i + 1 >= tok.size()) throw std::runtime_error(tok[0] + ": parameter " + upper + " has no value");
         const double s = scale_;
         if (upper == "W")        m.w = parseValue(tok[++i]) * s;
@@ -1818,7 +1824,7 @@ void SPICEParser::parseBJT(const std::vector<std::string>& tok, TensorBlock& blk
     if (modelIdx >= 5) q.substrate = nodeIndex(tok[4]);
     if (modelIdx == 6) q.thermal = nodeIndex(tok[5]);
     q.modelName = tok[modelIdx];
-    q.area = instanceArea(tok, modelIdx + 1, &q.inst, &q.off);
+    q.area = instanceArea(tok, modelIdx + 1, &q.inst, &q.off, q.ic, 2);
     blk.bjts.push_back(q);
 }
 
@@ -1847,7 +1853,7 @@ void SPICEParser::parseSwitch(const std::vector<std::string>& tok, TensorBlock& 
 void SPICEParser::parseJFET(const std::vector<std::string>& tok, TensorBlock& blk) {
     requireFields(tok, 5);
     JFET j;
-    j.area = instanceArea(tok, 5, nullptr, &j.off);
+    j.area = instanceArea(tok, 5, nullptr, &j.off, j.ic, 2);
     j.instanceName = tok[0];
     j.drain  = nodeIndex(tok[1]);
     j.gate   = nodeIndex(tok[2]);

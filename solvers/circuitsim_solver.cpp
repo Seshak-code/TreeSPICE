@@ -687,16 +687,36 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
     std::copy(c.q, c.q + 5, s->q);
     std::copy(c.half, c.half + 3, s->half);
   });
-  // Diode / BJT charges at x, zero current
+  // Diode / BJT charges at x, zero current. Under UIC a junction starts from its device IC= instead (ngspice
+  // MODEINITJCT with TRANOP|UIC): diode vd; BJT vbe, vbc = vbe - vce = vbx, vsub 0; JFET vgs, vgd = vgs - vds; a value
+  // not given comes from the node voltages, as ngspice's getic takes it from .ic. The charges then hold the nodes
+  // there at first (ngspice's BJT and JFET do; its diode drops its IC).
   forEachJunction(netlist, [&](const Junction &j) {
     if (!j.st) return;
     std::array<double, 7> xv{};
     for (int k = 0; k < j.terms; ++k) xv[k] = getV(j.n[k]);
     double v[5], q[5];
     const int K = junctionCharges(j, xv, v, q);
+    auto given = [](const double *ic, int n) { for (int k = 0; k < n; ++k) if (!std::isnan(ic[k])) return true; return false; };
+    auto or_ = [](double ic, double node) { return std::isnan(ic) ? node : ic; };
+    const bool fromIc = uic && (j.d ? given(j.d->ic, 1) : j.f ? given(j.f->ic, 2) : given(j.q->ic, 2));
+    if (uic && j.d && given(j.d->ic, 1)) { v[0] = j.d->ic[0]; q[0] = diode_iq(v[0], diodeModel(*j.d, gmin_)).second; }
+    else if (uic && j.f && given(j.f->ic, 2)) {  // node vds, vgs: D - S, G - S
+      const double t = jfetType(*j.f), vgs = or_(j.f->ic[1], xv[1] - xv[2]), vds = or_(j.f->ic[0], xv[0] - xv[2]);
+      v[0] = t * vgs; v[1] = t * (vgs - vds);
+      const auto c = jfet_charges(v[0], v[1], jfetModel(*j.f, gmin_));
+      q[0] = c[0]; q[1] = c[1];
+    } else if (uic && j.q && given(j.q->ic, 2)) {  // node vbe, vce: B - E, C - E (external)
+      const auto p = bjtModel(*j.q, gmin_);
+      const double vbe = or_(j.q->ic[0], xv[1] - xv[2]), vce = or_(j.q->ic[1], xv[0] - xv[2]);
+      v[0] = p.type * vbe; v[1] = v[2] = p.type * (vbe - vce); v[3] = 0.0;
+      const auto e = bjt_gp(v[0], v[1], v[2], v[3], p);
+      for (int k = 0; k < 4; ++k) q[k] = e.q[k];
+    }
     *j.st = {};
     for (auto &vh : j.st->v) std::copy(v, v + K, vh);
     std::copy(q, q + K, j.st->q);
+    if (fromIc) { j.st->jv[0] = v[0]; j.st->jv[1] = j.d ? 0.0 : v[1]; j.st->jvState = 1; }  // limiting from there
     if (j.q) {  // excess phase starts from the operating point's transfer current (ngspice MODEINITTRAN)
       const auto p = bjtModel(*j.q, gmin_);
       if (p.td > 0.0) j.st->xf[0] = j.st->xf[1] = bjt_gp(v[0], v[1], v[2], v[3], p).xf;

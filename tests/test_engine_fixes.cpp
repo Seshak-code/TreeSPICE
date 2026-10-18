@@ -438,7 +438,7 @@ int main() {
             {"V1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DM\n.model DM D BV=0\n", "BV must be > 0"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DM\n.model DM D N=0\n", "N must be > 0"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 NM OFF\n.model NM NMOS\n", "OFF is not supported"},
-            {"V1 1 0 DC 1\nR1 1 2 1k\nQ1 2 2 0 QM IC=0.6,5\n.model QM NPN\n", "IC is not supported"},
+            {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 MM IC=1,1,0\n.model MM NMOS\n", "IC is not supported"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nQ1 2 2 0 NM\n.model NM NMOS\n", "is NMOS, not a NPN/PNP model"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 NM W=10u\n.model NM NMOS\n", "expected 4 nodes"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 y inv\n.model inv d_inverter\n", "supported in .tran only"},
@@ -592,6 +592,18 @@ int main() {
             };
             const auto a = latch(" OFF", ""), b = latch("", " OFF");
             check(a.first > 4.5 && a.second < 0.1 && b.first < 0.1 && b.second > 4.5, "OFF selects a symmetric latch's state");
+        }
+        {   // a diode's IC= under UIC starts its charge there (ngspice 47 drops it; its BJT and JFET honour theirs)
+            auto v2 = [&](const char* ic) {
+                SimulationRequestDTO req;
+                req.source.payload = std::string("ic\nV1 1 0 DC 0\nR1 1 2 1k\nD1 2 0 dm ") + ic +
+                                     "\n.model dm d is=1e-14 cjo=2p tt=5n\n.tran 0.1n 5n uic\n.end\n";
+                auto engine = ISimulationEngine::create();
+                const auto r = engine->createSession()->runTransient(req, {}, nullptr);
+                return r.converged && r.waveformPoints.size() > 2 ? r.waveformPoints[2].nodeVoltages[1] : NAN;
+            };
+            const double with = v2("IC=0.6"), without = v2("");
+            check(with > 0.4 && std::abs(without) < 1e-3, "diode IC=0.6 under UIC holds its node at first (" + std::to_string(with) + " V)");
         }
         {   // .tf i(vsrc): the true output impedance (-1/i), where ngspice prints 1/max(1e-20, i) = 1e20 (passive) or +1k (active)
             auto engine = ISimulationEngine::create();
