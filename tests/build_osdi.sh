@@ -39,9 +39,12 @@ perl -0pe 's/`define DEFAULT_TNOM 25\b/`define DEFAULT_TNOM 27/ or die "ekv.va: 
            s/^(\s*)parameter real (L|W|M|NS|AS|AD|PS|PD) =/$1(* type="instance" *) parameter real $2 =/mg == 8 or die "ekv.va: instance patch no longer applies\n"' \
   "$OPENVAF_DIR/integration_tests/EKV/ekv.va" > "$tmp/ekv.va"
 "$OPENVAF" "$tmp/ekv.va" -o "$out/ekv.osdi"
-# IHP SG13G2's own PSP103 (module psp103va), when its PDK files are in datasets/pdk/ihp
-ihp="$out/../pdk/ihp/ihp-sg13g2/libs.tech/verilog-a/psp103/psp103.va"
-[ -f "$ihp" ] && "$OPENVAF" "$ihp" -o "$out/psp103.osdi"
+# IHP SG13G2's own PSP103 (module psp103va), R3_CMC resistors, MOS varactor and MOM capacitors, when its PDK
+# files are in datasets/pdk/ihp (ngspice loads them at start-up there; the harness netlists name them with .osdi)
+ihp="$out/../pdk/ihp/ihp-sg13g2/libs.tech/verilog-a"
+for m in psp103/psp103 r3_cmc/r3_cmc mosvar/mosvar cap_cmomi/cap_cmomi cap_cmomf/cap_cmomf; do
+  [ -f "$ihp/$m.va" ] && "$OPENVAF" "$ihp/$m.va" -o "$out/${m#*/}.osdi"
+done
 # bsim3.va (Cogenda's port of BSIM3v3.3) differs from ngspice's b3*.c in five places; the patched copy matches
 # the native model at 27, -40 and 125 C (DC, AC, noise, PMOS) to 1e-3:
 #  - TNOM defaults to 25 C where ngspice uses 27;

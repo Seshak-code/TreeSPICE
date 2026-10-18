@@ -1,0 +1,11 @@
+* diode temperature selectors at 110 C: TLEV=1 (BV scaled by 1 - TCV dT) and TLEVC=1 (CJO, VJ, CJSW, PHP by CTA, TPB, CTP, TPHP)
+.temp 110
+V1 1 0 DC 0
+R1 1 2 1k
+D1 0 2 d1
+R2 1 3 1k
+D2 0 3 d2 pj=1
+.model d1 d is=1e-14 bv=5 ibv=1e-6 tcv=2e-3 tlev=1
+.model d2 d is=1e-14 bv=6 ibv=1e-6 tcv=1e-3 cjo=1p vj=0.7 m=0.4 cjsw=0.5p php=0.6 mjsw=0.3 tlevc=1 cta=1e-3 tpb=2e-3 ctp=2e-3 tphp=1e-3
+.dc V1 -1 7 0.05
+.end

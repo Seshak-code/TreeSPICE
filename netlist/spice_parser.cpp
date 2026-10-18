@@ -1218,7 +1218,14 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             sensList(blk, d.instanceName, *c);
             supported(c, {"IS", "N", "RS", "CJO", "CJ0", "CJ", "VJ", "PB", "M", "MJ", "FC", "TT", "BV", "IBV",
                           "EG", "XTI", "TNOM", "TM1", "TM2", "TCV", "TTT1", "TTT2", "TRS", "TRS1", "TRS2",
-                          "JSW", "NS", "CJSW", "MJSW", "PHP", "IKF", "IK", "IKR", "KF", "AF", "ISR", "NR", "NBV"});
+                          "JSW", "NS", "CJSW", "MJSW", "PHP", "IKF", "IK", "IKR", "KF", "AF", "ISR", "NR", "NBV",
+                          "CTA", "CTP", "TPB", "TPHP", "TLEVC", "TLEV"});
+            // Temperature selectors (probed on ngspice 47): TLEV 1 scales BV by (1 - TCV dT) where 0 subtracts TCV dT
+            // (IS follows the same law under both); TLEVC 1 takes CJO (1 + CTA dT), VJ - TPB dT and the sidewall's
+            // CTP / TPHP in place of the junction law, and CTA..TPHP do nothing under TLEVC 0
+            const double tlev = c->get("TLEV", 0.0), tlevc = c->get("TLEVC", 0.0);
+            if ((tlev != 0.0 && tlev != 1.0) || (tlevc != 0.0 && tlevc != 1.0))
+                throw std::runtime_error("model " + c->name + ": TLEV / TLEVC other than 0 or 1 is not supported yet");
             bounded(c, {"IS", "RS", "CJO", "CJ0", "CJ", "M", "MJ", "TT", "JSW", "CJSW", "MJSW", "IKF", "IK", "IKR", "KF", "ISR"},
                     {"N", "BV", "NS", "PHP", "NR", "NBV"});  // ngspice: BV = 0 breaks down at 0 V
             d.saturationCurrent_I_S_A = c->get("IS", 1e-14);
@@ -1242,15 +1249,20 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             k.m = std::min(k.m * poly(c->get("TM1", 0.0), c->get("TM2", 0.0), dt), 0.9);
             if (T != Tn) {
                 d.saturationCurrent_I_S_A *= isFactor(T, Tn, std::max(c->get("EG", 1.11), 0.1), c->get("XTI", 3.0), d.emissionCoefficient_N);
-                k.cjo *= junctionAt(k.vj, k.m, Tn, T);
+                if (tlevc == 1.0) {
+                    k.cjo *= 1.0 + c->get("CTA", 0.0) * dt; k.vj -= c->get("TPB", 0.0) * dt;
+                    k.cjsw *= 1.0 + c->get("CTP", 0.0) * dt; k.php -= c->get("TPHP", 0.0) * dt;
+                } else {
+                    k.cjo *= junctionAt(k.vj, k.m, Tn, T);
+                    k.cjsw *= junctionAt(k.php, k.mjsw, Tn, T);
+                }
                 k.jsw *= isFactor(T, Tn, std::max(c->get("EG", 1.11), 0.1), c->get("XTI", 3.0), d.emissionCoefficient_N);
                 k.isr *= isFactor(T, Tn, std::max(c->get("EG", 1.11), 0.1), c->get("XTI", 3.0), k.nr);  // probed: the NR law
-                k.cjsw *= junctionAt(k.php, k.mjsw, Tn, T);
             }
             if (k.fc * k.vj > 1.0) k.vj = 1.0 / k.fc;  // diotemp: the depletion knee stays below 1 V
             k.tt *= poly(c->get("TTT1", 0.0), c->get("TTT2", 0.0), dt);
             k.rs *= poly(first(c, {"TRS1", "TRS"}, 0.0), c->get("TRS2", 0.0), dt);
-            if (k.bvGiven) k.bv -= c->get("TCV", 0.0) * dt;
+            if (k.bvGiven) k.bv = tlev == 1.0 ? k.bv * (1.0 - c->get("TCV", 0.0) * dt) : k.bv - c->get("TCV", 0.0) * dt;
         }
         // HICUM/L2 (LEVEL 8): OpenVAF's hicuml2.va 2.4.0, ngspice's native version (they agree to 4e-5 in ngspice),
         // through OSDI (hicum2.osdi from TREESPICE_OSDI_PATH); its parameter names are ngspice's.

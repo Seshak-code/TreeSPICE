@@ -1,0 +1,8 @@
+* IHP SG13G2 Schottky diode (schottky_nbl1: TLEV=1, TLEVC=1, a parasitic PNP) at IHP's corner temperatures
+.lib pdk/ihp/ihp-sg13g2/libs.tech/ngspice/models/cornerDIO.lib dio_tt
+.temp -40 27 125
+V1 1 0 DC 0
+R1 1 2 100
+XD1 2 0 0 schottky_nbl1
+.dc V1 -2 1.5 0.05
+.end
