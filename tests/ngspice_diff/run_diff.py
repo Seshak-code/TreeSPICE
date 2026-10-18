@@ -98,7 +98,7 @@ def needed_osdi(text):
     libs = set(osdi_libs(text))
     for typ, lvl in re.findall(r"^\s*\.model\s+\S+\s+(\w+)\s*\(?[^\n]*?\blevel\s*=\s*(\d+)", text, re.I | re.M):
         if typ.lower() in ("npn", "pnp"):
-            libs |= {"8": {"hicum2.osdi"}}.get(lvl, set())
+            libs |= {"8": {"hicum2.osdi"}, "4": {"vbic.osdi"}, "9": {"vbic.osdi"}}.get(lvl, set())
             continue
         libs |= {"54": {"bsim4.osdi"}, "14": {"bsim4.osdi"}, "49": {"bsim3.osdi"}, "8": {"bsim3.osdi"},
                  "10": {"bsimsoi.osdi"}, "58": {"bsimsoi.osdi"}}.get(lvl, set())

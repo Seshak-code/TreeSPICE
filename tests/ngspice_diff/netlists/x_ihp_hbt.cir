@@ -1,0 +1,10 @@
+* IHP SG13G2 npn13G2 HBT (VBIC with self-heating and excess phase): Gummel sweep (DC: ngspice's native VBIC agrees)
+* ngspice's default tolerances stop its self-heated Newton 0.15 % short in the base current; at RELTOL 1e-7 it
+* agrees with the engine to 8 digits
+.options reltol=1e-7 abstol=1e-15 vntol=1e-10
+.lib pdk/ihp/ihp-sg13g2/libs.tech/ngspice/models/cornerHBT.lib hbt_typ
+VC c 0 1.5
+VB b 0 0.8
+XQ1 c b 0 0 npn13G2 Nx=1
+.dc VB 0.6 1.0 0.01
+.end

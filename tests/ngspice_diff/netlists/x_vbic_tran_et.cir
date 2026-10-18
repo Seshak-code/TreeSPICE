@@ -1,0 +1,12 @@
+* VBIC electrothermal and excess-phase transient (PNP, RTH, CTH, TD) as an OSDI device: ngspice runs the same generated
+* model (vbic.osdi), as its native VBIC transient is wrong there (see x_vbic_tran)
+.osdi vbic.osdi
+VEE vee 0 DC -3
+VIN in 0 PULSE(0 -1 1n 0.2n 0.2n 3n 8n)
+RB in b 10k
+RC vee c 200
+CL c 0 20f
+N1 c b 0 0 t qp
+.model qp vbic_ng type=-1 rcx=10 rci=60 vo=2 gamm=2e-11 hrcf=2 rbx=10 rbi=40 re=2 rs=20 rbp=40 is=1e-16 nf=1.0 nr=1.0 fc=0.9 cbeo=1e-15 cje=2e-14 pe=0.75 me=0.33 aje=-0.5 cbco=1e-15 cjc=1e-14 qco=1e-14 cjep=1e-14 pc=0.75 mc=0.33 ajc=-0.5 cjcp=4e-14 ps=0.75 ms=0.33 ajs=-0.5 ibei=1e-18 wbe=1 nei=1 iben=5e-15 nen=2 ibci=2e-17 nci=1 ibcn=5e-15 ncn=2 avc1=2 avc2=15 isp=1e-15 wsp=1 nfp=1 ibeip=1e-18 ibenp=5e-15 ibcip=1e-17 ncip=1 ibcnp=5e-15 ncnp=2 vef=10 ver=4 ikf=2e-3 ikr=2e-4 ikp=2e-4 tf=10e-12 qtf=0.1 xtf=20 vtf=2 itf=8e-2 tr=100e-12 rth=500 cth=2e-12 td=3e-12
+.tran 10p 16n
+.end

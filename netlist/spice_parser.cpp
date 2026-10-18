@@ -851,13 +851,16 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             add(&JFET::source, "RS", c->get("RS", 0.0));
         }
     };
-    // A HICUM device (BJT LEVEL 8) without a thermal node gets an internal one, as in ngspice; other BJTs have none
+    // A HICUM device (BJT LEVEL 8) without a thermal node gets an internal one, as in ngspice; a VBIC (LEVEL 4, 9)
+    // one has it on ground (ngspice ties missing VBIC ports to ground); Gummel-Poon has none
     auto bjtThermal = [&](TensorBlock& blk, bool top) {
         for (BJT& q : blk.bjts) {
             const auto it = modelCards_.find(toUpper(q.modelName));
             if (it == modelCards_.end()) continue;  // resolveBlock reports it
-            if (it->second.get("LEVEL", 1.0) != 8.0) {
-                if (q.thermal >= 0) throw std::runtime_error(q.instanceName + ": a thermal node needs a HICUM (LEVEL 8) model");
+            const double level = it->second.get("LEVEL", 1.0);
+            if (level == 4.0 || level == 9.0) { if (q.thermal < 0) q.thermal = 0; continue; }
+            if (level != 8.0) {
+                if (q.thermal >= 0) throw std::runtime_error(q.instanceName + ": a thermal node needs a HICUM (LEVEL 8) or VBIC (LEVEL 4, 9) model");
                 continue;
             }
             if (q.thermal >= 0) continue;
@@ -1272,7 +1275,36 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             std::vector<BJT> gp;
             for (auto& q : blk.bjts) {
                 const ModelCard* c = kind(card(q.modelName), q.instanceName, {"NPN", "PNP"});
-                if (c->get("LEVEL", 1.0) != 8.0) { gp.push_back(q); continue; }
+                const double level = c->get("LEVEL", 1.0);
+                if (level == 4.0 || level == 9.0) {  // VBIC: ngspice's own (tests/models/vbic_gen.py) through OSDI
+                    sensList(blk, q.instanceName, *c);
+                    if (q.off) throw std::runtime_error(q.instanceName + ": OFF on a VBIC device is not supported yet");
+                    if (!osdi::findModule("vbic_ng")) osdi::loadLibrary("vbic.osdi");
+                    static const std::map<std::string, std::string> alias = {{"TREF", "TNOM"}, {"V0", "VO"}, {"CBE0", "CBEO"},
+                        {"CBC0", "CBCO"}, {"QC0", "QCO"}, {"XV0", "XVO"}, {"XRC", "XRCX"}, {"XRB", "XRBX"}};
+                    static const std::set<std::string> soa = {"VBE_MAX", "BVBE", "VBC_MAX", "BVBC", "VCE_MAX", "BVCE",
+                                                              "VSUB_MAX", "BVSUB", "VBCFWD", "VBEFWD", "VSUBFWD"};
+                    std::map<std::string, double> p;
+                    for (const auto& [k, v] : c->params) {  // the SOA limits only drive ngspice's warnings
+                        if (k == "LEVEL" || soa.count(k)) continue;
+                        const auto a = alias.find(k);
+                        p[a == alias.end() ? k : a->second] = v;
+                    }
+                    p["TYPE"] = c->type == "PNP" ? -1.0 : 1.0;
+                    auto& model = osdiModels_[toUpper(c->name) + " VBIC"];
+                    if (!model) model = std::make_shared<osdi::Model>(osdi::findModule("vbic_ng"), c->name, p);
+                    OsdiDevice o;
+                    o.instanceName = q.instanceName;
+                    o.modelName = c->name;
+                    o.nodes = {q.nodeCollector, q.base, q.emitter, q.substrate, q.thermal};
+                    if (q.area != 1.0) o.params.push_back({"area", q.area});  // ngspice SCALE = AREA * M on everything
+                    const double dt = (std::isnan(q.inst.temp) ? 0.0 : q.inst.temp + 273.15 - ambientK_) + q.inst.dtemp;
+                    if (dt != 0.0) o.params.push_back({"dtemp_i", dt});
+                    o.model = model;
+                    blk.osdiDevices.push_back(o);
+                    continue;
+                }
+                if (level != 8.0) { gp.push_back(q); continue; }
                 sensList(blk, q.instanceName, *c);
                 if (!std::isnan(q.inst.temp) || q.inst.dtemp != 0.0)  // ngspice's HICUM rejects them too
                     throw std::runtime_error(q.instanceName + ": TEMP/DTEMP on a HICUM device is not supported");
