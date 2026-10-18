@@ -1164,6 +1164,20 @@ public:
                        const std::vector<SensParam> &params = {}, int zeroParams = 0,
                        const std::function<bool(const SensParam &, TensorNetlist &)> &reparse = {});
 
+  // ngspice .sens ... ac: the complex sensitivity of the AC output at each frequency, d(out)/dp for R/C/L values
+  // (r1, r1_m, r1_scale, c1..., l1...), V/I DC values and AC magnitudes (v1, v1_acmag, i1, i1_m, i1_acmag) and the
+  // device parameters solveSens covers. Each parameter's whole effect: the operating-point shift dx = J^-1 dF/dp
+  // (from the DC residuals), then the AC matrix built at (p +- dp, x0 +- dp dx) and the excitation, against two
+  // adjoint solves per frequency. values/imag are row-major [name][frequency].
+  struct SensACResult {
+    std::vector<std::string> names, unsupported;
+    std::vector<double> values, imag;
+    std::string error;
+  };
+  SensACResult solveSensAC(TensorNetlist &netlist, int outNode, int refNode, const std::string &outSource,
+                           const std::vector<double> &freqs, const std::vector<SensParam> &params, int zeroParams,
+                           const std::function<bool(const SensParam &, TensorNetlist &)> &reparse);
+
   // ngspice .tf at the last solveDC() operating point: the small-signal gain from top-level source inSource to
   // v(outNode) - v(refNode) (or i(outSource)), the impedance the input source sees and the output impedance, each
   // from one solve of the DC Jacobian. Impedances that are open circuits read 1e20, as in ngspice.

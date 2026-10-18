@@ -70,6 +70,9 @@ struct SPICEParseResult {
     bool          hasSens = false;
     std::string   sensSource;        // i(vsrc): the source name, else empty
     int           sensOut = 0, sensRef = 0;
+    std::string   sensSweep;            // .sens ... ac dec|oct|lin n fstart fstop (empty: DC)
+    int           sensPoints = 0;
+    double        sensStart = 0.0, sensStop = 0.0;
     std::vector<SensParam> sensParams;  // the top-level devices' parameters a .sens differentiates
     int           sensZeroParams = 0;   // parameters left out at 0 (no relative step)
     // .tf v(out[,ref]) | i(vsrc) insrc: DC small-signal transfer function

@@ -1403,6 +1403,141 @@ CircuitSim::SensResult CircuitSim::solveSens(TensorNetlist &netlist, int outNode
   return r;
 }
 
+CircuitSim::SensACResult CircuitSim::solveSensAC(TensorNetlist &netlist, int outNode, int refNode,
+                                                 const std::string &outSource, const std::vector<double> &freqs,
+                                                 const std::vector<SensParam> &params, int zeroParams,
+                                                 const std::function<bool(const SensParam &, TensorNetlist &)> &reparse) {
+  SensACResult r;
+  ACSystem sys;
+  if (!acSystem(netlist, sys)) { r.error = "AC sensitivity needs a converged DC operating point"; return r; }
+  const int n = sys.n, nf = (int)freqs.size();
+  auto &g = netlist.globalBlock;
+  std::vector<double> c(n, 0.0);
+  if (!outSource.empty()) {
+    int total = 0;
+    const int vs = branchSlots(netlist, total)[0].vs;
+    const auto it = std::find_if(g.voltageSources.begin(), g.voltageSources.end(), [&](const VoltageSource &v) { return v.name == outSource; });
+    if (it == g.voltageSources.end()) { r.error = ".sens i(" + outSource + "): no such voltage source at the top level"; return r; }
+    c[vs + (it - g.voltageSources.begin())] = 1.0;
+  } else {
+    if (outNode > 0) c[outNode - 1] += 1.0;
+    if (refNode > 0) c[refNode - 1] -= 1.0;
+  }
+  auto real2 = [&](const std::vector<std::complex<double>> &e) {  // [Re; Im]
+    std::vector<double> v(2 * n);
+    for (int i = 0; i < n; ++i) { v[i] = e[i].real(); v[n + i] = e[i].imag(); }
+    return v;
+  };
+  auto mul = [](const Csr_matrix &A, const std::vector<double> &x) {
+    std::vector<double> y(x.size(), 0.0);
+    for (size_t i = 0; i + 1 < A.row_pointer.size(); ++i)
+      for (int p = A.row_pointer[i]; p < A.row_pointer[i + 1]; ++p) y[i] += A.values[p] * x[A.col_indices[p]];
+    return y;
+  };
+  // The response X and the adjoints of Re(out) and Im(out), per frequency
+  const std::vector<double> e0 = real2(acExcitation(netlist));
+  std::vector<std::vector<double>> X(nf), Lr(nf), Li(nf);
+  for (int k = 0; k < nf; ++k) {
+    const double w = 2.0 * M_PI * freqs[k];
+    std::vector<double> cr(2 * n, 0.0), ci(2 * n, 0.0);
+    for (int i = 0; i < n; ++i) { cr[i] = c[i]; ci[n + i] = c[i]; }
+    X[k] = solveLinear(acMatrix(sys, w, false), e0).solution;
+    const Csr_matrix T = acMatrix(sys, w, true);
+    Lr[k] = solveLinear(T, cr).solution;
+    Li[k] = solveLinear(T, ci).solution;
+    if ((int)X[k].size() != 2 * n || (int)Lr[k].size() != 2 * n || (int)Li[k].size() != 2 * n) {
+      r.error = "AC sensitivity: the AC system is singular at " + std::to_string(freqs[k]) + " Hz"; return r;
+    }
+  }
+  const std::vector<double> x0 = lastSolution_;
+  auto lower = [](std::string s) { for (auto &ch : s) ch = (char)std::tolower((unsigned char)ch); return s; };
+  // d(out)/dp at every frequency from the two netlists p +- dp (nullptr row: the parameter could not be perturbed)
+  auto derive = [&](TensorNetlist &a, TensorNetlist &b, double dp, std::vector<std::complex<double>> &row) {
+    std::vector<double> Fa, Fb;
+    { CircuitSim t; t.execMode = execMode; t.calculatePhysicalResiduals(a, x0, 0.0, 0.0, &Fa); }
+    { CircuitSim t; t.execMode = execMode; t.calculatePhysicalResiduals(b, x0, 0.0, 0.0, &Fb); }
+    std::vector<double> dF(n);  // the audit's residual is -F: J dx = dF
+    for (int i = 0; i < n; ++i) dF[i] = (Fa[i] - Fb[i]) / (2.0 * dp);
+    std::vector<double> dx(n, 0.0);
+    if (std::any_of(dF.begin(), dF.end(), [](double v) { return v != 0.0; })) dx = solveLinear(sys.G, dF).solution;
+    if ((int)dx.size() != n) return false;
+    ACSystem sa, sb;
+    auto linearised = [&](TensorNetlist &nl, double sign, ACSystem &out) {  // the AC system of nl at x0 + sign dp dx
+      CircuitSim t;
+      t.execMode = execMode;
+      t.soaBlock = tensorizeNetlist(nl);  // R, D, M, Q stamp from the SoA tensors (solveDC builds them)
+      t.scheduler.schedule(nl);
+      t.lastSolution_ = x0;
+      for (int i = 0; i < n; ++i) t.lastSolution_[i] += sign * dp * dx[i];
+      return t.acSystem(nl, out);
+    };
+    if (!linearised(a, 1.0, sa) || !linearised(b, -1.0, sb)) return false;
+    const std::vector<double> ea = real2(acExcitation(a)), eb = real2(acExcitation(b));
+    row.assign(nf, 0.0);
+    for (int k = 0; k < nf; ++k) {  // dX = R^-1 (de - dR X): d(out) = L . (de - dR X)
+      const double w = 2.0 * M_PI * freqs[k];
+      const std::vector<double> ya = mul(acMatrix(sa, w, false), X[k]), yb = mul(acMatrix(sb, w, false), X[k]);
+      double re = 0.0, im = 0.0;
+      for (int i = 0; i < 2 * n; ++i) {
+        const double v = ((ea[i] - eb[i]) - (ya[i] - yb[i])) / (2.0 * dp);
+        re += Lr[k][i] * v;
+        im += Li[k][i] * v;
+      }
+      row[k] = {re, im};
+    }
+    return true;
+  };
+  auto add = [&](const std::string &name, const std::vector<std::complex<double>> &row, double scale) {
+    r.names.push_back(lower(name));
+    for (const auto &z : row) { r.values.push_back(scale * z.real()); r.imag.push_back(scale * z.imag()); }
+  };
+  int failed = 0;
+  // An element value: the netlist copied with it changed (relative step, or 1e-6 at 0: AC magnitudes)
+  auto element = [&](double &field, std::vector<std::complex<double>> &row) {
+    const double p0 = field, dp = 1e-6 * (p0 != 0.0 ? std::abs(p0) : 1.0);
+    field = p0 + dp; TensorNetlist a = netlist;
+    field = p0 - dp; TensorNetlist b = netlist;
+    field = p0;
+    if (!derive(a, b, dp, row)) { ++failed; return false; }
+    return true;
+  };
+  std::vector<std::complex<double>> row;
+  for (auto &R : g.resistors)
+    if (element(R.resistance_ohms, row)) { add(R.name, row, 1.0); add(R.name + "_m", row, -R.resistance_ohms); add(R.name + "_scale", row, R.resistance_ohms); }
+  for (auto &C : g.capacitors)
+    if (element(C.capacitance_farads, row)) { add(C.name, row, 1.0); add(C.name + "_m", row, C.capacitance_farads); add(C.name + "_scale", row, C.capacitance_farads); }
+  for (auto &L : g.inductors)
+    if (element(L.inductance_henries, row)) { add(L.name, row, 1.0); add(L.name + "_m", row, -L.inductance_henries); add(L.name + "_scale", row, L.inductance_henries); }
+  for (auto &V : g.voltageSources) {
+    if (element(V.voltage_V, row)) add(V.name, row, 1.0);
+    if (element(V.ac_mag, row)) add(V.name + "_acmag", row, 1.0);
+  }
+  for (auto &I : g.currentSources) {
+    if (element(I.current_A, row)) { add(I.name, row, 1.0); add(I.name + "_m", row, I.current_A); }
+    if (element(I.ac_mag, row)) add(I.name + "_acmag", row, 1.0);
+  }
+  for (const auto &p : params) {
+    const double dp = 1e-6 * std::abs(p.value);
+    SensParam qa = p, qb = p;
+    qa.value += dp; qb.value -= dp;
+    TensorNetlist a, b;
+    if (!reparse || !reparse(qa, a) || !reparse(qb, b) || systemSize(a) != n || systemSize(b) != n || !derive(a, b, dp, row)) { ++failed; continue; }
+    add(p.instance + (p.model ? ":" : "_") + p.param, row, 1.0);
+  }
+  // ponytail: top-level elements and devices only, as solveSens
+  auto note = [&](const std::string &kind, size_t count) { if (count) r.unsupported.push_back(std::to_string(count) + " " + kind); };
+  note("switch(es)", g.switches.size()); note("controlled source(s)", g.voltageControlledVoltageSources.size() +
+      g.voltageControlledCurrentSources.size() + g.currentControlledVoltageSources.size() + g.currentControlledCurrentSources.size());
+  note("behavioural source(s)", g.behavioural.size()); note("transmission line(s)", g.transmissionLines.size());
+  note("mutual inductance(s)", g.mutualInductors.size());
+  note("subcircuit instance(s)", netlist.instances.size());
+  note("device parameter(s) at 0 (no relative step)", zeroParams);
+  note("parameter(s) whose perturbed netlist failed", failed);
+  if (!g.diodes.empty() || !g.bjts.empty() || !g.jfets.empty() || !g.osdiDevices.empty() || !g.mosfets.empty())
+    r.unsupported.push_back("device instance parameter(s) other than MOSFET W/L (AREA, AD, AS, PD, PS, NRD, NRS, M, TEMP, ...)");
+  return r;
+}
+
 CircuitSim::TFResult CircuitSim::solveTF(TensorNetlist &netlist, int outNode, int refNode, const std::string &outSource,
                                          const std::string &inSource) {
   TFResult r;

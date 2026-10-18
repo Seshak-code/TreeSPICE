@@ -146,13 +146,16 @@ def branch_names(text):
 
 def analysis(text):
     """-> ('op',) | ('dc', src, start, stop, step[, src2, start2, ...]) | ('tran', tstep, tstop, uic) | ('ac', sweep, n, f1, f2)
-       | ('noise', "v(out[,ref])", src, sweep, n, f1, f2) | ('pz', in+, in-, out+, out-, cur|vol, pol|zer|pz) | ('sens', "v(out[,ref])" | "i(vsrc)")
+       | ('noise', "v(out[,ref])", src, sweep, n, f1, f2) | ('pz', in+, in-, out+, out-, cur|vol, pol|zer|pz) | ('sens', "v(out[,ref])" | "i(vsrc)"[, sweep, n, f1, f2])
        | ('tf', "v(out[,ref])" | "i(vsrc)", insrc) | ('unsupported', why)"""
     for line in cards(text):
         t = line.split()
         kw = t[0].lower()
         if kw == ".ac": return ("ac", t[1].lower(), int(num(t[2])), num(t[3]), num(t[4]))
-        if kw == ".sens": return ("sens", t[1].lower()) if len(t) == 2 else ("unsupported", ".sens form (AC / several outputs)")
+        if kw == ".sens":
+            if len(t) == 2: return ("sens", t[1].lower())
+            if len(t) == 7 and t[2].lower() == "ac": return ("sens", t[1].lower(), t[3].lower(), int(num(t[4])), num(t[5]), num(t[6]))
+            return ("unsupported", ".sens form (several outputs)")
         if kw == ".pz": return ("pz", *t[1:7])
         if kw == ".tf": return ("tf", " ".join(t[1:-1]).lower(), t[-1].lower())
         if kw == ".noise":
@@ -174,7 +177,7 @@ def run_engine(args, text, mode, kind, step=0.0, stop=0.0):
     env = {**os.environ, **({"TREESPICE_BASEDIR": args.basedir} if getattr(args, "basedir", None) else {})}
     try: out = subprocess.run(cmd, capture_output=True, text=True, timeout=args.timeout, env=env, cwd=args.tmp).stdout  # cwd: bsim4.osdi writes bsim4v5.out there
     except subprocess.TimeoutExpired: return dict(conv=False, err="TIMEOUT", pts=[])
-    conv, err, pts, total, branches, nodes, pz, sens, tf = False, "", [], None, [], [], dict(POLE=[], ZERO=[]), {}, {}
+    conv, err, pts, total, branches, nodes, pz, sens, tf, sensac = False, "", [], None, [], [], dict(POLE=[], ZERO=[]), {}, {}, {}
     dnodes, devents = [], []
     for ln in out.splitlines():
         if ln.startswith("DNODES"): dnodes = ln.split()[1:]
@@ -185,12 +188,13 @@ def run_engine(args, text, mode, kind, step=0.0, stop=0.0):
         elif ln.startswith(("POLE ", "ZERO ")): pz[ln[:4]].append(complex(*map(float, ln.split()[1:3])))
         elif ln.startswith("SENS "): sens[ln.split()[1]] = float(ln.split()[2])
         elif ln.startswith("TF "): tf[ln.split()[1]] = float(ln.split()[2])
+        elif ln.startswith("SENSAC "): w = ln.split(); sensac.setdefault(w[1], []).append(complex(float(w[3]), float(w[4])))
         elif ln.startswith("CONVERGED"): conv = ln.split()[1] == "1"
         elif ln.startswith("ERROR"): err = ln[6:].strip()
         elif ln and (ln[0].isdigit() or ln[0] == "-"):
             try: pts.append([float(x) for x in ln.split()])
             except ValueError: pass
-    return dict(conv=conv, err=err, pts=pts, total=total, branches=branches, nn=len(nodes), pz=pz, sens=sens, tf=tf,
+    return dict(conv=conv, err=err, pts=pts, total=total, branches=branches, nn=len(nodes), pz=pz, sens=sens, tf=tf, sensac=sensac,
                 nodes=nodes, dnodes=dnodes, devents=devents)
 
 # ---------------------------------------------------------------- ngspice side
@@ -324,37 +328,56 @@ def interp(xs, ys, t):
 
 def col(r, idx): return [row[idx] for row in r["pts"]]
 
-def sens_fd(args, text, out, name):
-    """ngspice's d(out)/dp by central difference, for an engine device-parameter name: inst:param (the instance gets
-    a copy of its .model card with param changed) or inst_param (W/L on the instance line). -> (dOut/dp, p) or None."""
-    inst, sep, par = re.match(r"([^:_]+)([:_])(.+)", name).groups()
+def sens_fd(args, text, out, name, an=("op",)):
+    """ngspice's d(out)/dp by central difference (relative step 1e-4, tight tolerances, 16 digits) for an engine
+    sensitivity name: inst:param (the instance gets a copy of its .model card with param changed), m1_w / m1_l (on the
+    instance line), r1 / c1 / l1 (the value), v1 / i1 (the DC value), v1_acmag / i1_acmag (the AC magnitude).
+    -> ([d(out)/dp per point of the analysis an], p, [out per point]) or None."""
     lines = cards(text)
     title = text.splitlines()[0]
-    k = next((i for i, ln in enumerate(lines) if toks(ln)[0].lower() == inst), None)
+    m = re.match(r"([^:_]+)(?:([:_])(.+))?$", name)
+    inst, sep, par = m.group(1), m.group(2) or "", m.group(3) or ""
+    k = next((i for i, ln in enumerate(lines) if ln.split()[0].lower() == inst), None)
     if k is None: return None
-    models = {toks(ln)[1].lower(): i for i, ln in enumerate(lines) if toks(ln)[0].lower() == ".model"}
-    model = next((t for t in toks(lines[k])[1:] if t.lower() in models), None)
-    src = lines[models[model.lower()]] if sep == ":" and model else lines[k]
-    m = re.search(rf"\b{re.escape(par)}\s*=\s*([^\s()]+)", src, re.I)
-    if sep == ":" and not model or not m: return None  # a binned card, or a parameter the text does not give
-    p0 = num(m.group(1))
-    if not p0: return None
+    parts = lines[k].split()
+    if sep == ":" or par in ("w", "l"):  # a device parameter
+        models = {toks(ln)[1].lower(): i for i, ln in enumerate(lines) if toks(ln)[0].lower() == ".model"}
+        model = next((t for t in toks(lines[k])[1:] if t.lower() in models), None)
+        src = lines[models[model.lower()]] if sep == ":" and model else lines[k]
+        g = re.search(rf"\b{re.escape(par)}\s*=\s*([^\s()]+)", src, re.I)
+        if sep == ":" and not model or not g: return None  # a binned card, or a parameter the text does not give
+        p0 = num(g.group(1))
+        def edited(v):
+            ls = list(lines)
+            if sep == ":":
+                card = re.sub(rf"\b{re.escape(par)}\s*=\s*[^\s()]+", f"{par}={v!r}", src, count=1, flags=re.I)
+                ls.append(re.sub(rf"^(\S+\s+){re.escape(model)}\b", rf"\g<1>{model}_fd", card, count=1, flags=re.I))
+                ls[k] = re.sub(rf"(?<=\s){re.escape(model)}(?=\s|$)", f"{model}_fd", ls[k], count=1, flags=re.I)
+            else:
+                ls[k] = re.sub(rf"\b{re.escape(par)}\s*=\s*\S+", f"{par}={v!r}", ls[k], count=1, flags=re.I)
+            return ls
+    else:  # an element value: R/C/L value, V/I DC value or AC magnitude
+        low = [t.lower() for t in parts]
+        key = "ac" if par == "acmag" else "dc" if inst[0] in "vi" and "dc" in low else None
+        at = low.index(key) + 1 if key and key in low else 3 if key is None and len(parts) > 3 and "=" not in parts[3] else None
+        if par not in ("", "acmag"): return None
+        p0 = num(parts[at]) if at is not None else 0.0
+        def edited(v):
+            ls, q = list(lines), list(parts)
+            if at is not None: q[at] = repr(v)
+            else: q += ["ac", repr(v)]
+            ls[k] = " ".join(q)
+            return ls
+    o = re.match(r"([vi])\((\S+?)(?:,(\S+))?\)", out).groups()
     def y(v):
-        ls = list(lines)
-        if sep == ":":
-            card = re.sub(rf"\b{re.escape(par)}\s*=\s*[^\s()]+", f"{par}={v!r}", src, count=1, flags=re.I)
-            ls.append(re.sub(rf"^(\S+\s+){re.escape(model)}\b", rf"\g<1>{model}_fd", card, count=1, flags=re.I))
-            ls[k] = re.sub(rf"(?<=\s){re.escape(model)}(?=\s|$)", f"{model}_fd", ls[k], count=1, flags=re.I)
-        else:
-            ls[k] = re.sub(rf"\b{re.escape(par)}\s*=\s*\S+", f"{par}={v!r}", ls[k], count=1, flags=re.I)
-        o = re.match(r"([vi])\((\S+?)(?:,(\S+))?\)", out).groups()
-        body = "\n".join([title] + ls + [".options reltol=1e-8 abstol=1e-16 vntol=1e-13", ".op", ".end"]) + "\n"
+        body = "\n".join([title] + edited(v) + [".options reltol=1e-8 abstol=1e-16 vntol=1e-13", ".end"]) + "\n"
         nodes = [] if o[0] == "i" else [o[1]] + ([o[2]] if o[2] else [])
-        _, vals = run_ngspice(args, body, ("op",), nodes, [o[1]] if o[0] == "i" else [], digits=True)
-        if o[0] == "i": return vals[f"i({o[1]})"][0]
-        return vals[o[1]][0] - (vals[o[2]][0] if o[2] else 0.0)
-    d = 1e-4 * abs(p0)
-    return (y(p0 + d) - y(p0 - d)) / (2 * d), p0
+        _, vals = run_ngspice(args, body, an, nodes, [o[1]] if o[0] == "i" else [], digits=True)
+        if o[0] == "i": return vals[f"i({o[1]})"]
+        return [a - b for a, b in zip(vals[o[1]], vals[o[2]] if o[2] else [0.0] * len(vals[o[1]]))]
+    d = 1e-4 * (abs(p0) or 1.0)
+    ya, yb = y(p0 + d), y(p0 - d)
+    return [(a - b) / (2 * d) for a, b in zip(ya, yb)], p0, [(a + b) / 2 for a, b in zip(ya, yb)]
 
 def unsupported(r):
     return not r["conv"] and bool(re.search(r"unsupported|not supported|unknown (element|card)", r["err"], re.I))
@@ -381,7 +404,23 @@ def compare(args, text, an, mode, nm, ref):
         e = abs(got - exp) if math.isfinite(got) else math.inf
         worst_abs = max(worst_abs, e); worst_rel = max(worst_rel, e / (scale or max(abs(exp), 1e-3)))
         if not e <= tol: bad.append(f"{label}: {got:.6g} vs ngspice {exp:.6g}")
-    if an[0] == "sens":
+    if an[0] == "sens" and len(an) > 2:  # .sens ... ac: every value against ngspice's central difference on .ac
+        r = run_engine(args, text, mode, "sens")
+        if unsupported(r): return "ENGINE-UNSUPPORTED", 0, 0, r["err"]
+        if not r["conv"] or not r["sensac"]: return "FAIL", math.inf, math.inf, f"engine not converged: {r['err']}"
+        for n, got in r["sensac"].items():
+            if n.endswith(("_m", "_scale")): continue  # value * d/dvalue
+            fd = sens_fd(args, text, an[1], n, ("ac", *an[2:]))
+            if fd is None: bad.append(f"no ngspice difference for {n}"); continue
+            exp, p0, ys = fd
+            if len(exp) != len(got): bad.append(f"{n}: {len(got)} frequencies vs ngspice {len(exp)}"); continue
+            pn = abs(p0) or 1.0
+            for k, (g, e) in enumerate(zip(got, exp)):
+                worst_abs = max(worst_abs, abs(g - e)); worst_rel = max(worst_rel, abs(g - e) / max(abs(e), 1e-300))
+                # as dOut/dp * p; ngspice's AC solve (~1e-11 relative) bounds its difference's floor at ~1e-6 |out|
+                if abs(g - e) * pn > 1e-3 * abs(e) * pn + 1e-6 * abs(ys[k]) + 1e-12:
+                    bad.append(f"d/d{n} at point {k}: {g:.6g} vs ngspice difference {e:.6g}")
+    elif an[0] == "sens":
         r = run_engine(args, text, mode, "sens")
         if unsupported(r): return "ENGINE-UNSUPPORTED", 0, 0, r["err"]
         if not r["conv"]: return "FAIL", math.inf, math.inf, f"engine not converged: {r['err']}"
@@ -405,7 +444,7 @@ def compare(args, text, an, mode, nm, ref):
             if n[0] not in "dqmjn" or ":" not in n and not re.match(r"m[^_]*_[wl]$", n): continue
             fd = sens_fd(args, text, an[1], n)
             if fd is None: bad.append(f"no ngspice difference for {n}"); continue
-            exp, p0 = fd
+            exp, p0 = fd[0][0], fd[1]
             worst_abs = max(worst_abs, abs(got - exp)); worst_rel = max(worst_rel, abs(got - exp) / max(abs(exp), 1e-300))
             if abs(got - exp) * abs(p0) > 1e-3 * abs(exp * p0) + 1e-9: bad.append(f"d/d{n}: {got:.6g} vs ngspice difference {exp:.6g}")
     elif an[0] == "tf":

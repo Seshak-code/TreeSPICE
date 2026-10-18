@@ -711,12 +711,21 @@ SimulationResponseDTO SessionImpl::runSens(const SimulationRequestDTO& req,
                 nl = std::move(q.netlist);
                 return true;
             };
-            auto sn = sim.solveSens(parsed.netlist, parsed.sensOut, parsed.sensRef, parsed.sensSource,
-                                    parsed.sensParams, parsed.sensZeroParams, reparse);
-            r.errorDetail = sn.error;
-            r.converged   = sn.error.empty();
+            if (parsed.sensSweep.empty()) {
+                auto sn = sim.solveSens(parsed.netlist, parsed.sensOut, parsed.sensRef, parsed.sensSource,
+                                        parsed.sensParams, parsed.sensZeroParams, reparse);
+                r.errorDetail = sn.error;
+                r.extended.sens = {std::move(sn.names), std::move(sn.values), {}, {}, std::move(sn.unsupported)};
+            } else {
+                auto freqs = CircuitSim::acFrequencies(parsed.sensSweep, parsed.sensPoints, parsed.sensStart, parsed.sensStop);
+                auto sn = sim.solveSensAC(parsed.netlist, parsed.sensOut, parsed.sensRef, parsed.sensSource, freqs,
+                                          parsed.sensParams, parsed.sensZeroParams, reparse);
+                r.errorDetail = sn.error;
+                r.extended.sens = {std::move(sn.names), std::move(sn.values), std::move(freqs), std::move(sn.imag),
+                                   std::move(sn.unsupported)};
+            }
+            r.converged   = r.errorDetail.empty();
             r.extended.hasSens = r.converged;
-            r.extended.sens = {std::move(sn.names), std::move(sn.values), std::move(sn.unsupported)};
         }
         r.backend = backendOf(sim, precision_);
     }

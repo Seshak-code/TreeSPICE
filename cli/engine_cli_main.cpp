@@ -115,7 +115,16 @@ void printPZ(std::ostream& os, const SimulationResponseDTO& r) {
 void printSens(std::ostream& os, const SimulationResponseDTO& r) {
     char b[160];
     const auto& sn = r.extended.sens;
-    for (size_t k = 0; k < sn.names.size(); ++k) { std::snprintf(b, sizeof b, "%s = %.6e\n", sn.names[k].c_str(), sn.values[k]); os << b; }
+    const size_t nf = sn.frequencies.size();
+    if (nf == 0)
+        for (size_t k = 0; k < sn.names.size(); ++k) { std::snprintf(b, sizeof b, "%s = %.6e\n", sn.names[k].c_str(), sn.values[k]); os << b; }
+    for (size_t k = 0; nf && k < sn.names.size(); ++k) {  // .sens ... ac: ngspice's table per vector
+        os << "Index   frequency       " << sn.names[k] << "\n";
+        for (size_t f = 0; f < nf; ++f) {
+            std::snprintf(b, sizeof b, "%zu\t%.6e\t%.6e,\t%.6e\n", f, sn.frequencies[f], sn.values[k * nf + f], sn.imag[k * nf + f]);
+            os << b;
+        }
+    }
     for (const auto& u : sn.unsupported) os << "sensitivity not computed (not supported yet): " << u << "\n";
 }
 

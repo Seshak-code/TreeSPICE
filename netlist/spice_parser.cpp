@@ -560,12 +560,18 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                     result_.noiseStop   = parseValue(tok[sw + 3]);
                 }
                 else if (keyword == ".SENS") {
-                    // .sens v(out[,ref]) | i(vsrc)   (AC sensitivity, .sens ... ac dec n f1 f2, is not supported yet)
+                    // .sens v(out[,ref]) | i(vsrc) [ac dec|oct|lin n fstart fstop]
                     const std::string kind = tok.size() > 2 ? toUpper(tok[1]) : "";
                     const size_t want = kind == "V" && tok.size() > 3 && toUpper(tok[3]) != "V" && toUpper(tok[3]) != "I" && toUpper(tok[3]) != "AC" ? 4 : 3;
                     if (kind != "V" && kind != "I") throw std::runtime_error(".sens expects v(out[,ref]) or i(vsrc)");
-                    if (tok.size() > want && toUpper(tok[want]) == "AC") throw std::runtime_error(".sens ... ac (AC sensitivity) is not supported yet");
-                    if (tok.size() != want) throw std::runtime_error(".sens supports a single v(out[,ref]) or i(vsrc) output");
+                    if (tok.size() > want && toUpper(tok[want]) == "AC") {
+                        const std::string sw = tok.size() == want + 5 ? toUpper(tok[want + 1]) : "";
+                        if (sw != "DEC" && sw != "OCT" && sw != "LIN") throw std::runtime_error(".sens ... ac expects dec|oct|lin n fstart fstop");
+                        result_.sensSweep = sw == "DEC" ? "dec" : sw == "OCT" ? "oct" : "lin";
+                        result_.sensPoints = static_cast<int>(parseValue(tok[want + 2]));
+                        result_.sensStart = parseValue(tok[want + 3]);
+                        result_.sensStop = parseValue(tok[want + 4]);
+                    } else if (tok.size() != want) throw std::runtime_error(".sens supports a single v(out[,ref]) or i(vsrc) output");
                     result_.hasSens = true;
                     if (kind == "I") result_.sensSource = toUpper(tok[2]);
                     else { sensOut_ = toUpper(tok[2]); sensRef_ = want == 4 ? toUpper(tok[3]) : "0"; }
