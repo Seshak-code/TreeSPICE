@@ -1,0 +1,12 @@
+* B4SOI common-source amplifier, floating body (4 terminals) and body tied (5): AC at the operating point
+.include lib/b4soi_nmos.inc
+VDD vdd 0 DC 1.2
+VG g 0 DC 0.6 AC 1
+RD vdd d 5k
+M1 d g 0 0 nmos1 w=4u l=0.15u
+CL d 0 50f
+RD2 vdd d2 5k
+M2 d2 g 0 0 0 nmos1 w=4u l=0.15u
+CL2 d2 0 50f
+.ac dec 10 1meg 100g
+.end

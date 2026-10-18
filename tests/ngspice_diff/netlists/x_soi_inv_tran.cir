@@ -1,0 +1,10 @@
+* B4SOI inverter (NMOS + PMOS, floating bodies) driving 20 fF: transient and the input current (gate charges)
+.include lib/b4soi_nmos.inc
+.include lib/b4soi_pmos.inc
+VDD vdd 0 DC 1.2
+VIN in 0 PULSE(0 1.2 0.2n 50p 50p 1n 2.4n)
+MN out in 0 0 nmos1 w=2u l=0.15u
+MP out in vdd 0 pmos1 w=4u l=0.15u
+CL out 0 20f
+.tran 5p 5n
+.end

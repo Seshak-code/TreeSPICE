@@ -447,8 +447,6 @@ int main() {
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 y inv\n.model inv d_inverter(delay=1n)\n", "DELAY is not a D_INVERTER parameter"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 0 NM\n.model NM NMOS\n", "expected 4 nodes (d g s b) for a LEVEL 1"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 SN\n.model SN NMOS LEVEL=57\n", "(B3SOI) is not supported"},
-            {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 SN\n.model SN NMOS LEVEL=10\n.tran 1n 10n\n", "supports .op and .dc only"},
-            {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 SN\n.model SN NMOS LEVEL=10\n.tran 0 10n\n", "supports .op and .dc only"},
             // QA round 2 and the parameter front end
             {"V1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DM\n.model DM D\n.model DM D IS=1e-15\n", "defined twice"},
             {"V1 1 0 DC {nosuch*2}\nR1 1 0 1k\n", "unknown parameter NOSUCH"},

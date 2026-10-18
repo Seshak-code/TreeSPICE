@@ -889,14 +889,6 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 throw std::runtime_error(m.instanceName + ": TEMP/DTEMP on a " + tag + " device is not supported yet");
             if (family != 10 && !m.soiNodes.empty())
                 throw std::runtime_error(m.instanceName + ": expected 4 nodes (d g s b) for a " + tag + " model");
-            // ponytail: bsimsoi (4.6) and ngspice's native B4SOI (4.4) agree at DC, but their charges differ: a CS
-            // stage's gate current at 1 MHz is 33 % higher on bsimsoi with the body tied (ngspice loading the same .osdi
-            // agrees with the engine), and a floating body's gain is -1.36 vs -1.11. VERSION and VGSTCVMOD do not
-            // explain it; CAPMOD=3 is suspect. Until it is found, the analyses that see charges refuse. The
-            // netlist's own cards decide, so a request that adds .tran/.ac to a netlist without them is not caught.
-            if (family == 10 && (result_.tranStop > 0.0 || !result_.acSweep.empty() || !result_.noiseSweep.empty() || result_.hasPZ))
-                throw std::runtime_error(m.instanceName + ": BSIM-SOI (LEVEL 10/58) supports .op and .dc only so far (.tran/.ac/.noise/.pz "
-                                         "differ from ngspice's B4SOI charges)");
             if (!osdi::findModule(module)) osdi::loadLibrary(v3 ? "bsim3.osdi" : family == 4 ? "bsim4.osdi" : "bsimsoi.osdi");
             std::map<std::string, double> p;
             for (const auto& [k, v] : c.params)  // binning bounds select the card; LEVEL names it

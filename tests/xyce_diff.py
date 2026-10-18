@@ -69,6 +69,9 @@ DIALECT = {
     "CircuitSim90/MOS3/rich3.cir": "Xyce's MOS level 3 at 125 C: the engine follows ngspice to 1 mV (both start at v(51) = 0, the gold does not)",
     "XDM/HSPICE/MODELS/correct_instance_parameters.cir": "default-card level 3 PMOS: the engine follows ngspice to 0.3 mV over the sweep "
                                                          "(v(3) 0.53612 vs 0.53613 at VG = 0.7), the gold reads 0.5394",
+    "BSIMSOI3/": "Xyce's LEVEL 10 is BSIMSOI 3.x; ngspice's (and the engine's) is B4SOI 4.x: a different model",
+    "HOMOTOPY/continuation": "BSIMSOI 3.2 cards at LEVEL 10 (Xyce's BSIMSOI3); ngspice's native B4SOI runs them to 4 kV, the engine (B4SOI 4.6) to 1.733 V vs Xyce 1.726 V",
+    "Certification_Tests/BUG_277_SON/ring51": "BSIMSOI 3.2 cards (nmos_3_2.mod) at LEVEL 10: Xyce's BSIMSOI3, not ngspice's B4SOI",
     "SANDLER21/sandler21.cir": "555 timer: output edges match ngspice to 0.1 us (1.0817 ms, 2.0816 ms, ...); a pointwise "
                                "compare at its near-vertical switching edges measures that offset, not the model",
 }
