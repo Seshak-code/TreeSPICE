@@ -700,8 +700,13 @@ std::string CircuitSim::runTransient(TensorNetlist &netlist, double step, double
                                      const std::function<bool(const SolverStep &)> &onPoint) {
   if (step == 0.0) step = stop / 50.0;  // .tran 0 tstop: ngspice's default TMAX
   if (!(step > 0.0) || !(stop > 0.0)) return "Transient needs step >= 0 and stop time > 0.";
-  const std::string err = beginTransient(netlist, step, uic, stop);
-  return err.empty() ? advanceTo(netlist, stop, onPoint) : err;
+  if (const std::string err = beginTransient(netlist, step, uic, stop); !err.empty()) return err;
+  // t = 0, ngspice's first point: the transient operating point, or the UIC values
+  const std::vector<double> &x = lastSolution_;
+  const size_t nn = std::min<size_t>(netlist.numGlobalNodes, x.size()), nb = std::min<size_t>(nn + branchCount(netlist), x.size());
+  const SolverStep s0{0.0, {x.begin(), x.begin() + nn}, {0, 0.0, true}, netlist.globalBlock.topologyHash, {x.begin() + nn, x.begin() + nb}};
+  if (onPoint && !onPoint(s0)) return "Cancelled.";
+  return advanceTo(netlist, stop, onPoint);
 }
 
 // Waveform sources whose corners the steps must land on (SPICE breakpoints).
@@ -774,6 +779,8 @@ std::string CircuitSim::beginTransient(TensorNetlist &netlist, double step, bool
     }
     // With A devices the operating point alternates digital settles and analog solves until the
     // adc_bridges agree (ngspice: "operating point analog/event alternations")
+    struct TranOp { bool &f; ~TranOp() { f = false; } } tranOp{tranOpSources_};
+    tranOpSources_ = true;
     for (int pass = 0;; ++pass) {
       SolverStep dc = solveDC(netlist.nodeICs.empty() ? netlist : forced);
       if (!dc.stats.converged)

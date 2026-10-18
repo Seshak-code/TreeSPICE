@@ -217,7 +217,7 @@ MeasureResultDTO run(Part& p, const std::vector<std::string>& t, const std::map<
     const Opts o(t, 2, t.size());
     if (o.expr.empty()) throw Fail("bad syntax. equal sign missing ?");
     const auto& y = p.vec(o.expr);
-    // a window past the data is cut to it, as ngspice does (the transient's first point is after t=0)
+    // a window past the data is cut to it, as ngspice does
     const double from = std::max(o.num("from", p.x.front()), p.x.front()), to = std::min(o.num("to", p.x.back()), p.x.back());
     const std::string label = kind + "(FROM/TO)";
     if (!(from <= to)) why(label.c_str(), kOut);

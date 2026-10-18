@@ -688,15 +688,23 @@ public:
   }
 
   // Independent source value: its waveform in transient, else DC, times the
-  // source-stepping factor (1 except while solveDC ramps the sources).
+  // source-stepping factor (1 except while solveDC ramps the sources). A transient's
+  // operating point (tranOpSources_) takes the waveforms at t = 0, as ngspice's TRANOP:
+  // V1 1 0 12 PWL(0 0 ...) starts the transient from 0 V, not 12.
   double srcFact_ = 1.0;
+  bool tranOpSources_ = false;
+  // ngspice's TRANOP value (probed on 47): PULSE, SIN, EXP and PWL at t = 0 whatever the DC value; SFFM and AM 0
+  // (SFFM's t = 0 value is VO: ngspice still starts it from 0)
+  template <class S> static double tranOpValue(const S &s, double dc) {
+    return s.type == "SFFM" || s.type == "AM" ? 0.0 : waveformValue(s, dc, 0.0);
+  }
   // A fatal OSDI model error during the current analysis (the model's own text):
   // it fails the analysis at once instead of retrying ever smaller steps.
   mutable std::string osdiFatal_;
   mutable std::string osdiNonFinite_;
   double ptranGmin_ = 0.0;  // node-to-ground gmin while solveDC runs its transient OP  // the last non-finite OSDI evaluation: reported if the analysis fails
   template <class S> double sourceValue(const S &s, double dc, double h, double time) const {
-    return srcFact_ * (h > 1e-15 ? waveformValue(s, dc, time) : dc);
+    return srcFact_ * (h > 1e-15 ? waveformValue(s, dc, time) : tranOpSources_ ? tranOpValue(s, dc) : dc);
   }
 
   // OSDI devices (compiled Verilog-A: BSIM4, BSIM-CMG, ...). An instance's local
@@ -2198,12 +2206,12 @@ public:
         // SoA Pathway (Flattened). tensorizeNetlist() stores DC values only, so
         // in transient re-evaluate every source at `time`, walking blocks in the
         // same order tensorizeNetlist() flattens them (global, then instances).
-        if (h > 1e-15) {
+        if (h > 1e-15 || tranOpSources_) {
             size_t ki = 0;
             auto refresh = [&](const TensorBlock &blk) {
                 for (const auto &i : blk.currentSources)
                     if (ki < soaBlock.currentSources.currents.size())
-                        soaBlock.currentSources.currents[ki++] = waveformValue(i, i.current_A, time);
+                        soaBlock.currentSources.currents[ki++] = h > 1e-15 ? waveformValue(i, i.current_A, time) : tranOpValue(i, i.current_A);
             };
             refresh(netlist.globalBlock);
             for (const auto &inst : netlist.instances) {
