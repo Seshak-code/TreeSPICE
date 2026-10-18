@@ -964,8 +964,18 @@ public:
         rbb = bjt_rbb<double, double>(ev.qb, ev.cb, p);
       }
       res(0, 4, p.rc); res(1, 5, rbb); res(2, 6, p.re);
+      double arg3 = 1.0, hist = 0.0;  // excess phase: the filter of this step (ngspice bjtload)
+      if (p.td > 0.0 && h > 1e-15 && j.st) {
+        const double a2 = 3.0 * h / p.td, a1 = a2 * h / p.td, denom = 1.0 + a1 + a2, r = j.st->hPrev > 0.0 ? h / j.st->hPrev : 1.0;
+        arg3 = a1 / denom;
+        hist = (j.st->xf[0] * (1.0 + r + a2) - j.st->xf[1] * r) / denom;
+      }
       const auto e = bjt_gp(shifted(T(type * (x[5] - x[6])), sh, 0), shifted(T(type * (x[5] - x[4])), sh, 1),
-                            T(type * (x[1] - x[4])), T(type * j.subSign * (x[3] - x[j.sub])), p);
+                            T(type * (x[1] - x[4])), T(type * j.subSign * (x[3] - x[j.sub])), p, arg3, hist);
+      if constexpr (std::is_same_v<T, double>)
+        if (next && p.td > 0.0 && h > 1e-15 && j.st) {  // next may alias st
+          next->xf[1] = j.st->xf[0]; next->xf[0] = e.xf; next->hPrev = h;
+        }
       I[4] += type * e.cc; I[5] += type * e.cb; I[6] -= type * (e.cc + e.cb);
       I[3] += type * j.subSign * e.cs; I[j.sub] -= type * j.subSign * e.cs;  // substrate junction
       from = bjtFrom; to = bjtTo;

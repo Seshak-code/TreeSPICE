@@ -697,6 +697,10 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
     *j.st = {};
     for (auto &vh : j.st->v) std::copy(v, v + K, vh);
     std::copy(q, q + K, j.st->q);
+    if (j.q) {  // excess phase starts from the operating point's transfer current (ngspice MODEINITTRAN)
+      const auto p = bjtModel(*j.q, gmin_);
+      if (p.td > 0.0) j.st->xf[0] = j.st->xf[1] = bjt_gp(v[0], v[1], v[2], v[3], p).xf;
+    }
   });
   // OSDI charges at x, zero current
   forEachOsdi(netlist, [&](const OsdiRef &r) {
@@ -1003,6 +1007,26 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
       if (b > 0) matrixBuilder.add(b - 1, b - 1, dg);
       if (a > 0 && b > 0) { matrixBuilder.add(a - 1, b - 1, -dg); matrixBuilder.add(b - 1, a - 1, -dg); }
     }
+  // BJT excess phase (ngspice bjtacld): the forward transfer conductance g = d((cbe - cbc)/qb)/dvbe' turns by
+  // exp(-jw TD); it moves from G to a delayed entry
+  forEachJunction(netlist, [&](const Junction &j) {
+    if (!j.q) return;
+    const auto p = bjtModel(*j.q, gmin_);
+    if (!(p.td > 0.0)) return;
+    auto V = [&](int k) { return j.n[k] > 0 ? lastSolution_[j.n[k] - 1] : 0.0; };
+    const double vbc = p.type * (V(5) - V(4));
+    const auto e = bjt_gp(Dual<double>(p.type * (V(5) - V(6)), 1.0), Dual<double>(vbc), Dual<double>(p.type * (V(1) - V(4))),
+                          Dual<double>(p.type * j.subSign * (V(3) - V(j.sub))), p);
+    const double cbc = spice_junction(vbc, p.is, p.vtr);
+    const double g = e.xf.grad + cbc * e.qb.grad / (e.qb.val * e.qb.val);  // d(cbe/qb)/dvbe - cbc d(1/qb)/dvbe
+    const int c = j.n[4] - 1, b = j.n[5] - 1, em = j.n[6] - 1;
+    auto move = [&](int r, int col, double v) {
+      if (r < 0 || col < 0) return;
+      matrixBuilder.add(r, col, -v);
+      sys.dr.push_back(r); sys.dc.push_back(col); sys.dv.push_back(v); sys.dtd.push_back(p.td);
+    };
+    move(c, b, g); move(c, em, -g); move(em, b, -g); move(em, em, g);
+  });
   sys.G = matrixBuilder.createCsr();
   auto addC = [&](int r, int c, double v) {
     if (r >= 0 && c >= 0) { sys.cr.push_back(r); sys.cc.push_back(c); sys.cv.push_back(v); }

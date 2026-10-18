@@ -580,13 +580,14 @@ struct BjtModel {
     P cjs = 0.0, vjs = 0.75, mjs = 0.0, fc = 0.5;
     P iss = 0.0, vts = PhysicsConstants::V_THERMAL_NOM;       // substrate junction: ISS*AREA, NS*Vt
     P tf = 0.0, xtf = 0.0, ovtf = 0.0, xjtf = 0.0, tr = 0.0;   // ovtf = 1/(1.44 VTF), xjtf = ITF*AREA
+    P td = 0.0;                                                // excess-phase delay PTF*pi/180*TF
 };
 
 // DC terminal currents (into C', B'), the substrate junction current cs (S -> C',
 // ISS diode + GMIN, as ngspice 4 bjtload: it exists even with ISS = 0) and the
 // four charges qbe (B'-E'), qbc (B'-C'), qbx (B-C'), qsub (S-C'), all in the
 // type domain, at junction voltages vbe, vbc (internal), vbx (external base), vsub.
-template <typename T> struct BjtEval { T cc, cb, cs, qb, q[4]; };
+template <typename T> struct BjtEval { T cc, cb, cs, qb, q[4], xf; };
 
 // Base resistance of a bias-dependent RB (ngspice bjtload): RBM + (RB - RBM)/qb, or with IRB the
 // tan() law in the base current cb (qb is not used then).
@@ -604,7 +605,10 @@ inline T bjt_rbb(T qb, T cb, const BjtModel<P>& p)
 }
 
 template <typename T, typename P>
-inline BjtEval<T> bjt_gp(T vbe, T vbc, T vbx, T vsub, const BjtModel<P>& p)
+// Excess phase (ngspice bjtload, Weil's approximation with backward Euler): in transient the forward transfer current
+// cbe/qb is filtered, cc = hist + (arg3 cbe - cbc)/qb with hist from the last two accepted steps; xf is the filtered
+// value to keep. arg3 = 1, hist = 0: none (DC, or PTF = 0).
+inline BjtEval<T> bjt_gp(T vbe, T vbc, T vbx, T vsub, const BjtModel<P>& p, double arg3 = 1.0, double hist = 0.0)
 {
     using std::exp; using std::log; using std::sqrt;
     const P gmin = p.gmin;
@@ -621,7 +625,9 @@ inline BjtEval<T> bjt_gp(T vbe, T vbc, T vbx, T vsub, const BjtModel<P>& p)
     }
     BjtEval<T> r;
     r.qb = qb;
-    r.cc = (cbe - cbc) / qb - cbc / p.br - cbcn;
+    const T cex = cbe * arg3;
+    r.cc = hist + (cex - cbc) / qb - cbc / p.br - cbcn;
+    r.xf = hist + cex / qb;
     r.cb = cbe / p.bf + cben + cbc / p.br + cbcn;
     r.cs = (p.iss != P(0.0) ? spice_junction(vsub, p.iss, p.vts) : T(0.0)) + gmin * vsub;
 

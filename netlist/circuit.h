@@ -708,6 +708,7 @@ struct BJT {
         double iss = 0.0, ns = 1.0;                        // substrate junction
         bool lateral = false;  // SUBS = -1: substrate junction on the base, not the collector (PNP default)
         double tf = 0.0, xtf = 0.0, vtf = 0.0, itf = 0.0, tr = 0.0;
+        double ptf = 0.0;  // excess phase [degrees] at 1/(2 pi TF)
     } card;
     double area = 1.0;
     InstTemp inst;  // card, IS and betas are held at the instance temperature (resolved by the parser)
@@ -1197,6 +1198,8 @@ struct BlockState {
         // jvState 0: none yet -> start at vcrit (ngspice MODEINITJCT).
         double jv[2] = {};
         int jvState = 0;
+        // BJT excess phase (PTF): the filtered transfer current of the last two accepted steps, the last step
+        double xf[2] = {}, hPrev = 0.0;
     };
 
     std::vector<History> capacitorState;

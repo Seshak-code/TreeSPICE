@@ -1332,7 +1332,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             supported(c, {"IS", "BF", "BR", "NF", "NR", "VAF", "VA", "VAR", "VB", "IKF", "IK", "IKR",
                           "ISE", "NE", "ISC", "NC", "RB", "RC", "RE", "CJE", "VJE", "PE", "MJE", "ME",
                           "CJC", "VJC", "PC", "MJC", "MC", "XCJC", "CJS", "CCS", "VJS", "PS", "MJS", "MS",
-                          "FC", "TF", "XTF", "VTF", "ITF", "TR", "EG", "XTI", "XTB", "TNOM", "RBM", "IRB", "NK", "KF", "AF", "ISS", "NS", "SUBS"});
+                          "FC", "TF", "XTF", "VTF", "ITF", "TR", "EG", "XTI", "XTB", "TNOM", "RBM", "IRB", "NK", "KF", "AF", "ISS", "NS", "SUBS", "PTF"});
             bounded(c, {"IS", "VAF", "VA", "VAR", "VB", "IKF", "IK", "IKR", "ISE", "ISC", "CJE", "CJC", "CJS", "CCS",
                         "MJE", "ME", "MJC", "MC", "MJS", "MS", "TF", "XTF", "VTF", "ITF", "TR", "ISS", "RBM", "IRB", "NK", "KF"},
                     {"NE", "NC", "NS"});
@@ -1358,7 +1358,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (subs != 1.0 && subs != -1.0) throw std::runtime_error("model " + c->name + ": SUBS must be 1 or -1");
             k.lateral = subs == -1.0;
             k.tf = c->get("TF", 0.0); k.xtf = c->get("XTF", 0.0); k.vtf = c->get("VTF", 0.0);
-            k.itf = c->get("ITF", 0.0); k.tr = c->get("TR", 0.0);
+            k.itf = c->get("ITF", 0.0); k.tr = c->get("TR", 0.0); k.ptf = c->get("PTF", 0.0);
             k.rbm = c->get("RBM", k.rb); k.irb = c->get("IRB", 0.0); k.nk = c->get("NK", 0.5);
             k.kf = c->get("KF", 0.0); k.af = c->get("AF", 1.0);
             const double Tn = c->get("TNOM", tnomC_) + 273.15, T = instK(q.inst);
