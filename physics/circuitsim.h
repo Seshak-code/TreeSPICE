@@ -1159,6 +1159,12 @@ public:
   };
   SensResult solveSens(TensorNetlist &netlist, int outNode, int refNode, const std::string &outSource);
 
+  // ngspice .tf at the last solveDC() operating point: the small-signal gain from top-level source inSource to
+  // v(outNode) - v(refNode) (or i(outSource)), the impedance the input source sees and the output impedance, each
+  // from one solve of the DC Jacobian. Impedances that are open circuits read 1e20, as in ngspice.
+  struct TFResult { double gain = 0.0, zin = 0.0, zout = 0.0; std::string error; };
+  TFResult solveTF(TensorNetlist &netlist, int outNode, int refNode, const std::string &outSource, const std::string &inSource);
+
   // The grid of ngspice 47's .ac (probed point by point). lin: n points, but n = 2 gives only the first.
   // oct / dec: N = floor(log(f2/f1) * n) steps of 2^(1/n) / 10^(1/n). dec over more than one decade refits the
   // step to (f2/f1)^(1/N) so the last point is f2 itself; oct, and dec within one decade, stop at the last point <= f2.

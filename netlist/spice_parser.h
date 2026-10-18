@@ -70,6 +70,11 @@ struct SPICEParseResult {
     bool          hasSens = false;
     std::string   sensSource;        // i(vsrc): the source name, else empty
     int           sensOut = 0, sensRef = 0;
+    // .tf v(out[,ref]) | i(vsrc) insrc: DC small-signal transfer function
+    bool          hasTF = false;
+    std::string   tfSource, tfOutSource;  // the input source; the i(vsrc) output source, else empty
+    std::string   tfOutLabel;             // ngspice's spelling of the output, lower case: v(2), v(2,3)
+    int           tfOut = 0, tfRef = 0;
     std::string   acSweep;           // .ac dec|oct|lin n fstart fstop
     int           acPoints = 0;
     double        acStart = 0.0, acStop = 0.0;
@@ -173,6 +178,7 @@ private:
     std::vector<PendingIC> pendingICs_;           // resolved once every node is known
     std::string pzNames_[4];                       // .pz node names, resolved likewise
     std::string sensOut_, sensRef_;                // .sens v() node names, resolved likewise
+    std::string tfOut_, tfRef_;                    // .tf v() node names, resolved likewise
     std::map<std::string, std::vector<PendingIC>> subcktICs_;   // .ic / .nodeset in a body (local names), applied per instance
     std::string noiseOut_, noiseRef_;              // .noise node names, resolved likewise
     std::set<std::string> globals_;                // .global node names

@@ -1,0 +1,7 @@
+* .tf: the input source's own current (output impedance = input impedance)
+V1 1 0 DC 1
+R1 1 2 1k
+R2 2 0 3k
+R3 2 0 6k
+.tf i(V1) V1
+.end

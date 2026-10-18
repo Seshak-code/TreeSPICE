@@ -205,9 +205,17 @@ struct SensResultDTO {
     std::vector<std::string> unsupported;  // device groups whose parameters were not computed, e.g. "2 BJT(s)" (never reported as 0)
 };
 
+// .tf: DC small-signal transfer function and impedances at the operating point, under ngspice's vector names
+struct DcTFResultDTO {
+    std::vector<std::string> names;  // transfer_function, then the two impedances (ngspice's order)
+    std::vector<double> values;
+};
+
 struct ExtendedAnalysisResultsDTO {
     bool hasTF = false;
-    TFResultDTO tf;
+    TFResultDTO tf;          // Bode plot and margins (the app's TRANSFER_FUNCTION handler)
+    bool hasDcTF = false;
+    DcTFResultDTO dcTf;      // the netlist's .tf card
     bool hasNoise = false;
     NoiseResultDTO noise;
     bool hasSens = false;

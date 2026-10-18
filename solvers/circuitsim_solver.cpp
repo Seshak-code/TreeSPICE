@@ -1377,6 +1377,47 @@ CircuitSim::SensResult CircuitSim::solveSens(TensorNetlist &netlist, int outNode
   return r;
 }
 
+CircuitSim::TFResult CircuitSim::solveTF(TensorNetlist &netlist, int outNode, int refNode, const std::string &outSource,
+                                         const std::string &inSource) {
+  TFResult r;
+  ACSystem sys;
+  if (!acSystem(netlist, sys)) { r.error = "transfer function needs a converged DC operating point"; return r; }
+  const int n = sys.n;
+  const auto &g = netlist.globalBlock;
+  int total = 0;
+  const int vs = branchSlots(netlist, total)[0].vs;
+  auto branch = [&](const std::string &name) {
+    for (size_t i = 0; i < g.voltageSources.size(); ++i) if (g.voltageSources[i].name == name) return vs + (int)i;
+    return -1;
+  };
+  const auto cs = std::find_if(g.currentSources.begin(), g.currentSources.end(), [&](const CurrentSource &c) { return c.name == inSource; });
+  const int inBr = branch(inSource), outBr = outSource.empty() ? -1 : branch(outSource);
+  if (inBr < 0 && cs == g.currentSources.end()) { r.error = ".tf: no source " + inSource + " at the top level"; return r; }
+  if (!outSource.empty() && outBr < 0) { r.error = ".tf i(" + outSource + "): no such voltage source at the top level"; return r; }
+  auto at = [](const std::vector<double> &x, int node) { return node > 0 ? x[node - 1] : 0.0; };
+  auto inject = [](std::vector<double> &b, int from, int to) {  // 1 A out of node `from` into node `to`
+    if (from > 0) b[from - 1] -= 1.0;
+    if (to > 0) b[to - 1] += 1.0;
+  };
+  // A V source's branch current i per volt of its own value: the impedance it sees is -1/i (ngspice's input impedance).
+  auto zBranch = [](double i) { return std::fabs(i) < 1e-20 ? 1e20 : -1.0 / i; };
+  std::vector<double> b(n, 0.0);
+  if (inBr >= 0) b[inBr] = 1.0; else inject(b, cs->nodePositive, cs->nodeNegative);  // a unit input
+  std::vector<double> x = solveLinear(sys.G, b).solution;
+  if ((int)x.size() != n) { r.error = ".tf: the small-signal system is singular"; return r; }
+  r.gain = outBr >= 0 ? x[outBr] : at(x, outNode) - at(x, refNode);
+  r.zin = inBr >= 0 ? zBranch(x[inBr]) : at(x, cs->nodeNegative) - at(x, cs->nodePositive);
+  if (outBr >= 0 && outBr == inBr) { r.zout = r.zin; return r; }
+  std::fill(b.begin(), b.end(), 0.0);
+  if (outBr >= 0) b[outBr] = 1.0; else inject(b, outNode, refNode);  // a unit test source at the output
+  x = solveLinear(sys.G, b).solution;
+  if ((int)x.size() != n) { r.error = ".tf: the small-signal system is singular"; return r; }
+  // ngspice reads an i(vsrc) output impedance as 1/max(1e-20, i): 1e20 for every passive load. This is -1/i, the
+  // impedance at the source's terminals, as for the input.
+  r.zout = outBr >= 0 ? zBranch(x[outBr]) : at(x, refNode) - at(x, outNode);
+  return r;
+}
+
 bool CircuitSim::coldStartSweep(TensorNetlist &netlist, double totalTime,
                                 int nSubsteps,
                                 std::vector<double> &finalVoltages) {

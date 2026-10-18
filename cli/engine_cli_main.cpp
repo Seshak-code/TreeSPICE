@@ -44,7 +44,7 @@ const char* kUsage =
     "db(), mag(), ph(), real(), imag(). Without .print the operating point lists every node.\n";
 
 struct Analysis {
-    std::string kind;  // op, dc, ac, tran, noise, pz, sens
+    std::string kind;  // op, dc, ac, tran, noise, pz, sens, tf
     SimulationRequestDTO req;
 };
 
@@ -69,7 +69,7 @@ std::vector<std::string> analysisCards(const std::string& text) {
         std::string kw;
         ls >> kw;
         for (auto& c : kw) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (kw == ".op" || kw == ".dc" || kw == ".ac" || kw == ".tran" || kw == ".noise" || kw == ".pz" || kw == ".sens") kinds.push_back(kw.substr(1));
+        if (kw == ".op" || kw == ".dc" || kw == ".ac" || kw == ".tran" || kw == ".noise" || kw == ".pz" || kw == ".sens" || kw == ".tf") kinds.push_back(kw.substr(1));
     }
     return kinds;
 }
@@ -117,6 +117,14 @@ void printSens(std::ostream& os, const SimulationResponseDTO& r) {
     const auto& sn = r.extended.sens;
     for (size_t k = 0; k < sn.names.size(); ++k) { std::snprintf(b, sizeof b, "%s = %.6e\n", sn.names[k].c_str(), sn.values[k]); os << b; }
     for (const auto& u : sn.unsupported) os << "sensitivity of " << u << " parameters is not supported yet\n";
+}
+
+// ngspice's "Transfer function information:" block
+void printTF(std::ostream& os, const SimulationResponseDTO& r) {
+    char b[160];
+    const auto& tf = r.extended.dcTf;
+    os << "Transfer function information:\n";
+    for (size_t k = 0; k < tf.names.size(); ++k) { std::snprintf(b, sizeof b, "%s = %.6e\n", tf.names[k].c_str(), tf.values[k]); os << b; }
 }
 
 }  // namespace
@@ -208,6 +216,7 @@ int main(int argc, char** argv) {
                                 : an.kind == "ac"   ? session->runAC(an.req, cb)
                                 : an.kind == "noise" ? session->runNoise(an.req, cb)
                                 : an.kind == "sens" ? session->runSens(an.req, cb)
+                                : an.kind == "tf"   ? session->runTF(an.req, cb)
                                 : an.kind == "pz"   ? session->runPoleZero(an.req, cb)
                                                     : session->runDC(an.req, cb);
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -217,7 +226,10 @@ int main(int argc, char** argv) {
             continue;
         }
         try {
-            if (an.kind == "sens") {
+            if (an.kind == "tf") {
+                if (!rawPath.empty()) throw std::runtime_error("raw output of .tf is not supported yet");
+                printTF(out, r);
+            } else if (an.kind == "sens") {
                 if (!rawPath.empty()) throw std::runtime_error("raw output of .sens is not supported yet");
                 printSens(out, r);
             } else if (an.kind == "pz") {

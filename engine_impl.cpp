@@ -715,6 +715,42 @@ SimulationResponseDTO SessionImpl::runSens(const SimulationRequestDTO& req,
     return r;
 }
 
+// ── DC transfer function ──────────────────────────────────────────────────
+SimulationResponseDTO SessionImpl::runTF(const SimulationRequestDTO& req,
+                                          const EngineCallbacks& /*cb*/) {
+    status_.store(JobStatus::Running);
+    SimulationResponseDTO r;
+    r.jobId        = jobId_;
+    r.analysisType = AnalysisTypeDTO::TRANSFER_FUNCTION;
+    SPICEParseResult parsed;
+    if (deserialiseRequest(req, parsed, r)) {
+        CircuitSim sim;
+        sim.execMode = selectExecMode(precision_);
+        if (!parsed.hasTF)
+            r.errorDetail = "Transfer function needs .tf v(out[,ref]) src or .tf i(vsrc) src.";
+        else if (SolverStep dc = sim.solveDC(parsed.netlist); !dc.stats.converged)
+            r.errorDetail = "DC operating point failed before transfer function analysis: " + dc.stats.error_detail;
+        else {
+            auto tf = sim.solveTF(parsed.netlist, parsed.tfOut, parsed.tfRef, parsed.tfOutSource, parsed.tfSource);
+            r.errorDetail = tf.error;
+            r.converged   = tf.error.empty();
+            r.extended.hasDcTF = r.converged;
+            auto lower = [](std::string s) { for (auto& c : s) c = (char)std::tolower((unsigned char)c); return s; };
+            // ngspice's vectors: transfer_function, then the impedances by name
+            std::string in = lower(parsed.tfSource) + "#input_impedance",
+                        out = parsed.tfOutSource.empty() ? "output_impedance_at_" + parsed.tfOutLabel
+                                                         : lower(parsed.tfOutSource) + "#output_impedance";
+            double zin = tf.zin, zout = tf.zout;
+            if (out < in) { std::swap(in, out); std::swap(zin, zout); }
+            r.extended.dcTf = {{"transfer_function", in, out}, {tf.gain, zin, zout}};
+        }
+        r.backend = backendOf(sim, precision_);
+    }
+    r.success = r.converged;
+    status_.store(r.converged ? JobStatus::Completed : JobStatus::Failed);
+    return r;
+}
+
 // ============================================================================
 // EngineImpl
 // ============================================================================

@@ -364,6 +364,8 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     for (auto& n : pzNames_) n.clear();
     sensOut_.clear();
     sensRef_.clear();
+    tfOut_.clear();
+    tfRef_.clear();
     noiseOut_.clear();
     noiseRef_.clear();
     subcktChildren_.clear();
@@ -567,6 +569,25 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                     if (kind == "I") result_.sensSource = toUpper(tok[2]);
                     else { sensOut_ = toUpper(tok[2]); sensRef_ = want == 4 ? toUpper(tok[3]) : "0"; }
                 }
+                else if (keyword == ".TF") {
+                    // .tf v(out[,ref]) insrc | .tf i(vsrc) insrc
+                    const std::string kind = tok.size() > 3 ? toUpper(tok[1]) : "";
+                    if (!(kind == "I" ? tok.size() == 4 : kind == "V" && (tok.size() == 4 || tok.size() == 5)))
+                        throw std::runtime_error(".tf expects v(out[,ref]) or i(vsrc), then the input source");
+                    const char in = static_cast<char>(std::toupper(static_cast<unsigned char>(tok.back()[0])));
+                    if (in != 'V' && in != 'I') throw std::runtime_error(".tf: the input must be a V or I source, not '" + tok.back() + "'");
+                    result_.hasTF = true;
+                    result_.tfSource = toUpper(tok.back());
+                    auto lower = [](std::string s) { for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return s; };
+                    if (kind == "I") {
+                        result_.tfOutSource = toUpper(tok[2]);
+                        if (result_.tfOutSource[0] != 'V') throw std::runtime_error(".tf i(" + tok[2] + "): the output current must be a V source's");
+                    } else {
+                        tfOut_ = toUpper(tok[2]);
+                        tfRef_ = tok.size() == 5 ? toUpper(tok[3]) : "0";
+                        result_.tfOutLabel = "v(" + lower(tok[2]) + (tok.size() == 5 ? "," + lower(tok[3]) : "") + ")";
+                    }
+                }
                 else if (keyword == ".PZ") {
                     // .pz in+ in- out+ out- cur|vol pol|zer|pz
                     const std::string io = tok.size() == 7 ? toUpper(tok[5]) : "", what = tok.size() == 7 ? toUpper(tok[6]) : "";
@@ -716,6 +737,16 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         result_.sensOut = node(sensOut_);
         result_.sensRef = node(sensRef_);
         if (result_.sensOut < 0 || result_.sensRef < 0) return fail(lines.back().first, ".sens names an unknown output node");
+    }
+    if (!tfOut_.empty()) {
+        auto node = [&](const std::string& nm) {
+            if (nm == "0" || nm == "GND") return 0;
+            auto it = nodeMap_.find(nm);
+            return it == nodeMap_.end() ? -1 : it->second;
+        };
+        result_.tfOut = node(tfOut_);
+        result_.tfRef = node(tfRef_);
+        if (result_.tfOut < 0 || result_.tfRef < 0) return fail(lines.back().first, ".tf names an unknown output node");
     }
     if (result_.hasPZ)
         for (int k = 0; k < 4; ++k) {

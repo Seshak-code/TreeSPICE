@@ -1,0 +1,11 @@
+* .tf: DC-coupled BJT common-emitter stage with emitter degeneration
+VCC 6 0 DC 12
+VIN 1 0 DC 1.6
+RB 1 2 10k
+Q1 3 2 4 QN
+RC 6 3 4.7k
+RE 4 0 1k
+RL 3 0 47k
+.model QN NPN (IS=1e-14 BF=150 VAF=100 RB=100)
+.tf v(3) VIN
+.end

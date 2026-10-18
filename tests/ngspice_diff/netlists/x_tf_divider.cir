@@ -1,0 +1,10 @@
+* .tf: differential output of a divider driven through a VCVS (V input, v(out,ref) output)
+V1 1 0 DC 2
+R1 1 2 1k
+R2 2 3 2k
+R3 3 0 3k
+E1 4 0 2 3 5
+R4 4 5 100
+R5 5 0 400
+.tf v(5,3) V1
+.end

@@ -1,0 +1,10 @@
+* .tf: i(vsrc) output into a passive load; ngspice prints its output impedance as 1e20 (1/max(1e-20, i)), the engine the true 100 ohm
+I1 0 1 DC 1m
+R1 1 2 1k
+R2 2 0 1k
+E1 3 0 2 0 10
+R3 3 4 100
+Vm 4 0 0
+R4 1 0 3k
+.tf i(Vm) I1
+.end

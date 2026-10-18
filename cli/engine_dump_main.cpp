@@ -1,4 +1,4 @@
-// acutesim_engine_dump <netlist> <cpu|gpu> <dc|tran|ac|noise|pz|sens> [step stop]
+// acutesim_engine_dump <netlist> <cpu|gpu> <dc|tran|ac|noise|pz|sens|tf> [step stop]
 // Machine-readable waveform dump for differential testing (tests/ngspice_diff).
 // Prints: "CONVERGED <0|1>", "ERROR <text>", "BACKEND <what ran>", then one line per waveform point:
 //   <time> <v1> <v2> ...   (engine-internal node order)
@@ -9,6 +9,7 @@
 //   (env TREESPICE_BASEDIR overrides the directory .include/.lib paths resolve against)
 //   pz: no waveform; "POLE <re> <im>" and "ZERO <re> <im>" lines
 //   sens: "SENS <name> <d(output)/d(parameter)>" lines, "UNSUPPORTED <element>" for devices left out
+//   tf: "TF <name> <value>" lines (ngspice's vector names)
 //   noise: <freq> <onoise> <inoise> ... then "TOTAL <onoise_total> <inoise_total>"
 // A nested .dc / .temp list adds "SWEEP <name>=<value> ..." before the first row of each outer value
 //   (the row's first column is the innermost sweep value).
@@ -50,6 +51,8 @@ int main(int argc, char** argv) {
         r = session->runAC(req, cb);
     } else if (mode == "sens") {
         r = session->runSens(req, cb);
+    } else if (mode == "tf") {
+        r = session->runTF(req, cb);
     } else if (mode == "pz") {
         r = session->runPoleZero(req, cb);
     } else if (mode == "noise") {
@@ -68,6 +71,8 @@ int main(int argc, char** argv) {
     const auto& sn = r.extended.sens;
     for (size_t k = 0; k < sn.names.size(); ++k) std::printf("SENS %s %.9g\n", sn.names[k].c_str(), sn.values[k]);
     for (const auto& u : sn.unsupported) std::printf("UNSUPPORTED %s\n", u.c_str());
+    const auto& tf = r.extended.dcTf;
+    for (size_t k = 0; k < tf.names.size(); ++k) std::printf("TF %s %.9g\n", tf.names[k].c_str(), tf.values[k]);
     std::printf("NODES");
     for (const auto& n : r.nodeNames) std::printf(" %s", n.empty() ? "-" : n.c_str());
     std::printf("\nBRANCHES");

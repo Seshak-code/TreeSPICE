@@ -557,6 +557,18 @@ int main() {
             check(w.size() == 2 && w[0].nodeVoltages[1] == w[1].nodeVoltages[1] && std::abs(w[0].nodeVoltages[1] - 5.0) > 1e-6,
                   "Monte Carlo variation survives the .dc TEMP re-parse");
         }
+        {   // .tf i(vsrc): the true output impedance (-1/i), where ngspice prints 1/max(1e-20, i) = 1e20 (passive) or +1k (active)
+            auto engine = ISimulationEngine::create();
+            auto session = engine->createSession();
+            SimulationRequestDTO req;
+            auto zout = [&](const std::string& load) {
+                req.source.payload = "tf\nV1 1 0 DC 1\nR1 1 2 1k\n" + load + "Vm 2 0 0\n.tf i(Vm) V1\n.end\n";
+                const auto t = session->runTF(req).extended.dcTf;
+                return t.names.size() == 3 && t.names[2] == "vm#output_impedance" ? t.values[2] : NAN;
+            };
+            check(near(zout(""), 1e3, 1e-6) && near(zout("G1 2 0 2 0 -2m\n"), -1e3, 1e-6),
+                  ".tf i(Vm) output impedance: 1k (passive), -1k (negative-resistance load)");
+        }
     }
 
     std::printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASSED", g_fail, g_fail == 1 ? "" : "s");
