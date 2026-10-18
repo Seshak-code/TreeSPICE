@@ -437,7 +437,7 @@ int main() {
             {"V1 1 0 DC 3\nR1 1 2 1k\nM1 2 2 0 0 MM\n.model MM NMOS GAMMA=1 PHI=0\n", "PHI must be > 0"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DM\n.model DM D BV=0\n", "BV must be > 0"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DM\n.model DM D N=0\n", "N must be > 0"},
-            {"V1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DM OFF\n.model DM D\n", "OFF is not supported"},
+            {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 NM OFF\n.model NM NMOS\n", "OFF is not supported"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nQ1 2 2 0 QM IC=0.6,5\n.model QM NPN\n", "IC is not supported"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nQ1 2 2 0 NM\n.model NM NMOS\n", "is NMOS, not a NPN/PNP model"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 NM W=10u\n.model NM NMOS\n", "expected 4 nodes"},
@@ -582,6 +582,16 @@ int main() {
                                ".model nfin bsimcmg_va type=1\n.op\n.end\n");
             check(r.converged && near(V(r, 3), V(r, 4), 1e-6) && V(r, 3) < 0.77,
                   "m=3 on a cell with an OSDI device keeps the cell's voltages (" + std::to_string(V(r, 3)) + " V)");
+        }
+        {   // OFF picks a symmetric latch's state: the OFF transistor ends off. ngspice 47's Newton fails with the device
+            // held and its gmin stepping ignores OFF, so it lands on the metastable 1.186 V / 1.186 V point either way.
+            auto latch = [&](const char* q1, const char* q2) {
+                const auto r = run(PrecisionMode::Native_F64, std::string("latch\nVCC 1 0 5\nRC1 1 2 1k\nRC2 1 3 1k\nRB1 3 4 10k\n"
+                                   "RB2 2 5 10k\nQ1 2 4 0 qn") + q1 + "\nQ2 3 5 0 qn" + q2 + "\n.model qn npn bf=100\n.op\n.end\n");
+                return std::make_pair(V(r, 2), V(r, 3));
+            };
+            const auto a = latch(" OFF", ""), b = latch("", " OFF");
+            check(a.first > 4.5 && a.second < 0.1 && b.first < 0.1 && b.second > 4.5, "OFF selects a symmetric latch's state");
         }
         {   // .tf i(vsrc): the true output impedance (-1/i), where ngspice prints 1/max(1e-20, i) = 1e20 (passive) or +1k (active)
             auto engine = ISimulationEngine::create();

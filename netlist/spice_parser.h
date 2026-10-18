@@ -103,7 +103,8 @@ private:
     static void requireFields(const std::vector<std::string>& tok, size_t n);
     double takeMultiplier(std::vector<std::string>& tok) const;  // removes M <value> pairs; the last wins
     static void requireLinearForm(const std::vector<std::string>& tok, size_t n);
-    double instanceArea(const std::vector<std::string>& tok, size_t from, InstTemp* t = nullptr) const;  // t: accept TEMP, DTEMP
+    // t: accept TEMP, DTEMP; off: accept OFF
+    double instanceArea(const std::vector<std::string>& tok, size_t from, InstTemp* t = nullptr, bool* off = nullptr) const;
     static std::string toUpper(const std::string& s);
     static std::vector<std::string> tokenize(const std::string& line);
 

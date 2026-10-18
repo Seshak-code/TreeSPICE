@@ -57,6 +57,20 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
     }
     if (solveDC(held).stats.converged) prevVoltages_ = lastSolution_;
   }
+  // OFF devices (D, Q, J; ngspice INITFIX): a first solve holds their junctions at 0 V, then the circuit is solved
+  // from there with them released from 0 V (INITFLOAT), which decides a latch's state. Only a cold start.
+  // ngspice 47 gets there only when its first Newton converges: on a latch it often fails and its gmin stepping,
+  // which ignores OFF, settles where the circuit's asymmetry leans (or on the metastable point).
+  bool offReleased = false;
+  if (!offHold_ && prevVoltages_.empty()) {
+    bool anyOff = false;
+    forEachJunction(netlist, [&](const Junction &j) { anyOff |= j.d ? j.d->off : j.f ? j.f->off : j.q->off; });
+    if (anyOff) {
+      struct Hold { bool &f; ~Hold() { f = false; } } hold{offHold_};
+      offHold_ = true;
+      if (solveDC(netlist).stats.converged) { prevVoltages_ = lastSolution_; offReleased = true; }
+    }
+  }
 
   struct RestoreSources { double &f; ~RestoreSources() { f = 1.0; } } restoreSources{srcFact_};
   osdiFatal_.clear();
@@ -83,6 +97,10 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
   voltageEstimate = warm ? prevVoltages_ : coldSeed;
   if (warm) syncJunctionLimits(netlist, voltageEstimate);
   else resetJunctionLimits(netlist);  // first iteration: junctions at vcrit (ngspice MODEINITJCT)
+  if (offReleased)  // limiting continues from the held 0 V, not from the node voltages
+    forEachJunction(netlist, [&](const Junction &j) {
+      if (j.st && (j.d ? j.d->off : j.f ? j.f->off : j.q->off)) j.st->jv[0] = j.st->jv[1] = 0.0;
+    });
 
   bool converged = false;
   int total_iterations = 0;

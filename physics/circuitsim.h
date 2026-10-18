@@ -1029,6 +1029,14 @@ public:
     if (!j.st) return sh;
     auto V = [&](int k) { return j.n[k] > 0 && j.n[k] <= (int)x.size() ? x[j.n[k] - 1] : 0.0; };
     auto *st = j.st;
+    if (offHold_ && (j.d ? j.d->off : j.f ? j.f->off : j.q->off)) {  // ngspice INITFIX: an OFF device's junctions at 0 V
+      const double t = j.q ? (j.q->isNPN ? 1.0 : -1.0) : j.f ? jfetType(*j.f) : 1.0;
+      const double raw[2] = {j.d ? V(2) - V(1) : j.f ? t * (V(1) - V(2)) : t * (V(5) - V(6)),
+                             j.d ? 0.0 : j.f ? t * (V(1) - V(0)) : t * (V(5) - V(4))};
+      for (int k = 0; k < 2; ++k) { st->jv[k] = 0.0; sh.d[k] = -raw[k]; }
+      st->jvState = 1;
+      return sh;
+    }
     if (j.d) {
       const auto m = diodeModel(*j.d, gmin_);
       const double vcrit = compute_vcrit(m.vte, m.is), raw = V(2) - V(1);
@@ -1079,6 +1087,7 @@ public:
     forEachJunction(nl, [&](const Junction &j) { if (j.st) j.st->jvState = 0; });
   }
   bool limitJunctions_ = true;  // off for the AC / sensitivity Jacobian at a converged point
+  bool offHold_ = false;        // the first operating-point solve, with OFF devices held at 0 V (solveDC)
 
   // Newton stamp of a junction device: I(x) ~ I(vl) + G (v(x) - vl) at the
   // limited junction voltages vl (ngspice's companion), i.e. stampByDual at the
