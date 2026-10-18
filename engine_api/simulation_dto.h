@@ -202,7 +202,7 @@ struct PoleZeroResultDTO {
 struct SensResultDTO {
     std::vector<std::string> names;     // ngspice's vector names, lower case: "r1", "r1_m", "r1_scale", "v1", "i1", "i1_m"
     std::vector<double> values;         // d(output)/d(parameter), same order
-    std::vector<std::string> unsupported;  // device groups whose parameters were not computed, e.g. "2 BJT(s)" (never reported as 0)
+    std::vector<std::string> unsupported;  // what was not computed, e.g. "2 switch(es)" (never reported as 0)
 };
 
 // .tf: DC small-signal transfer function and impedances at the operating point, under ngspice's vector names

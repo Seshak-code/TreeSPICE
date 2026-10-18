@@ -116,7 +116,7 @@ void printSens(std::ostream& os, const SimulationResponseDTO& r) {
     char b[160];
     const auto& sn = r.extended.sens;
     for (size_t k = 0; k < sn.names.size(); ++k) { std::snprintf(b, sizeof b, "%s = %.6e\n", sn.names[k].c_str(), sn.values[k]); os << b; }
-    for (const auto& u : sn.unsupported) os << "sensitivity of " << u << " parameters is not supported yet\n";
+    for (const auto& u : sn.unsupported) os << "sensitivity not computed (not supported yet): " << u << "\n";
 }
 
 // ngspice's "Transfer function information:" block

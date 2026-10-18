@@ -36,6 +36,14 @@ namespace osdi { class Model; class Instance; }
 // ============================================================================
 
 // Stores device model parameters parsed from .MODEL directives.
+// A real-valued parameter of one top-level device (.sens): a model-card parameter (ngspice's "inst:param") or an
+// instance parameter ("inst_param"); value is the netlist's, or the perturbed one when it overrides a parse.
+struct SensParam {
+    std::string instance, param;  // upper case
+    bool model = true;
+    double value = 0.0;
+};
+
 struct ModelCard {
     std::string name;        // e.g. "nfet_01v8", "DMOD"
     std::string type;        // "NMOS", "PMOS", "D", "NPN", "PNP", "NJFET", "PJFET"

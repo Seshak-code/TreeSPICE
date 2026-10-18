@@ -1,4 +1,4 @@
-* .sens: R/V/I sensitivities of a circuit with a diode, a BJT stage and a MOSFET stage (device parameters are listed unsupported)
+* .sens: R/V/I and device-parameter sensitivities of a circuit with a diode, a BJT stage and a MOSFET stage (v(8) depends on the MOSFET stage only)
 VCC 1 0 DC 12
 R1 1 2 47k
 R2 2 0 10k

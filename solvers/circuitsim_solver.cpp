@@ -1322,7 +1322,9 @@ CircuitSim::PoleZeroResult CircuitSim::solvePoleZero(TensorNetlist &netlist, int
   return r;
 }
 
-CircuitSim::SensResult CircuitSim::solveSens(TensorNetlist &netlist, int outNode, int refNode, const std::string &outSource) {
+CircuitSim::SensResult CircuitSim::solveSens(TensorNetlist &netlist, int outNode, int refNode, const std::string &outSource,
+                                             const std::vector<SensParam> &params, int zeroParams,
+                                             const std::function<bool(const SensParam &, TensorNetlist &)> &reparse) {
   SensResult r;
   ACSystem sys;
   if (!acSystem(netlist, sys)) { r.error = "sensitivity needs a converged DC operating point"; return r; }
@@ -1366,14 +1368,38 @@ CircuitSim::SensResult CircuitSim::solveSens(TensorNetlist &netlist, int outNode
     add(g.currentSources[i].name, dI);
     add(g.currentSources[i].name + "_m", g.currentSources[i].current_A * dI);
   }
-  // ponytail: only top-level R, V and I values; every other device (and any subcircuit instance) is counted, not guessed.
-  auto note = [&](const char *kind, size_t count) { if (count) r.unsupported.push_back(std::to_string(count) + " " + kind); };
+  // Device parameters: dF/dp from the residuals of two re-parsed netlists at this operating point
+  // ponytail: two parses and residuals per parameter (a PDK card has hundreds); an adjoint over Dual parameters
+  // in the device kernels would be one pass.
+  int failed = 0;
+  const std::vector<double> &x0 = lastSolution_;
+  for (const auto &p : params) {
+    const double dp = 1e-6 * std::abs(p.value);
+    std::vector<double> F[2];
+    bool ok = (bool)reparse;
+    for (int s = 0; s < 2 && ok; ++s) {
+      SensParam q = p;
+      q.value = p.value + (s ? -dp : dp);
+      TensorNetlist nl;
+      ok = reparse(q, nl) && systemSize(nl) == n;
+      if (ok) { CircuitSim t; t.execMode = execMode; t.calculatePhysicalResiduals(nl, x0, 0.0, 0.0, &F[s]); }
+    }
+    if (!ok) { ++failed; continue; }
+    double s = 0.0;  // the audit's residual is the current into each node: -F
+    for (int i = 0; i < n; ++i) s += adj.solution[i] * (F[0][i] - F[1][i]) / (2.0 * dp);
+    add(p.instance + (p.model ? ":" : "_") + p.param, s);
+  }
+  // ponytail: element values of top-level R, V and I, and top-level device parameters (instance ones: MOSFET W, L);
+  // every other element (and any subcircuit instance) is counted, not guessed.
+  auto note = [&](const std::string &kind, size_t count) { if (count) r.unsupported.push_back(std::to_string(count) + " " + kind); };
   note("switch(es)", g.switches.size()); note("controlled source(s)", g.voltageControlledVoltageSources.size() +
       g.voltageControlledCurrentSources.size() + g.currentControlledVoltageSources.size() + g.currentControlledCurrentSources.size());
-  note("behavioural source(s)", g.behavioural.size()); note("diode(s)", g.diodes.size());
-  note("MOSFET(s)", g.mosfets.size()); note("BJT(s)", g.bjts.size()); note("JFET(s)", g.jfets.size());
-  note("OSDI device(s)", g.osdiDevices.size()); note("transmission line(s)", g.transmissionLines.size());
+  note("behavioural source(s)", g.behavioural.size()); note("transmission line(s)", g.transmissionLines.size());
   note("subcircuit instance(s)", netlist.instances.size());
+  note("device parameter(s) at 0 (no relative step)", zeroParams);
+  note("device parameter(s) whose perturbed netlist failed to parse", failed);
+  if (!g.diodes.empty() || !g.bjts.empty() || !g.jfets.empty() || !g.osdiDevices.empty() || !g.mosfets.empty())
+    r.unsupported.push_back("device instance parameter(s) other than MOSFET W/L (AREA, AD, AS, PD, PS, NRD, NRS, M, TEMP, ...)");
   return r;
 }
 

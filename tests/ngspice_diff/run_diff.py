@@ -211,10 +211,10 @@ def tran_tmax(text, an):
     # ponytail: floor at tstop/1e5 so a ns edge in a ms run stays ~1e5 steps; such a run is checked at that density only.
     return max(min(an[1] / 10, edge), an[2] / 1e5)
 
-def run_ngspice(args, text, an, names, cur=(), dn=()):
+def run_ngspice(args, text, an, names, cur=(), dn=(), digits=False):
     """Return (xs, {name: [values]}) for the analysis, or raise RuntimeError. xs = [] for .op.
     Analysis/print cards are removed and replaced by a .control block (batch mode, ngspice defaults);
-    the only option set is tmax on .tran so the reference is dense (see tran_tmax)."""
+    the only option set is tmax on .tran so the reference is dense (see tran_tmax). digits: 16 digits instead of 9."""
     drop = re.compile(r"\.(op|dc|tran|ac|noise|pz|sens|tf|print|plot|four|end|osdi|save|probe|temp|step|meas|measure)\b", re.I)
     kept, skip, ctrl = [], False, False
     for i, ln in enumerate(text.splitlines()):
@@ -234,7 +234,7 @@ def run_ngspice(args, text, an, names, cur=(), dn=()):
     vecs = " ".join(f"{k[2:-1]}#branch" if k.startswith("i(") else f"v({k.lower()})" for k in keys)
     out = os.path.join(args.tmp, "ng.dat")
     if os.path.exists(out): os.remove(out)
-    ctl = [".control", cmd, f"wrdata {out} {vecs}"] + ([f"eprint {' '.join(dn)}"] if dn else []) + ["quit", ".endc", ".end"]
+    ctl = [".control"] + (["set numdgt=15"] if digits else []) + [cmd, f"wrdata {out} {vecs}"] + ([f"eprint {' '.join(dn)}"] if dn else []) + ["quit", ".endc", ".end"]
     if an[0] == "sens":  # every element parameter ngspice reports, as "name = value" (ngspice prints the dependence on each)
         ctl = [".control", f"sens {an[1]}", "print all", "quit", ".endc", ".end"]
     if an[0] == "tf":  # transfer_function and the two impedances, as "name = value"
@@ -324,6 +324,38 @@ def interp(xs, ys, t):
 
 def col(r, idx): return [row[idx] for row in r["pts"]]
 
+def sens_fd(args, text, out, name):
+    """ngspice's d(out)/dp by central difference, for an engine device-parameter name: inst:param (the instance gets
+    a copy of its .model card with param changed) or inst_param (W/L on the instance line). -> (dOut/dp, p) or None."""
+    inst, sep, par = re.match(r"([^:_]+)([:_])(.+)", name).groups()
+    lines = cards(text)
+    title = text.splitlines()[0]
+    k = next((i for i, ln in enumerate(lines) if toks(ln)[0].lower() == inst), None)
+    if k is None: return None
+    models = {toks(ln)[1].lower(): i for i, ln in enumerate(lines) if toks(ln)[0].lower() == ".model"}
+    model = next((t for t in toks(lines[k])[1:] if t.lower() in models), None)
+    src = lines[models[model.lower()]] if sep == ":" and model else lines[k]
+    m = re.search(rf"\b{re.escape(par)}\s*=\s*([^\s()]+)", src, re.I)
+    if sep == ":" and not model or not m: return None  # a binned card, or a parameter the text does not give
+    p0 = num(m.group(1))
+    if not p0: return None
+    def y(v):
+        ls = list(lines)
+        if sep == ":":
+            card = re.sub(rf"\b{re.escape(par)}\s*=\s*[^\s()]+", f"{par}={v!r}", src, count=1, flags=re.I)
+            ls.append(re.sub(rf"^(\S+\s+){re.escape(model)}\b", rf"\g<1>{model}_fd", card, count=1, flags=re.I))
+            ls[k] = re.sub(rf"(?<=\s){re.escape(model)}(?=\s|$)", f"{model}_fd", ls[k], count=1, flags=re.I)
+        else:
+            ls[k] = re.sub(rf"\b{re.escape(par)}\s*=\s*\S+", f"{par}={v!r}", ls[k], count=1, flags=re.I)
+        o = re.match(r"([vi])\((\S+?)(?:,(\S+))?\)", out).groups()
+        body = "\n".join([title] + ls + [".options reltol=1e-8 abstol=1e-16 vntol=1e-13", ".op", ".end"]) + "\n"
+        nodes = [] if o[0] == "i" else [o[1]] + ([o[2]] if o[2] else [])
+        _, vals = run_ngspice(args, body, ("op",), nodes, [o[1]] if o[0] == "i" else [], digits=True)
+        if o[0] == "i": return vals[f"i({o[1]})"][0]
+        return vals[o[1]][0] - (vals[o[2]][0] if o[2] else 0.0)
+    d = 1e-4 * abs(p0)
+    return (y(p0 + d) - y(p0 - d)) / (2 * d), p0
+
 def unsupported(r):
     return not r["conv"] and bool(re.search(r"unsupported|not supported|unknown (element|card)", r["err"], re.I))
 
@@ -367,6 +399,15 @@ def compare(args, text, an, mode, nm, ref):
             got, exp = r["sens"][n], vals[n]
             worst_abs = max(worst_abs, abs(got - exp)); worst_rel = max(worst_rel, abs(got - exp) / max(abs(exp), 1e-300))
             if abs(got - exp) > 1e-6 * scale + args.dc_rtol * abs(exp): bad.append(f"d/d{n}: {got:.6g} vs ngspice {exp:.6g}")
+        # Device parameters (inst:param, inst_param): against ngspice's own central difference on the parameter, as
+        # ngspice's .sens prints 0 for parameters it has no derivative of; compared as dOut/dp * p (a relative change)
+        for n, got in r["sens"].items():
+            if n[0] not in "dqmjn" or ":" not in n and not re.match(r"m[^_]*_[wl]$", n): continue
+            fd = sens_fd(args, text, an[1], n)
+            if fd is None: bad.append(f"no ngspice difference for {n}"); continue
+            exp, p0 = fd
+            worst_abs = max(worst_abs, abs(got - exp)); worst_rel = max(worst_rel, abs(got - exp) / max(abs(exp), 1e-300))
+            if abs(got - exp) * abs(p0) > 1e-3 * abs(exp * p0) + 1e-9: bad.append(f"d/d{n}: {got:.6g} vs ngspice difference {exp:.6g}")
     elif an[0] == "tf":
         r = run_engine(args, text, mode, "tf")
         if unsupported(r): return "ENGINE-UNSUPPORTED", 0, 0, r["err"]

@@ -114,13 +114,14 @@ static std::function<void(double)> sweepSetter(TensorNetlist& netlist, const std
 
 // The request's netlist at circuit temperature tempC (NaN: the netlist's), with the values of this .step run applied.
 // Returns an error text, or "".
-static std::string parseRequest(const SimulationRequestDTO& req, double tempC, SPICEParseResult& out) {
+static std::string parseRequest(const SimulationRequestDTO& req, double tempC, SPICEParseResult& out,
+                                const SensParam* sens = nullptr) {
     std::map<std::string, double> params;
     for (const auto& s : req.stepValues) {
         if (s.kind == 'P') params[s.name] = s.value;
         else if (s.kind == 'T') tempC = s.value;
     }
-    out = SPICEParser().parse(req.source.payload, req.source.baseDir, tempC, params);
+    out = SPICEParser().parse(req.source.payload, req.source.baseDir, tempC, params, sens);
     if (!out.success) return "SPICE parse error: " + out.errorMessage;
     for (const auto& s : req.stepValues) {
         if (s.kind != 'E') continue;
@@ -134,10 +135,12 @@ static std::string parseRequest(const SimulationRequestDTO& req, double tempC, S
 // The corner temperature wins over the netlist's .temp (as an explicit .dc request wins over its .dc);
 // every temperature-dependent value is resolved by the parser. A .temp list is for .op/.dc (listOk) only,
 // a .step list for the analyses that run it (stepOk).
+// ponytail: 27 is the DTO's default, so a corner asking for 27 C cannot override a netlist .temp
+static double cornerTempC(const SimulationRequestDTO& req) { return req.corner.temperature != 27.0 ? req.corner.temperature : NAN; }
+
 static bool deserialiseRequest(const SimulationRequestDTO& req, SPICEParseResult& out,
                                SimulationResponseDTO& failure, bool listOk = false, bool stepOk = false, bool digitalOk = false) {
-    // ponytail: 27 is the DTO's default, so a corner asking for 27 C cannot override a netlist .temp
-    if (const std::string e = parseRequest(req, req.corner.temperature != 27.0 ? req.corner.temperature : NAN, out); !e.empty()) {
+    if (const std::string e = parseRequest(req, cornerTempC(req), out); !e.empty()) {
         failure.errorDetail = e;
         return false;
     }
@@ -702,7 +705,14 @@ SimulationResponseDTO SessionImpl::runSens(const SimulationRequestDTO& req,
         else if (SolverStep dc = sim.solveDC(parsed.netlist); !dc.stats.converged)
             r.errorDetail = "DC operating point failed before sensitivity analysis: " + dc.stats.error_detail;
         else {
-            auto sn = sim.solveSens(parsed.netlist, parsed.sensOut, parsed.sensRef, parsed.sensSource);
+            auto reparse = [&](const SensParam& p, TensorNetlist& nl) {
+                SPICEParseResult q;
+                if (!parseRequest(req, cornerTempC(req), q, &p).empty()) return false;
+                nl = std::move(q.netlist);
+                return true;
+            };
+            auto sn = sim.solveSens(parsed.netlist, parsed.sensOut, parsed.sensRef, parsed.sensSource,
+                                    parsed.sensParams, parsed.sensZeroParams, reparse);
             r.errorDetail = sn.error;
             r.converged   = sn.error.empty();
             r.extended.hasSens = r.converged;

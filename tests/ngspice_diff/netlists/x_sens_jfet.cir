@@ -1,0 +1,8 @@
+* .sens: JFET model parameters (self-biased common-source stage)
+VDD 1 0 DC 15
+RD 1 2 3.3k
+J1 2 0 3 JN
+RS 3 0 500
+.model JN NJF (VTO=-2.2 BETA=1.5m LAMBDA=0.01 IS=1e-14 RD=20 RS=15)
+.sens v(2)
+.end

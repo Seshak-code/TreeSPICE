@@ -349,8 +349,9 @@ std::vector<std::pair<int, std::string>> SPICEParser::expandIncludes(
 // ============================================================================
 
 SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::string& baseDir, double tempC,
-                                    const std::map<std::string, double>& paramOverrides) {
+                                    const std::map<std::string, double>& paramOverrides, const SensParam* sens) {
     result_ = SPICEParseResult{};
+    sens_ = sens;
     tnomC_ = 27.0;
     nodeMap_.clear();
     nextNode_ = 1;
@@ -788,12 +789,20 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     // RD / RS (or RSH * NRD / NRS) of a level 1 MOSFET are series resistors to internal nodes, added here
     // before the X cards expand (a .subckt body gets local nodes, the top level global ones). ngspice
     // gives RD precedence over RSH, and M parallel devices divide the resistance.
+    // The card a device resolves: its own, or a renamed copy (a model of its own) with the .sens override applied
+    auto sensed = [&](const ModelCard* c, const std::string& inst) -> const ModelCard* {
+        if (!sens_ || !sens_->model || toUpper(inst) != sens_->instance) return c;
+        sensCard_ = *c;
+        sensCard_.name += "#SENS";
+        sensCard_.params[sens_->param] = sens_->value;
+        return &sensCard_;
+    };
     auto mosSeries = [&](TensorBlock& blk, bool top) {
         const size_t n = blk.mosfets.size();
         for (size_t k = 0; k < n; ++k) {
             Mosfet& m = blk.mosfets[k];
             const ModelCard* c;
-            try { c = mosCard(m); } catch (const std::exception&) { continue; }  // resolveBlock reports it
+            try { c = sensed(mosCard(m), m.instanceName); } catch (const std::exception&) { continue; }  // resolveBlock reports it
             if (c->type != "NMOS" && c->type != "PMOS") continue;
             if (const double lv = c->get("LEVEL", 1.0); lv == 54.0 || lv == 14.0 || lv == 49.0 || lv == 8.0) continue;  // BSIM4 / BSIM3 (OSDI) keep RD, RS inside
             auto add = [&](int Mosfet::* term, const char* tag, double rd, double rs_, double nrx) {
@@ -830,8 +839,9 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 blk.resistors.push_back(res);
                 j.*term = inner;
             };
-            add(&JFET::drain, "RD", it->second.get("RD", 0.0));
-            add(&JFET::source, "RS", it->second.get("RS", 0.0));
+            const ModelCard* c = sensed(&it->second, j.instanceName);
+            add(&JFET::drain, "RD", c->get("RD", 0.0));
+            add(&JFET::source, "RS", c->get("RS", 0.0));
         }
     };
     try {
@@ -900,9 +910,24 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (c->params.count(k) && !(c->params.at(k) > 0.0))
                 throw std::runtime_error("model " + c->name + ": " + k + " must be > 0");
     };
+    // A top-level device's real parameters for .sens: what its card gives, plus instance W/L as given
+    auto sensList = [&](const TensorBlock& blk, const std::string& inst, const ModelCard& c,
+                        const std::map<std::string, double>* given = nullptr) {
+        if (&blk != &result_.netlist.globalBlock) return;
+        auto add = [&](const std::string& k, double v, bool model) {
+            if (v == 0.0) ++result_.sensZeroParams;
+            else result_.sensParams.push_back({toUpper(inst), k, model, v});
+        };
+        // ponytail: selectors are recognised by name (LEVEL, VERSION, *MOD, ...); a missed one differentiates to 0
+        for (const auto& [k, v] : c.params)
+            if (k != "LEVEL" && k != "VERSION" && k != "TYPE" && k != "LMIN" && k != "LMAX" && k != "WMIN" && k != "WMAX" &&
+                k != "ACM" && k != "PARAMCHK" && k != "BINUNIT" && !(k.size() > 3 && k.compare(k.size() - 3, 3, "MOD") == 0))
+                add(k, v, true);
+        if (given) for (const char* k : {"W", "L"}) if (const auto it = given->find(k); it != given->end()) add(k, it->second, false);
+    };
     // The card's type must fit the device (a Q on an NMOS card reported "VTO is not supported")
     auto kind = [&](const ModelCard* c, const std::string& inst, std::initializer_list<const char*> types) {
-        for (const char* t : types) if (c->type == t) return c;
+        for (const char* t : types) if (c->type == t) return sensed(c, inst);
         throw std::runtime_error(inst + ": model " + c->name + " is " + c->type + ", not a " +
                                  std::string(*types.begin()) + "/" + *(types.begin() + 1) + " model");
     };
@@ -1060,7 +1085,10 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         }
         std::vector<Mosfet> level1;
         for (auto& m : blk.mosfets) {
+            if (sens_ && !sens_->model && toUpper(m.instanceName) == sens_->instance)
+                (sens_->param == "W" ? m.w : m.l) = m.given[sens_->param] = sens_->value;
             const ModelCard* c = kind(mosCard(m), m.instanceName, {"NMOS", "PMOS"});
+            sensList(blk, m.instanceName, *c, &m.given);
             if (const double level = c->get("LEVEL", 1.0); level == 54.0 || level == 14.0 || level == 49.0 || level == 8.0 ||
                                                            level == 10.0 || level == 58.0) {
                 blk.osdiDevices.push_back(bsimOsdi(m, *c, level == 49.0 || level == 8.0 ? 3 : level == 10.0 || level == 58.0 ? 10 : 4));
@@ -1165,6 +1193,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         // Diode and BJT at the instance temperature (ngspice diotemp / bjttemp, TLEV = TLEVC = 0): IS with EG and XTI,
         // junction potentials and capacitances, betas with XTB, the TC-style coefficients; a card at TNOM stays as given.
         for (auto& d : blk.diodes) if (const ModelCard* c = kind(card(d.modelName), d.instanceName, {"D", "D"})) {
+            sensList(blk, d.instanceName, *c);
             supported(c, {"IS", "N", "RS", "CJO", "CJ0", "CJ", "VJ", "PB", "M", "MJ", "FC", "TT", "BV", "IBV",
                           "EG", "XTI", "TNOM", "TM1", "TM2", "TCV", "TTT1", "TTT2", "TRS", "TRS1", "TRS2",
                           "JSW", "NS", "CJSW", "MJSW", "PHP", "IKF", "IK", "IKR", "KF", "AF"});
@@ -1199,6 +1228,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (k.bvGiven) k.bv -= c->get("TCV", 0.0) * dt;
         }
         for (auto& q : blk.bjts) if (const ModelCard* c = kind(card(q.modelName), q.instanceName, {"NPN", "PNP"})) {
+            sensList(blk, q.instanceName, *c);
             supported(c, {"IS", "BF", "BR", "NF", "NR", "VAF", "VA", "VAR", "VB", "IKF", "IK", "IKR",
                           "ISE", "NE", "ISC", "NC", "RB", "RC", "RE", "CJE", "VJE", "PE", "MJE", "ME",
                           "CJC", "VJC", "PC", "MJC", "MC", "XCJC", "CJS", "CCS", "VJS", "PS", "MJS", "MS",
@@ -1252,7 +1282,8 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         }
         for (auto& o : blk.osdiDevices) {
             if (o.model) continue;  // a BSIM4 card, bridged above
-            const ModelCard* c = card(o.modelName);
+            const ModelCard* c = sensed(card(o.modelName), o.instanceName);
+            sensList(blk, o.instanceName, *c);
             const osdi::Descriptor* d = osdi::findModule(c->type);
             if (!d) throw std::runtime_error("model " + c->name + ": type " + c->type +
                                              " is not a loaded OSDI module (load it with .osdi <file>)");
@@ -1260,7 +1291,8 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (!m) m = std::make_shared<osdi::Model>(d, c->name, c->params);
             o.model = m;
         }
-        for (auto& j : blk.jfets) if (const ModelCard* c = card(j.modelName)) {
+        for (auto& j : blk.jfets) if (const ModelCard* c = sensed(card(j.modelName), j.instanceName)) {
+            sensList(blk, j.instanceName, *c);
             if (c->type != "NJF" && c->type != "PJF" && c->type != "NJFET" && c->type != "PJFET")
                 throw std::runtime_error(j.instanceName + ": model " + c->name + " is " + c->type + ", not an NJF/PJF model");
             supported(c, {"BETA", "VTO", "LAMBDA", "IS", "N", "B", "CGS", "CGD", "PB", "FC", "KF", "AF", "RD", "RS",

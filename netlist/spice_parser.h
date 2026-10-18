@@ -70,6 +70,8 @@ struct SPICEParseResult {
     bool          hasSens = false;
     std::string   sensSource;        // i(vsrc): the source name, else empty
     int           sensOut = 0, sensRef = 0;
+    std::vector<SensParam> sensParams;  // the top-level devices' parameters a .sens differentiates
+    int           sensZeroParams = 0;   // parameters left out at 0 (no relative step)
     // .tf v(out[,ref]) | i(vsrc) insrc: DC small-signal transfer function
     bool          hasTF = false;
     std::string   tfSource, tfOutSource;  // the input source; the i(vsrc) output source, else empty
@@ -89,7 +91,7 @@ public:
     // tempC: the circuit temperature [C] instead of the netlist's .temp (NaN: the netlist's)
     // paramOverrides: upper-case global .param values that win over the netlist's (a .step param run)
     SPICEParseResult parse(const std::string& netlistText, const std::string& baseDir = "", double tempC = NAN,
-                           const std::map<std::string, double>& paramOverrides = {});
+                           const std::map<std::string, double>& paramOverrides = {}, const SensParam* sens = nullptr);
 
 private:
     // ── Value and Token Helpers ────────────────────────────────────────
@@ -192,6 +194,8 @@ private:
     std::set<std::string> modelNames_;
     std::map<std::string, int> cardLine_;   // "<subckt>/<CARD NAME>" and ".MODEL/<NAME>" -> line (deferred errors)
     std::string resolveAt_;                 // block being resolved
+    const SensParam* sens_ = nullptr;       // one parameter of one device overridden (a .sens perturbation)
+    ModelCard sensCard_;                    // that device's card with the override
     double scale_ = 1.0;                    // .option scale: MOSFET W, L, PD, PS (and AD, AS squared)                              // every .model name (first pass)
     std::map<std::string, std::shared_ptr<osdi::Model>> osdiModels_; // per card, shared by its N devices
 
