@@ -661,12 +661,12 @@ private:
                 defs_.push_back({n, line});
                 continue;
             }
-            if (!mult.empty() && std::strchr("RCLIDQMJGFX", k[0])) {  // the instance's m= replaces any of the device's own (ngspice)
+            if (!mult.empty() && std::strchr("RCLIDQMJGFXN", k[0])) {  // the instance's m= replaces any of the device's own (ngspice)
                 static const std::regex own(R"((^|\s)[mM]\s*=\s*[^\s]+)");
+                // An N device's m is OSDI's multiplier. ngspice 47 multiplies the other devices of the cell but not its
+                // OSDI ones (an m=3 BSIM-CMG cell's output moves from 0.757 V to 0.785 V); the engine multiplies them all.
                 line = std::regex_replace(line, own, "$1") + " m=" + mult;
             }
-            if (k[0] == 'N' && !mult.empty())
-                throw std::runtime_error(w[0] + ": m= on a subcircuit holding an OSDI device is not supported yet");
             if (k[0] == 'X') line = instance(line, sc, n, ctx);
             out.push_back({n, line});
         }

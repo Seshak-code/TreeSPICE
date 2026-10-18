@@ -575,6 +575,14 @@ int main() {
             check(!a.converged && a.errorDetail.find("AREA/M on a HICUM device") != std::string::npos,
                   "HICUM AREA is an explicit error (" + a.errorDetail + ")");
         }
+        {   // m= on a subcircuit multiplies its OSDI devices too: an m=3 cell keeps the m=1 cell's voltages
+            // (ngspice 47 multiplies only the non-OSDI devices, so it cannot be the reference)
+            const auto r = run(PrecisionMode::Native_F64, "m\n.osdi bsimcmg.osdi\n.subckt inv in out vdd\nN1 out in 0 0 nfin\n"
+                               "RL vdd out 20k\n.ends\nVDD 1 0 DC 0.8\nVG 2 0 DC 0.5\nX1 2 3 1 inv m=3\nX2 2 4 1 inv\n"
+                               ".model nfin bsimcmg_va type=1\n.op\n.end\n");
+            check(r.converged && near(V(r, 3), V(r, 4), 1e-6) && V(r, 3) < 0.77,
+                  "m=3 on a cell with an OSDI device keeps the cell's voltages (" + std::to_string(V(r, 3)) + " V)");
+        }
         {   // .tf i(vsrc): the true output impedance (-1/i), where ngspice prints 1/max(1e-20, i) = 1e20 (passive) or +1k (active)
             auto engine = ISimulationEngine::create();
             auto session = engine->createSession();
