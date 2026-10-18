@@ -94,9 +94,12 @@ def with_includes(text, base, depth=0):
     return "\n".join(out)
 
 def needed_osdi(text):
-    """OSDI libraries a netlist needs: its .osdi cards, and the ones the native BSIM cards run on."""
+    """OSDI libraries a netlist needs: its .osdi cards, and the ones the native BSIM and HICUM cards run on."""
     libs = set(osdi_libs(text))
-    for lvl in re.findall(r"^\s*\.model\s+\S+\s+\w+\s*\(?[^\n]*?\blevel\s*=\s*(\d+)", text, re.I | re.M):
+    for typ, lvl in re.findall(r"^\s*\.model\s+\S+\s+(\w+)\s*\(?[^\n]*?\blevel\s*=\s*(\d+)", text, re.I | re.M):
+        if typ.lower() in ("npn", "pnp"):
+            libs |= {"8": {"hicum2.osdi"}}.get(lvl, set())
+            continue
         libs |= {"54": {"bsim4.osdi"}, "14": {"bsim4.osdi"}, "49": {"bsim3.osdi"}, "8": {"bsim3.osdi"},
                  "10": {"bsimsoi.osdi"}, "58": {"bsimsoi.osdi"}}.get(lvl, set())
     return sorted(libs)

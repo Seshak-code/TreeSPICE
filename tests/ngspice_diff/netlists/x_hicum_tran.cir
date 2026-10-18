@@ -1,0 +1,10 @@
+* HICUM/L2 switch: pulsed base drive into an RC load (transient, self-heating)
+VCC vcc 0 DC 3
+VIN in 0 PULSE(0 1 1n 0.2n 0.2n 4n 10n)
+RB in b 2k
+RC vcc c 1k
+CL c 0 50f
+Q1 c b 0 0 qh
+.model qh npn level=8 c10=2e-30 qp0=2e-14 ich=1e-2 hfe=100 hfc=10 cjei0=1e-14 vdei=0.9 zei=0.5 rbi0=10 rbx=5 rcx=5 re=2 t0=1e-12 cjci0=5e-15 vdci=0.7 zci=0.4 ibeis=1e-18 mbei=1 ireis=1e-16 mrei=2 rth=200 cth=1e-12 favl=1 qavl=5e-14 cjs0=3e-15 itss=1e-20 rsu=100 csu=1e-15 flsh=1
+.tran 10p 20n
+.end

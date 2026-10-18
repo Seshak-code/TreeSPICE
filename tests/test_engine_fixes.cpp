@@ -557,6 +557,24 @@ int main() {
             check(w.size() == 2 && w[0].nodeVoltages[1] == w[1].nodeVoltages[1] && std::abs(w[0].nodeVoltages[1] - 5.0) > 1e-6,
                   "Monte Carlo variation survives the .dc TEMP re-parse");
         }
+        {   // HICUM/L2 (BJT LEVEL 8, OSDI): a PNP mirrors the NPN. ngspice 47's native HICUM PNP cannot be the
+            // reference: its temperature limiter gets NaN and the operating point fails (the OSDI model in ngspice agrees).
+            const char* card = "c10=2e-30 qp0=2e-14 ich=1e-2 hfe=100 hfc=10 cjei0=1e-14 vdei=0.9 zei=0.5 rbi0=10 rbx=5 rcx=5 re=2 "
+                               "t0=1e-12 cjci0=5e-15 vdci=0.7 zci=0.4 ibeis=1e-18 mbei=1 ireis=1e-16 mrei=2 rth=200 cth=1e-12 "
+                               "favl=1 qavl=5e-14 cjs0=3e-15 itss=1e-20 rsu=100 csu=1e-15 flsh=1";
+            auto ic = [&](const char* type, double s) {
+                std::string n = std::string("hicum\nVC c 0 ") + std::to_string(2 * s) + "\nVB b 0 " + std::to_string(0.85 * s) +
+                                "\nQ1 c b 0 q\n.model q " + type + " level=8 " + card + "\n.op\n.end\n";
+                const auto r = run(PrecisionMode::Native_F64, n);
+                return r.converged && !r.waveformPoints.empty() && !r.waveformPoints.back().branchCurrents.empty()
+                           ? r.waveformPoints.back().branchCurrents[0] : NAN;
+            };
+            const double n = ic("npn", 1.0), p = ic("pnp", -1.0);
+            check(n < -1e-3 && near(p, -n, 1e-9 * std::abs(n)), "HICUM PNP mirrors the NPN (" + std::to_string(n) + " A)");
+            const auto a = run(PrecisionMode::Native_F64, std::string("hicum\nVC c 0 2\nVB b 0 0.8\nQ1 c b 0 q area=2\n.model q npn level=8 ") + card + "\n.op\n.end\n");
+            check(!a.converged && a.errorDetail.find("AREA/M on a HICUM device") != std::string::npos,
+                  "HICUM AREA is an explicit error (" + a.errorDetail + ")");
+        }
         {   // .tf i(vsrc): the true output impedance (-1/i), where ngspice prints 1/max(1e-20, i) = 1e20 (passive) or +1k (active)
             auto engine = ISimulationEngine::create();
             auto session = engine->createSession();

@@ -680,6 +680,7 @@ struct BJT {
     int base = -1;                             // B terminal
     int emitter = -1;                          // E terminal
     int substrate = 0;                         // S terminal (ground when not given, as SPICE)
+    int thermal = -1;                          // T terminal of a HICUM (LEVEL 8) device; -1: not given (internal)
     std::string modelName = "default";
     bool isNPN = true;                           // true=NPN, false=PNP
     

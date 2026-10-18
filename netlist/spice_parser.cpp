@@ -850,10 +850,25 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             add(&JFET::source, "RS", c->get("RS", 0.0));
         }
     };
+    // A HICUM device (BJT LEVEL 8) without a thermal node gets an internal one, as in ngspice; other BJTs have none
+    auto bjtThermal = [&](TensorBlock& blk, bool top) {
+        for (BJT& q : blk.bjts) {
+            const auto it = modelCards_.find(toUpper(q.modelName));
+            if (it == modelCards_.end()) continue;  // resolveBlock reports it
+            if (it->second.get("LEVEL", 1.0) != 8.0) {
+                if (q.thermal >= 0) throw std::runtime_error(q.instanceName + ": a thermal node needs a HICUM (LEVEL 8) model");
+                continue;
+            }
+            if (q.thermal >= 0) continue;
+            q.thermal = top ? std::max(nextNode_++, result_.netlist.numGlobalNodes + 1) : ++blk.numInternalNodes;
+            if (top) result_.netlist.numGlobalNodes = std::max(result_.netlist.numGlobalNodes, q.thermal);
+        }
+    };
     try {
         mosSeries(result_.netlist.globalBlock, true);
         jfetSeries(result_.netlist.globalBlock, true);
-        for (auto& [name, blk] : result_.netlist.blockDefinitions) { mosSeries(blk, false); jfetSeries(blk, false); }
+        bjtThermal(result_.netlist.globalBlock, true);
+        for (auto& [name, blk] : result_.netlist.blockDefinitions) { mosSeries(blk, false); jfetSeries(blk, false); bjtThermal(blk, false); }
     } catch (const std::exception& e) { return fail(lines.back().first, e.what()); }
 
     // Expand X cards (recursively) now that every .subckt is defined
@@ -1232,6 +1247,37 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             k.tt *= poly(c->get("TTT1", 0.0), c->get("TTT2", 0.0), dt);
             k.rs *= poly(first(c, {"TRS1", "TRS"}, 0.0), c->get("TRS2", 0.0), dt);
             if (k.bvGiven) k.bv -= c->get("TCV", 0.0) * dt;
+        }
+        // HICUM/L2 (LEVEL 8): OpenVAF's hicuml2.va 2.4.0, ngspice's native version (they agree to 4e-5 in ngspice),
+        // through OSDI (hicum2.osdi from TREESPICE_OSDI_PATH); its parameter names are ngspice's.
+        // ponytail: the VA has no junction or temperature limiting (native HICUM's pnjlim / temperature limiter), so
+        // some cards that native ngspice solves fail to converge here, as in ngspice running the same OSDI model.
+        {
+            std::vector<BJT> gp;
+            for (auto& q : blk.bjts) {
+                const ModelCard* c = kind(card(q.modelName), q.instanceName, {"NPN", "PNP"});
+                if (c->get("LEVEL", 1.0) != 8.0) { gp.push_back(q); continue; }
+                sensList(blk, q.instanceName, *c);
+                if (!std::isnan(q.inst.temp) || q.inst.dtemp != 0.0)  // ngspice's HICUM rejects them too
+                    throw std::runtime_error(q.instanceName + ": TEMP/DTEMP on a HICUM device is not supported");
+                // ngspice's native AREA / M scaling is not M parallel devices (OSDI's m): with self-heating they
+                // differ by 0.2 % at 19 mK and 4 % at 19 K, so the engine would not match ngspice
+                if (q.area != 1.0) throw std::runtime_error(q.instanceName + ": AREA/M on a HICUM device is not supported yet");
+                if (!osdi::findModule("hicumL2va")) osdi::loadLibrary("hicum2.osdi");
+                std::map<std::string, double> p;
+                for (const auto& [k, v] : c->params) if (k != "LEVEL") p[k] = v;
+                p["TYPE"] = c->type == "PNP" ? -1.0 : 1.0;
+                if (!p.count("TNOM")) p["TNOM"] = tnomC_;
+                auto& model = osdiModels_[toUpper(c->name) + " HICUM"];
+                if (!model) model = std::make_shared<osdi::Model>(osdi::findModule("hicumL2va"), c->name, p);
+                OsdiDevice o;
+                o.instanceName = q.instanceName;
+                o.modelName = c->name;
+                o.nodes = {q.nodeCollector, q.base, q.emitter, q.substrate, q.thermal};
+                o.model = model;
+                blk.osdiDevices.push_back(o);
+            }
+            blk.bjts = std::move(gp);
         }
         for (auto& q : blk.bjts) if (const ModelCard* c = kind(card(q.modelName), q.instanceName, {"NPN", "PNP"})) {
             sensList(blk, q.instanceName, *c);
@@ -1711,10 +1757,12 @@ void SPICEParser::parseBJT(const std::vector<std::string>& tok, TensorBlock& blk
     q.base = nodeIndex(tok[2]);
     q.emitter = nodeIndex(tok[3]);
 
-    // Optional substrate node: tok[4] is the substrate when tok[5] names a .model
-    // card (all names are known after the first pass). No substrate node: ground.
-    const size_t modelIdx = tok.size() >= 6 && modelNames_.count(toUpper(tok[5])) ? 5 : 4;
-    if (modelIdx == 5) q.substrate = nodeIndex(tok[4]);
+    // Optional substrate and thermal nodes: c b e [s [t]] model, the model being the first of tok[4..6]
+    // that names a .model card (all names are known after the first pass). No substrate node: ground.
+    auto model = [&](size_t i) { return tok.size() > i && modelNames_.count(toUpper(tok[i])); };
+    const size_t modelIdx = model(4) || !(model(5) || model(6)) ? 4 : model(5) ? 5 : 6;
+    if (modelIdx >= 5) q.substrate = nodeIndex(tok[4]);
+    if (modelIdx == 6) q.thermal = nodeIndex(tok[5]);
     q.modelName = tok[modelIdx];
     q.area = instanceArea(tok, modelIdx + 1, &q.inst);
     blk.bjts.push_back(q);

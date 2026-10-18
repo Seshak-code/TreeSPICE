@@ -24,6 +24,8 @@ perl -0pe 's/(if \(!BSIM4wk1Given\)\s*BSIM4wk1 = 0\.0;\s*)if \(!BSIM4wk1Given\)\
   "$OPENVAF_DIR/integration_tests/BSIM4/bsim4.va" > "$tmp/bsim4.va"
 "$OPENVAF" "$tmp/bsim4.va" -o "$out/bsim4.osdi"
 "$OPENVAF" "$OPENVAF_DIR/integration_tests/BSIMCMG/bsimcmg.va" -o "$out/bsimcmg.osdi"
+# HICUM/L2 2.4.0, the version of ngspice's native HICUM (BJT LEVEL 8); unpatched, it matches native to 4e-5
+"$OPENVAF" "$OPENVAF_DIR/integration_tests/HICUML2/hicuml2.va" -o "$out/hicum2.osdi"
 # BSIM-SOI 4.6 (ngspice's native B4SOI, LEVEL 10/58, is 4.4). bsimsoi.va adds the overlap charges to qgate
 # (for the QG/CGG outputs) and then stamps ddt(qgate) from gate to body, beside its own gate-drain and gate-source
 # overlap branches: the overlap capacitance counted twice and pumped into a floating body (Gemini's finding; native

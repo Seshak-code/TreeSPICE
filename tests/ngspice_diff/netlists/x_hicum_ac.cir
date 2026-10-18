@@ -1,0 +1,14 @@
+* HICUM/L2 common-emitter amplifier: AC with junction, transit-time and thermal capacitances
+VCC vcc 0 DC 3
+VIN in 0 DC 0 AC 1
+RS in b0 50
+CB b0 b 1u
+RB1 vcc b 20k
+RB2 b 0 4k
+RC vcc c 500
+Q1 c b e 0 qh
+RE e 0 20
+CE e 0 1u
+.model qh npn level=8 c10=2e-30 qp0=2e-14 ich=1e-2 hfe=100 hfc=10 cjei0=1e-14 vdei=0.9 zei=0.5 rbi0=10 rbx=5 rcx=5 re=2 t0=1e-12 cjci0=5e-15 vdci=0.7 zci=0.4 ibeis=1e-18 mbei=1 ireis=1e-16 mrei=2 rth=200 cth=1e-12 favl=1 qavl=5e-14 cjs0=3e-15 itss=1e-20 rsu=100 csu=1e-15 flsh=1
+.ac dec 10 1k 100g
+.end
