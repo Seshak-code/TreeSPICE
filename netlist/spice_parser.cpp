@@ -1219,7 +1219,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             supported(c, {"IS", "N", "RS", "CJO", "CJ0", "CJ", "VJ", "PB", "M", "MJ", "FC", "TT", "BV", "IBV",
                           "EG", "XTI", "TNOM", "TM1", "TM2", "TCV", "TTT1", "TTT2", "TRS", "TRS1", "TRS2",
                           "JSW", "NS", "CJSW", "MJSW", "PHP", "IKF", "IK", "IKR", "KF", "AF", "ISR", "NR", "NBV",
-                          "CTA", "CTP", "TPB", "TPHP", "TLEVC", "TLEV"});
+                          "CTA", "CTP", "TPB", "TPHP", "TLEVC", "TLEV", "CJP"});
             // Temperature selectors (probed on ngspice 47): TLEV 1 scales BV by (1 - TCV dT) where 0 subtracts TCV dT
             // (IS follows the same law under both); TLEVC 1 takes CJO (1 + CTA dT), VJ - TPB dT and the sidewall's
             // CTP / TPHP in place of the junction law, and CTA..TPHP do nothing under TLEVC 0
@@ -1234,7 +1234,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             k.rs = c->get("RS", 0.0); k.cjo = first(c, {"CJO", "CJ0", "CJ"}, 0.0);
             k.vj = first(c, {"VJ", "PB"}, 1.0); k.m = first(c, {"M", "MJ"}, 0.5);
             k.fc = c->get("FC", 0.5); k.tt = c->get("TT", 0.0);
-            k.jsw = c->get("JSW", 0.0); k.ns = c->get("NS", 1.0); k.cjsw = c->get("CJSW", 0.0);
+            k.jsw = c->get("JSW", 0.0); k.ns = c->get("NS", 1.0); k.cjsw = first(c, {"CJSW", "CJP"}, 0.0);
             k.mjsw = c->get("MJSW", 0.33); k.php = c->get("PHP", 1.0);
             k.ikf = first(c, {"IKF", "IK"}, 0.0); k.ikr = c->get("IKR", 0.0);
             k.kf = c->get("KF", 0.0); k.af = c->get("AF", 1.0);
