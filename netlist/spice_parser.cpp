@@ -691,8 +691,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 case 'H': nonlinearForm(tok) ? parseBehav(line, tok, blk) : parseCCVS(tok, blk); break;
                 case 'F': nonlinearForm(tok) ? parseBehav(line, tok, blk) : parseCCCS(tok, blk); break;
                 case 'T': parseTLine(tok, blk);       break;
-                case 'O':
-                    throw std::runtime_error(tok[0] + ": lossy transmission lines (LTRA) are not supported yet");
+                case 'O': parseLossyLine(tok, blk); break;
                 case 'X': {
                     // X<name> <nodes...> <subcktName>; expanded after parsing
                     requireFields(tok, 3);
@@ -965,6 +964,26 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     try {
         urcExpand(result_.netlist.globalBlock, true);
         for (auto& [name, blk] : result_.netlist.blockDefinitions) urcExpand(blk, false);
+        // O lines: their LTRA model (ngspice ltraset / ltratemp)
+        auto ltraResolve = [&](TensorBlock& blk) {
+            for (auto& o : blk.lossyLines) {
+                const ModelCard* c = card(o.modelName);
+                if (c->type != "LTRA") throw std::runtime_error(o.name + ": model " + c->name + " is " + c->type + ", not an LTRA model");
+                supported(c, {"R", "L", "G", "C", "LEN", "NOCONTROL", "STEPLIMIT", "NOSTEPLIMIT", "LININTERP", "QUADINTERP",
+                              "MIXEDINTERP", "TRUNCNR", "TRUNCDONTCUT", "COMPACTREL", "COMPACTABS"});
+                bounded(c, {"R", "L", "G", "C", "LEN", "COMPACTREL", "COMPACTABS"}, {});
+                auto& m = o.m;
+                m.R = c->get("R", 0.0); m.L = c->get("L", 0.0); m.G = c->get("G", 0.0); m.C = c->get("C", 0.0); m.len = c->get("LEN", 0.0);
+                m.interp = c->params.count("LININTERP") ? ltra::Interp::LIN : c->params.count("MIXEDINTERP") ? ltra::Interp::MIXED : ltra::Interp::QUAD;
+                m.stepLimit = !c->params.count("NOSTEPLIMIT");
+                m.truncDontCut = c->params.count("TRUNCDONTCUT") > 0;
+                const auto& env = result_.netlist.environment;
+                const double sr = c->get("COMPACTREL", 0.0), sa = c->get("COMPACTABS", 0.0);
+                ltra::setup(m, c->name, sr != 0.0 ? sr : env.reltol, sa != 0.0 ? sa : env.abstol);
+            }
+        };
+        ltraResolve(result_.netlist.globalBlock);
+        for (auto& [name, blk] : result_.netlist.blockDefinitions) ltraResolve(blk);
         mosSeries(result_.netlist.globalBlock, true);
         jfetSeries(result_.netlist.globalBlock, true);
         bjtThermal(result_.netlist.globalBlock, true);
@@ -2143,6 +2162,29 @@ void SPICEParser::parseJFET(const std::vector<std::string>& tok, TensorBlock& bl
 }
 
 // U<name> <n1> <n2> <n3> <model> L=<length> [N=<lumps>]   (uniform distributed RC line, ngspice urc)
+// O<name> <p1> <n1> <p2> <n2> <model> [V1=v I1=i V2=v I2=i | IC=v1,i1,v2,i2]   (ngspice LTRA)
+void SPICEParser::parseLossyLine(const std::vector<std::string>& tok, TensorBlock& blk) {
+    requireFields(tok, 6);
+    LossyLine o;
+    o.name = tok[0];
+    o.p1 = nodeIndex(tok[1]); o.n1 = nodeIndex(tok[2]); o.p2 = nodeIndex(tok[3]); o.n2 = nodeIndex(tok[4]);
+    o.modelName = tok[5];
+    for (size_t i = 6; i < tok.size(); ++i) {
+        const std::string k = toUpper(tok[i]);
+        if (i + 1 >= tok.size()) throw std::runtime_error(tok[0] + ": parameter " + k + " has no value");
+        if (k == "IC") {
+            if (i + 4 >= tok.size()) throw std::runtime_error(tok[0] + ": IC takes v1, i1, v2, i2");
+            for (double& v : o.ic) v = parseValue(tok[++i]);
+        } else if (k == "V1") o.ic[0] = parseValue(tok[++i]);
+        else if (k == "I1") o.ic[1] = parseValue(tok[++i]);
+        else if (k == "V2") o.ic[2] = parseValue(tok[++i]);
+        else if (k == "I2") o.ic[3] = parseValue(tok[++i]);
+        else throw std::runtime_error(tok[0] + ": parameter " + k + " is not supported yet");
+        o.icGiven = true;
+    }
+    blk.lossyLines.push_back(o);
+}
+
 void SPICEParser::parseURC(const std::vector<std::string>& tok, TensorBlock& blk) {
     requireFields(tok, 5);
     TensorBlock::URC u;
@@ -2288,6 +2330,18 @@ void SPICEParser::parseModelCard(const std::vector<std::string>& tok) {
     }
 
     // Parse optional parameters (key=value pairs flattened by tokenizer)
+    // LTRA's flags are bare words (nosteplimit, lininterp, ...): each becomes key = 1
+    if (card.type == "LTRA") {
+        static const std::set<std::string> flags = {"LTRA", "NOCONTROL", "STEPLIMIT", "NOSTEPLIMIT", "LININTERP", "QUADINTERP",
+                                                    "MIXEDINTERP", "TRUNCNR", "TRUNCDONTCUT"};
+        std::vector<std::string> u(t.begin(), t.begin() + std::min<size_t>(3, t.size()));
+        for (size_t i = 3; i < t.size(); ++i) {
+            const std::string k = toUpper(t[i]);
+            if (flags.count(k) && (i + 1 >= t.size() || flags.count(toUpper(t[i + 1])) || !isValue(t[i + 1]))) { card.params[k] = 1.0; continue; }
+            u.push_back(t[i]);
+        }
+        t = u;
+    }
     // the code models' string parameters (quotes optional, as ngspice)
     static const std::map<std::string, std::string> stringKeys = {
         {"D_LUT", "TABLE_VALUES"}, {"D_SOURCE", "INPUT_FILE"}, {"D_STATE", "STATE_FILE"}, {"MULTI_INPUT_PWL", "MODEL"}, {"FILESOURCE", "FILE"}, {"XFER", "FILE"}};

@@ -1,0 +1,16 @@
+* LTRA in AC: LC, RLC and RC lines (Y0 and exp(-lambda LEN))
+v1 a 0 DC 0 AC 1
+rs a in 50
+o1 in 0 out 0 lline
+rl out 0 200
+rs2 a in2 50
+o2 in2 0 out2 0 rline
+rl2 out2 0 1k
+rs3 a in3 1k
+o3 in3 0 out3 0 rcline
+rl3 out3 0 1meg
+.model lline ltra l=250n c=100p len=1
+.model rline ltra r=5 l=250n c=100p len=1.5
+.model rcline ltra r=10k c=10p len=1
+.ac dec 10 1meg 2g
+.end

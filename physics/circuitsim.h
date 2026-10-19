@@ -1413,19 +1413,19 @@ public:
     const TensorBlock *blk;
     const BlockState *st;
     std::function<int(int)> map;   // local node -> global node
-    int vs, ind, e, h, tl, bv, dev;  // first matrix row of each branch kind (tl: two per transmission line; bv: voltage behavioural sources); dev: device internal nodes
+    int vs, ind, e, h, tl, lt, bv, dev;  // first matrix row of each branch kind (tl: two per transmission line, lt: two per lossy line; bv: voltage behavioural sources); dev: device internal nodes
     const BlockInstance *inst = nullptr;
   };
   std::vector<BranchSlot> branchSlots(const TensorNetlist &nl, int &total) const {
     std::vector<BranchSlot> branchList;
-    branchList.push_back({&nl.globalBlock, &nl.globalState, [](int x) { return x; }, 0, 0, 0, 0, 0, 0, 0, nullptr});
+    branchList.push_back({&nl.globalBlock, &nl.globalState, [](int x) { return x; }, 0, 0, 0, 0, 0, 0, 0, 0, nullptr});
     for (size_t k = 0; k < nl.instances.size() && k < nl.instanceStates.size(); ++k) {
       auto it = nl.blockDefinitions.find(nl.instances[k].blockName);
       if (it == nl.blockDefinitions.end()) continue;
       const auto *inst = &nl.instances[k];
       branchList.push_back({&it->second, &nl.instanceStates[k], [inst](int x) {
         return (x <= 0 || x > (int)inst->nodeMapping.size()) ? 0 : inst->nodeMapping[x - 1];
-      }, 0, 0, 0, 0, 0, 0, 0, inst});
+      }, 0, 0, 0, 0, 0, 0, 0, 0, inst});
     }
     int next = nl.numGlobalNodes;
     for (auto &s : branchList) { s.vs = next; next += (int)s.blk->voltageSources.size(); }
@@ -1433,6 +1433,7 @@ public:
     for (auto &s : branchList) { s.e = next; next += (int)s.blk->voltageControlledVoltageSources.size(); }
     for (auto &s : branchList) { s.h = next; next += (int)s.blk->currentControlledVoltageSources.size(); }
     for (auto &s : branchList) { s.tl = next; next += 2 * (int)s.blk->transmissionLines.size(); }
+    for (auto &s : branchList) { s.lt = next; next += 2 * (int)s.blk->lossyLines.size(); }
     for (auto &s : branchList) {
       s.bv = next;
       for (const auto &b : s.blk->behavioural) next += b.voltage;
@@ -1509,6 +1510,7 @@ public:
       for (const auto &e : b.currentControlledVoltageSources) mark({e.outPos, e.outNeg});
       for (const auto &e : b.currentControlledCurrentSources) mark({e.outPos, e.outNeg});
       for (const auto &e : b.transmissionLines) mark({e.nodePort1Pos, e.nodePort1Neg, e.nodePort2Pos, e.nodePort2Neg});
+      for (const auto &e : b.lossyLines) mark({e.p1, e.n1, e.p2, e.n2});
       for (const auto &e : b.behavioural) mark({e.outPos, e.outNeg});
       for (const auto &e : b.parasiticResistors) mark({e.node1, e.node2});
       for (const auto &e : b.parasiticCapacitors) mark({e.node1, e.node2});
@@ -1635,6 +1637,41 @@ public:
           add(b1, p1, 1.0); add(b1, n1, -1.0); add(b1, p2, -1.0); add(b1, n2, 1.0);
           add(b2, b1, 1.0); add(b2, b2, 1.0);
         }
+      }
+      // Lossy lines (ngspice LTRA, ltraload): i1, i2 into the + terminals. DC (and the RG line always): RG its
+      // two-port, the others R*LEN between the + terminals. Transient: Y0 v - i (+ the convolutions' first terms)
+      // = the inputs from the accepted history (RC: its h1 / h2 / h3 terms). AC: acSystem stamps the rows.
+      for (size_t k = 0; k < blk.lossyLines.size(); ++k) {
+        const auto &o = blk.lossyLines[k];
+        const auto &m = o.m;
+        const int b1 = sl.lt + 2 * (int)k, b2 = b1 + 1;
+        const int p1 = node(o.p1), n1 = node(o.n1), p2 = node(o.p2), n2 = node(o.n2);
+        add(p1, b1, 1.0); add(n1, b1, -1.0); add(p2, b2, 1.0); add(n2, b2, -1.0);
+        if (m.kase == ltra::Case::RG) {
+          add(b1, p1, 1.0); add(b1, n1, -1.0); add(b1, p2, -m.coshlrootGR); add(b1, n2, m.coshlrootGR);
+          add(b1, b2, (1 + gmin_) * m.rRsLrGRorG);
+          add(b2, b2, m.coshlrootGR); add(b2, p2, -(1 + gmin_) * m.rGsLrGRorR); add(b2, n2, (1 + gmin_) * m.rGsLrGRorR);
+          add(b2, b1, 1.0);
+          continue;
+        }
+        if (acLines_) { add(b1, b1, -1.0); add(b2, b2, -1.0); continue; }  // the rest are acSystem's
+        if (!tran || k >= sl.st->ltraState.size()) {
+          add(b1, b1, 1.0); add(b1, b2, 1.0); add(b2, p1, 1.0); add(b2, p2, -1.0); add(b2, b1, -m.R * m.len);
+          continue;
+        }
+        const auto &hst = sl.st->ltraState[k];
+        ltra::inputs(m, hst, time);
+        if (m.kase == ltra::Case::RC) {
+          add(b1, b1, -1.0); add(b2, b2, -1.0);
+          add(b1, p1, hst.h1f); add(b1, n1, -hst.h1f); add(b2, p2, hst.h1f); add(b2, n2, -hst.h1f);
+          add(b1, b2, -hst.h2f); add(b2, b1, -hst.h2f);
+          add(b1, p2, -hst.h3f); add(b1, n2, hst.h3f); add(b2, p1, -hst.h3f); add(b2, n1, hst.h3f);
+        } else {
+          const double y = m.admit * (1.0 + (m.kase == ltra::Case::RLC ? hst.h1f : 0.0));
+          add(b1, p1, y); add(b1, n1, -y); add(b1, b1, -1.0);
+          add(b2, p2, y); add(b2, n2, -y); add(b2, b2, -1.0);
+        }
+        S.rhs[b1] += hst.in1; S.rhs[b2] += hst.in2;
       }
     }
   }

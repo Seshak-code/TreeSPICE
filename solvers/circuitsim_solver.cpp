@@ -589,6 +589,18 @@ void CircuitSim::updateReactiveHistory(TensorNetlist &netlist, const std::vector
                getV(mapNode(t.nodePort2Pos)) - getV(mapNode(t.nodePort2Neg)) + z0 * (b + 1 < (int)v.size() ? v[b + 1] : 0.0),
                t.propagationDelay_Td_s);
     }
+    for (size_t k = 0; sl && k < blk.lossyLines.size() && k < st.ltraState.size(); ++k) {  // LTRAaccept
+      const auto &o = blk.lossyLines[k];
+      if (o.m.kase == ltra::Case::RG) continue;
+      const int b = sl->lt + 2 * (int)k;
+      auto &hs = st.ltraState[k];
+      hs.t.push_back(t);
+      hs.v1.push_back(getV(mapNode(o.p1)) - getV(mapNode(o.n1)));
+      hs.v2.push_back(getV(mapNode(o.p2)) - getV(mapNode(o.n2)));
+      hs.i1.push_back(b < (int)v.size() ? v[b] : 0.0);
+      hs.i2.push_back(b + 1 < (int)v.size() ? v[b + 1] : 0.0);
+      if (o.m.kase != ltra::Case::RC) ltra::acceptBreaks(o.m, hs, reltol_, abstol_, vntol_);
+    }
   };
   update(netlist.globalBlock, netlist.globalState, [](int n) { return n; });
   // MOSFET charges: the state mosCurrents() integrated at v (netlist is non-const here)
@@ -677,6 +689,19 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
            h.w2 = {getV(mapNode(t.nodePort2Pos)) - getV(mapNode(t.nodePort2Neg)) + z0 * (b + 1 < (int)x.size() ? x[b + 1] : 0.0)};
       h.t = {0.0};
       h.breaks = {t.propagationDelay_Td_s};
+    }
+    // Lossy lines: the history starts at the operating point (ngspice MODEINITTRAN), the initial state from it
+    // (UIC: from IC=, else 0)
+    for (size_t k = 0; sl && k < blk.lossyLines.size() && k < st.ltraState.size(); ++k) {
+      const auto &o = blk.lossyLines[k];
+      const int b = sl->lt + 2 * (int)k;
+      auto &hs = st.ltraState[k];
+      hs = {};
+      const double v1 = getV(mapNode(o.p1)) - getV(mapNode(o.n1)), v2 = getV(mapNode(o.p2)) - getV(mapNode(o.n2));
+      const double i1 = b < (int)x.size() ? x[b] : 0.0, i2 = b + 1 < (int)x.size() ? x[b + 1] : 0.0;
+      if (uic) { hs.iv1 = o.ic[0]; hs.ii1 = o.ic[1]; hs.iv2 = o.ic[2]; hs.ii2 = o.ic[3]; }
+      else { hs.iv1 = v1; hs.ii1 = i1; hs.iv2 = v2; hs.ii2 = i2; }
+      hs.t = {0.0}; hs.v1 = {v1}; hs.v2 = {v2}; hs.i1 = {i1}; hs.i2 = {i2};
     }
   };
   seed(netlist.globalBlock, netlist.globalState, [](int n) { return n; });
@@ -778,6 +803,11 @@ void CircuitSim::tranCorners(const TensorNetlist &netlist) {
     for (const auto &l : st.lineState)
       corners.push_back([&b = l.breaks](double x) {
         const auto it = b.upper_bound(x);
+        return it == b.end() ? std::numeric_limits<double>::infinity() : *it;
+      });
+    for (const auto &l : st.ltraState)  // LTRAaccept's breakpoints (sorted)
+      corners.push_back([&b = l.breaks](double x) {
+        const auto it = std::upper_bound(b.begin(), b.end(), x);
         return it == b.end() ? std::numeric_limits<double>::infinity() : *it;
       });
   };
@@ -890,7 +920,14 @@ std::string CircuitSim::beginTransient(TensorNetlist &netlist, double step, bool
   tran_.h = (stop > 0.0 ? std::min(step, stop / 100.0) : step) / 100.0;
   tranCorners(netlist);
   // A line is read TD back: a step longer than TD would need the value it is solving for
-  auto capByDelay = [&](const TensorBlock &b) { for (const auto &t : b.transmissionLines) tran_.hMax = std::min(tran_.hMax, t.propagationDelay_Td_s); };
+  auto capByDelay = [&](const TensorBlock &b) {
+    for (const auto &t : b.transmissionLines) tran_.hMax = std::min(tran_.hMax, t.propagationDelay_Td_s);
+    for (const auto &o : b.lossyLines) {  // LTRAtrunc: TD (steplimit, the default) and the RLC line's maxSafeStep
+      if (o.m.kase != ltra::Case::LC && o.m.kase != ltra::Case::RLC) continue;
+      if (o.m.stepLimit) tran_.hMax = std::min(tran_.hMax, o.m.td);
+      if (o.m.kase == ltra::Case::RLC && !o.m.truncDontCut) tran_.hMax = std::min(tran_.hMax, o.m.maxSafeStep);
+    }
+  };
   capByDelay(netlist.globalBlock);
   for (const auto &[name, blk] : netlist.blockDefinitions) capByDelay(blk);
   tran_.h = std::min(tran_.h, tran_.hMax);
@@ -1124,6 +1161,23 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
       const double Z = t.characteristicImpedance_Z0_ohms;
       addD(b1, node(t.nodePort2Pos), -1.0); addD(b1, node(t.nodePort2Neg), 1.0); addD(b1, b2, -Z);
       addD(b2, node(t.nodePort1Pos), -1.0); addD(b2, node(t.nodePort1Neg), 1.0); addD(b2, b1, -Z);
+    }
+    for (size_t k = 0; k < sl.blk->lossyLines.size(); ++k) {  // LTRA (ltraacld): Y0 and exp(-lambda LEN) at w
+      const auto &o = sl.blk->lossyLines[k];
+      if (o.m.kase == ltra::Case::RG) continue;  // its DC two-port, already in G
+      const int b1 = sl.lt + 2 * (int)k, b2 = b1 + 1;
+      const auto m = o.m;
+      auto put = [&](int r, int c, int which, double sign) {
+        if (r < 0 || c < 0) return;
+        sys.fr.push_back(r); sys.fc.push_back(c);
+        sys.fv.push_back([m, which, sign](double w) {
+          const auto a = ltra::acTerms(m, w);
+          return sign * (which == 0 ? a.y0 : which == 1 ? a.e : a.y0e);
+        });
+      };
+      const int p1 = node(o.p1), n1 = node(o.n1), p2 = node(o.p2), n2 = node(o.n2);
+      put(b1, p1, 0, 1.0); put(b1, n1, 0, -1.0); put(b1, p2, 2, -1.0); put(b1, n2, 2, 1.0); put(b1, b2, 1, -1.0);
+      put(b2, p2, 0, 1.0); put(b2, n2, 0, -1.0); put(b2, p1, 2, -1.0); put(b2, n1, 2, 1.0); put(b2, b1, 1, -1.0);
     }
     const auto flux = fluxLinks(*sl.blk);  // inductor row: v1 - v2 - jw*sum L_aj i_j = 0
     for (size_t a = 0; a < flux.size(); ++a)

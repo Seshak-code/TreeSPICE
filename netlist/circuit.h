@@ -10,6 +10,7 @@
 #include <cassert>
 #include <iostream>
 #include "../physics/xspice.h"
+#include "../physics/ltra.h"
 #include "../physics/physics_constants.h"
 #include "graph_canonical.h"
 #include "numparam.h"
@@ -817,6 +818,18 @@ struct TransmissionLine {
 };
 
 /*
+ * Lossy transmission line (O, ngspice LTRA): port 1 (p1, n1), port 2 (p2, n2), branch currents i1, i2 into the +
+ * terminals (two unknowns per line, as TransmissionLine's); the model resolved by the parser (physics/ltra.h).
+ */
+struct LossyLine {
+    std::string name, modelName;
+    int p1 = 0, n1 = 0, p2 = 0, n2 = 0;
+    bool icGiven = false;  // IC=v1,i1,v2,i2 (or V1 / I1 / V2 / I2): the line's state under UIC
+    double ic[4] = {0, 0, 0, 0};
+    ltra::Model m;
+};
+
+/*
  * Probe (Measurement Tool)
  * Does not affect physics (infinite impedance).
  * Used to request V(pos) - V(neg) for plotting/GUI.
@@ -888,6 +901,7 @@ struct TensorBlock {
     
     // Interconnects
     std::vector<TransmissionLine> transmissionLines;
+    std::vector<LossyLine> lossyLines;
     
     // Aux
     std::vector<Probe> probes;
@@ -1244,6 +1258,7 @@ struct BlockState {
     // read back TD later; breaks: where a kink in w reaches the far port (the transient lands on them)
     struct LineHistory { std::vector<double> t, w1, w2; std::set<double> breaks; };
     std::vector<LineHistory> lineState;
+    std::vector<ltra::History> ltraState;  // per LossyLine: its accepted history
     std::vector<std::shared_ptr<osdi::Instance>> osdiState;  // per OsdiDevice (TensorNetlist::instantiateOsdi)
     std::vector<std::vector<BusProbe::DigitalSample>> busProbeState; 
     // Future: BJT OP, etc.
@@ -1266,6 +1281,7 @@ struct BlockState {
         osdiState.resize(block.osdiDevices.size());
         busProbeState.resize(block.busProbes.size());
         lineState.resize(block.transmissionLines.size());
+        ltraState.resize(block.lossyLines.size());
     }
 };
 
