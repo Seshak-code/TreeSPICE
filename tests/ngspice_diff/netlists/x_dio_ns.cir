@@ -1,0 +1,10 @@
+* Diode sidewall characteristic: without NS the sidewall follows N (here 1.6); with NS its own, and breakdown too
+VD a 0 DC 0
+RA a k1 50
+RB a k2 50
+D1 k1 0 dn PJ=50u
+D2 k2 0 ds PJ=50u
+.model dn D(IS=1e-15 N=1.6 JSW=2e-11 BV=6 IBV=1e-5)
+.model ds D(IS=1e-15 N=1.6 JSW=2e-11 NS=1.2 BV=6 IBV=1e-5)
+.dc VD -7 1.2 0.02
+.end

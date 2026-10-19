@@ -1,0 +1,8 @@
+* MOS level 6 PMOS: LAMBDA as LAMBDA0, KC from U0 and TOX, forward body bias (linearised sqrt), RD / RS
+VDP dp 0 DC -3
+VGP gp 0 DC -1.5
+VBP bp 0 DC 0.3
+M2 dp gp 0 bp p6 W=40u L=3u
+.model p6 pmos level=6 vt0=-0.8 kv=2.2 nv=0.6 nc=1.2 gamma=0.5 sigma=0.01 phi=0.65 lambda=0.04 tox=30n u0=250 rd=20 rs=15
+.dc VDP 0 -3 -0.05 VGP -0.5 -2.5 -0.5
+.end

@@ -1,0 +1,8 @@
+* URC (uniform distributed RC line): the lumped ladder ngspice builds (lumps from FMAX), AC and a step
+VIN in 0 DC 0 AC 1
+RS in a 50
+U1 a b 0 um L=200u
+RL b 0 100k
+.model um URC(RPERL=10k CPERL=1e-9 K=1.8 FMAX=1g)
+.ac dec 10 1k 10g
+.end

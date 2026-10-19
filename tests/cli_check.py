@@ -37,6 +37,54 @@ def step_blocks(out):
 
 def close(a, b): return abs(a - b) <= 1e-9 + 2e-3 * max(abs(a), abs(b))
 
+def read_raw(path):
+    """The plots of an ngspice raw file (ascii or binary): [{name, vars: [(name, type)], rows: [[values]]}]."""
+    import struct
+    data, plots, pos = open(path, "rb").read(), [], 0
+    while pos < len(data):
+        hdr = {}
+        while True:
+            end = data.index(b"\n", pos)
+            line = data[pos:end].decode()
+            pos = end + 1
+            if line.startswith("Variables:"): break
+            k, _, v = line.partition(":")
+            hdr[k.strip()] = v.strip()
+        nv, npnt, cplx = int(hdr["No. Variables"]), int(hdr["No. Points"]), "complex" in hdr["Flags"]
+        vars_ = []
+        for _ in range(nv):
+            end = data.index(b"\n", pos)
+            f = data[pos:end].decode().split()
+            vars_.append((f[1], f[2]))
+            pos = end + 1
+        end = data.index(b"\n", pos)
+        kind = data[pos:end].decode().strip()
+        pos = end + 1
+        rows = []
+        if kind.startswith("Binary"):
+            w = 16 if cplx else 8
+            for _ in range(npnt):
+                row = []
+                for _ in range(nv):
+                    if cplx: re_, im = struct.unpack_from("<dd", data, pos); row.append(complex(re_, im))
+                    else: row.append(struct.unpack_from("<d", data, pos)[0])
+                    pos += w
+                rows.append(row)
+        else:
+            vals = []
+            while len(vals) < nv * npnt:
+                end = data.find(b"\n", pos)
+                end = len(data) if end < 0 else end
+                f = data[pos:end].decode().split()
+                pos = end + 1
+                if not f: continue
+                tok = f[-1] if len(vals) % nv else f[1]
+                vals.append(complex(*map(float, tok.split(","))) if cplx else float(tok))
+            rows = [vals[k * nv:(k + 1) * nv] for k in range(npnt)]
+            while pos < len(data) and data[pos:pos + 1] in (b"\n", b" "): pos += 1
+        plots.append({"name": hdr["Plotname"], "vars": vars_, "rows": rows})
+    return plots
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--treespice", default=os.path.join(ROOT, "build", "treespice"))
@@ -130,6 +178,34 @@ def main():
                 else: ok = False  # a measure ngspice did not run or reject
                 if not ok: fail(f"{at}: {m} = {gv.get(m, 'failed' if m in gf else 'missing')} vs ngspice {wv.get(m, 'failed' if m in wf else 'missing')}")
         if bad == bad0: print("PASS", name, f"{n} measures")
+    # raw plots of .noise (densities and totals), .tf and .sens (dc, ac): treespice's against ngspice's own -r file.
+    # Every vector treespice writes is in ngspice's plot under its name and type (ngspice's .sens lists more
+    # parameters, which treespice leaves out), with the same values
+    base = "r\nV1 1 0 DC 1 AC 1\nR1 1 2 1k\nR2 2 0 1k\nC1 2 0 1n\n"
+    for name, card, src in (("noise", ".noise v(2) V1 dec 2 1 100", base), ("noisei", ".noise v(2) I1 dec 2 1 100",
+                            "r\nI1 0 1 DC 1m AC 1\nR1 1 2 1k\nR2 2 0 1k\nC1 2 0 1n\n"), ("tf", ".tf v(2) V1", base),
+                            ("sens", ".sens v(2)", base), ("sensac", ".sens v(2) ac dec 2 1 100", base)):
+        net = os.path.join(tmp, "raw_" + name + ".cir")
+        open(net, "w").write(src + card + "\n.end\n")
+        ref = os.path.join(tmp, "raw_" + name + ".ng.raw")
+        subprocess.run([a.ngspice, "-b", "-r", ref, net], capture_output=True)
+        want = read_raw(ref)
+        for ascii_ in (True, False):
+            raw = os.path.join(tmp, "raw_" + name + (".a" if ascii_ else ".b") + ".raw")
+            ts = subprocess.run([a.treespice, "-r", raw] + (["--ascii"] if ascii_ else []) + [net], capture_output=True, text=True)
+            if ts.returncode: fail(f"raw {name}: treespice exit {ts.returncode}: {ts.stderr.strip()[:200]}"); continue
+            got, bad0 = read_raw(raw), bad
+            if [p["name"] for p in got] != [p["name"] for p in want]: fail(f"raw {name}: plots {[p['name'] for p in got]} vs ngspice {[p['name'] for p in want]}"); continue
+            for g, w in zip(got, want):
+                wi = {v[0].lower(): (k, v[1]) for k, v in enumerate(w["vars"])}
+                if len(g["rows"]) != len(w["rows"]): fail(f"raw {name}: {g['name']} has {len(g['rows'])} points, ngspice {len(w['rows'])}"); continue
+                for k, (vn, vt) in enumerate(g["vars"]):
+                    if vn.lower() not in wi or wi[vn.lower()][1] != vt: fail(f"raw {name}: {vn} ({vt}) is not in ngspice's {g['name']}"); continue
+                    j = wi[vn.lower()][0]
+                    if name == "sensac" and vn.lower() != "frequency": continue  # ngspice's .sens ac values are unreliable: run_diff checks them by difference
+                    if not all(abs(gr[k] - wr[j]) <= 1e-12 + 2e-3 * max(abs(gr[k]), abs(wr[j])) for gr, wr in zip(g["rows"], w["rows"])):
+                        fail(f"raw {name}: {vn} differs from ngspice's")
+            if bad == bad0: print("PASS", "raw", name, "ascii" if ascii_ else "binary")
     # expressions: v(a)*2 + 1 and v(a,b) equal their pieces (ngspice's .print cannot do arithmetic)
     for kind, card, cells in (("dc", ".dc V1 0 5 1", 1), ("ac", ".ac dec 1 100 1k", 2)):
         net = os.path.join(tmp, "expr.cir")

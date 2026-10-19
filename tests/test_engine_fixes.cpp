@@ -225,7 +225,7 @@ int main() {
         // (an NPN would not conduct at all; ignoring IS from the card gives 3.662)
         check(r.converged && near(V(r, 2), 3.7205, 2e-3),
               ".model after the device still makes it a PNP (V(e)=" + std::to_string(V(r, 2)) + ")");
-        r = run(mode, "* unknown\nV1 1 0 5\nZ1 1 0 5\n.op\n");
+        r = run(mode, "* unknown\nV1 1 0 5\n9Z1 1 0 5\n.op\n");  // no element letter (Z is a MESFET)
         check(!r.converged && r.errorDetail.find("unknown element") != std::string::npos,
               "unknown element is a parse error: " + r.errorDetail);
         // MNA branch currents: F/H read V1's branch current (1e-6 tolerance: every
@@ -346,6 +346,35 @@ int main() {
                   near(r.extended.noise.inoise[0], 2 * expect, 2e-6 * expect) &&
                   near(r.extended.noise.onoiseTotal, expect, 1e-6 * expect),  // white: total over 1 Hz
               "noise: 1k/1k divider gives sqrt(4kT*500) out, x2 input-referred, white total");
+        // MOS LEVEL 6: ngspice's mos6 has no AC load (its .ac sees no device), so the oracle is the DC slope, which
+        // run_diff holds to ngspice (x_mos6_*): the 10 Hz gain equals the central difference of v(3) over VG
+        const auto mos6 = [](double vg, const char* an) {
+            return "* mos6 cs\nVDD 1 0 DC 5\nVG 2 0 DC " + std::to_string(vg) + " AC 1\nRD 1 3 10k\nM1 3 2 0 0 NM W=20u L=2u m=2\n"
+                   ".model NM NMOS(LEVEL=6 VTO=0.8 KV=2 NV=0.7 KC=2e-5 NC=1.3 GAMMA=0.5 PHI=0.65 TOX=50n LAMBDA=0.02 SIGMA=0.01 "
+                   "CGSO=4e-10 CGDO=4e-10 CJ=3e-4)\n" + std::string(an);
+        };
+        req.source.payload = mos6(1.3, ".ac lin 1 10 10\n");
+        r = engine->createSession()->runAC(req, cb);
+        const double h = 1e-4, slope = (V(run(mode, mos6(1.3 + h, "")), 3) - V(run(mode, mos6(1.3 - h, "")), 3)) / (2 * h);
+        ok = r.converged && r.waveformPoints.size() == 1;
+        check(ok && near(r.waveformPoints[0].nodeVoltages[2], slope, 1e-6 * std::abs(slope)) && std::abs(slope) > 1.0,
+              "MOS LEVEL 6: 10 Hz AC gain equals the DC slope dv(3)/dVG");
+        // XSPICE aswitch in AC is the resistance its control sets (ngspice 47's AC load negates the conductance:
+        // a 1 V source over 1k and the switch read 1.46 V there): the same divider as a resistor of that value
+        {
+            const std::string sw = "* aswitch ac\nVS s 0 DC 1 AC 1\nR1 s x 1k\nVC c 0 DC 0.5\na1 c %gd(x 0) sw\n"
+                                   ".model sw aswitch(cntl_off=0 cntl_on=1 r_off=100k r_on=100)\nR2 s y 1k\nR3 y 0 3162.2776601683795\n"
+                                   ".ac lin 1 1k 1k\n";
+            req.source.payload = sw;
+            const auto ra = engine->createSession()->runAC(req, cb);
+            const bool ok2 = ra.converged && ra.waveformPoints.size() == 1;
+            check(ok2 && near(ra.waveformPoints[0].nodeVoltages[1], ra.waveformPoints[0].nodeVoltages[3], 1e-9) &&
+                      near(ra.waveformPoints[0].nodeVoltages[1], 0.7597469, 1e-6),
+                  "XSPICE aswitch in AC is its resistance (" + (ok2 ? std::to_string(ra.waveformPoints[0].nodeVoltages[1]) : ra.errorDetail) + " V)");
+        }
+        req.source.payload = mos6(1.3, ".noise v(3) VG lin 1 10 10\n");
+        r = engine->createSession()->runNoise(req, cb);
+        check(!r.converged && r.errorDetail.find("no noise model") != std::string::npos, "MOS LEVEL 6 .noise is an error");
     }
 
     // No node gmin: a node with no DC path is not silently 0 (the contraction
@@ -437,13 +466,18 @@ int main() {
             {"V1 1 0 DC 3\nR1 1 2 1k\nM1 2 2 0 0 MM\n.model MM NMOS GAMMA=1 PHI=0\n", "PHI must be > 0"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DM\n.model DM D BV=0\n", "BV must be > 0"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DM\n.model DM D N=0\n", "N must be > 0"},
-            {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 NM OFF\n.model NM NMOS\n", "OFF is not supported"},
-            {"V1 1 0 DC 1\nR1 1 2 1k\nQ1 2 2 0 QM IC=0.6,5\n.model QM NPN\n", "IC is not supported"},
+            {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 NM OFF\n.model NM NMOS LEVEL=54\n", "OFF and IC on a LEVEL 54 device are not supported yet"},
+            {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 1 0 VM IC=1,1\n.model VM VDMOS\n", "OFF and IC on a VDMOS device are not supported yet"},
+            {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 1 0 VM THERMAL\n.model VM VDMOS(RTHJC=1)\n", "or 5 (d g s tj tc) with THERMAL"},
+            {"V1 1 0 DC 1\nR1 1 2 1k\nZ1 2 1 0 MZ\n.model MZ NMF(LEVEL=2)\n", "MESA) is not supported yet"},
+            {"V1 1 0 DC 1\nR1 1 2 1k\nZ1 2 1 0 MZ\n.model MZ NJF\n", "not an NMF/PMF model"},
+            {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 1 0 3 4 VM THERMAL\n.model VM VDMOS\n", "THERMAL needs RTHJC"},
+            {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 1 0 VM W=1u\n.model VM VDMOS\n", "a VDMOS takes M, TEMP, DTEMP and THERMAL only"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nQ1 2 2 0 NM\n.model NM NMOS\n", "is NMOS, not a NPN/PNP model"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 NM W=10u\n.model NM NMOS\n", "expected 4 nodes"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 y inv\n.model inv d_inverter\n", "supported in .tran only"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 j k c NULL NULL q qb jk\n.model jk d_jkff\n", "D_JKFF is not supported yet"},
-            {"V1 1 0 DC 1\nR1 1 0 1k\n.subckt s x\na1 d1 y inv\n.ends\nX1 1 s\n.model inv d_inverter\n", "inside a .subckt are not supported"},
+            {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 d2 d3 tri\n.model tri d_tristate(inertial_delay=true)\n", "inertial_delay on a d_tristate is not supported yet"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 y inv\n.model inv d_inverter(delay=1n)\n", "DELAY is not a D_INVERTER parameter"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 0 NM\n.model NM NMOS\n", "expected 4 nodes (d g s b) for a LEVEL 1"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 SN\n.model SN NMOS LEVEL=57\n", "(B3SOI) is not supported"},
@@ -575,6 +609,12 @@ int main() {
             check(!a.converged && a.errorDetail.find("AREA/M on a HICUM device") != std::string::npos,
                   "HICUM AREA is an explicit error (" + a.errorDetail + ")");
         }
+        {   // A MESFET's positional area is its AREA (ngspice 47's INP2Z drops it for MES, keeping area= only)
+            const auto r = run(PrecisionMode::Native_F64, "z\nVDD 1 0 DC 3\nRA 1 2 1k\nRB 1 3 1k\nRC 1 4 1k\n"
+                               "Z1 2 0 0 mn 2\nZ2 3 0 0 mn area=2\nZ3 4 0 0 mn\n.model mn NMF(VTO=-1.5 BETA=1e-3)\n.op\n.end\n");
+            check(r.converged && near(V(r, 2), V(r, 3), 1e-9) && !near(V(r, 2), V(r, 4), 1e-3),
+                  "MESFET positional area is AREA (" + std::to_string(V(r, 2)) + " V)");
+        }
         {   // m= on a subcircuit multiplies its OSDI devices too: an m=3 cell keeps the m=1 cell's voltages
             // (ngspice 47 multiplies only the non-OSDI devices, so it cannot be the reference)
             const auto r = run(PrecisionMode::Native_F64, "m\n.osdi bsimcmg.osdi\n.subckt inv in out vdd\nN1 out in 0 0 nfin\n"
@@ -592,6 +632,18 @@ int main() {
             };
             const auto a = latch(" OFF", ""), b = latch("", " OFF");
             check(a.first > 4.5 && a.second < 0.1 && b.first < 0.1 && b.second > 4.5, "OFF selects a symmetric latch's state");
+        }
+        {   // a diode's IC= under UIC starts its charge there (ngspice 47 drops it; its BJT and JFET honour theirs)
+            auto v2 = [&](const char* ic) {
+                SimulationRequestDTO req;
+                req.source.payload = std::string("ic\nV1 1 0 DC 0\nR1 1 2 1k\nD1 2 0 dm ") + ic +
+                                     "\n.model dm d is=1e-14 cjo=2p tt=5n\n.tran 0.1n 5n uic\n.end\n";
+                auto engine = ISimulationEngine::create();
+                const auto r = engine->createSession()->runTransient(req, {}, nullptr);
+                return r.converged && r.waveformPoints.size() > 2 ? r.waveformPoints[2].nodeVoltages[1] : NAN;
+            };
+            const double with = v2("IC=0.6"), without = v2("");
+            check(with > 0.4 && std::abs(without) < 1e-3, "diode IC=0.6 under UIC holds its node at first (" + std::to_string(with) + " V)");
         }
         {   // .tf i(vsrc): the true output impedance (-1/i), where ngspice prints 1/max(1e-20, i) = 1e20 (passive) or +1k (active)
             auto engine = ISimulationEngine::create();

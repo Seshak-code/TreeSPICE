@@ -1,0 +1,7 @@
+* Diode IKP (sidewall forward knee), IKF and IKR (reverse knee in breakdown too)
+VD a 0 DC 0
+R1 a k 10
+D1 k 0 dk PJ=100u
+.model dk D(IS=1e-15 JSW=1e-12 IKF=1e-3 IKP=5e-4 IKR=1e-4 BV=5 IBV=1e-6)
+.dc VD -6 1.2 0.02
+.end

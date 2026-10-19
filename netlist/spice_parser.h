@@ -103,8 +103,9 @@ private:
     static void requireFields(const std::vector<std::string>& tok, size_t n);
     double takeMultiplier(std::vector<std::string>& tok) const;  // removes M <value> pairs; the last wins
     static void requireLinearForm(const std::vector<std::string>& tok, size_t n);
-    // t: accept TEMP, DTEMP; off: accept OFF
-    double instanceArea(const std::vector<std::string>& tok, size_t from, InstTemp* t = nullptr, bool* off = nullptr) const;
+    // t: accept TEMP, DTEMP; off: accept OFF; ic: accept IC=v1[,v2] (up to nIc values)
+    double instanceArea(const std::vector<std::string>& tok, size_t from, InstTemp* t = nullptr, bool* off = nullptr,
+                        double* ic = nullptr, int nIc = 0) const;
     static std::string toUpper(const std::string& s);
     static std::vector<std::string> tokenize(const std::string& line);
 
@@ -131,6 +132,7 @@ private:
     void parseBJT        (const std::vector<std::string>& tok, TensorBlock& blk);
     void parseSwitch     (const std::vector<std::string>& tok, TensorBlock& blk);
     void parseJFET       (const std::vector<std::string>& tok, TensorBlock& blk);
+    void parseURC        (const std::vector<std::string>& tok, TensorBlock& blk);
     void parseOsdiDevice (const std::vector<std::string>& tok, TensorBlock& blk);
     void parseXspice     (const std::string& line, int lineNum);  // A<name> ports... model: resolved once the models are known
     void resolveXspice   (int& line);  // line: the A card an error refers to
@@ -176,11 +178,19 @@ private:
     std::map<std::string, std::map<std::string, int>> subcktNames_;  // subckt -> local node name -> index
     std::map<std::string, int> subcktNodeMap_;   // local node names of the body being parsed
     int              nextLocalNode_ = 1;
-    struct PendingInstance { std::string subckt; std::vector<int> nodes; int line; std::string name; };
+    struct PendingInstance { std::string subckt; std::vector<int> nodes; int line; std::string name; std::vector<std::string> portNames; };
     std::vector<PendingInstance> topInstances_;   // nodes are global indices
     struct PendingIC { std::string node; double value; int line; bool nodeset; };
-    struct PendingA { std::string name, model; std::vector<std::vector<std::string>> groups; int line; };
-    std::vector<PendingA> pendingA_;                // XSPICE A lines, resolved after parsing
+    struct PendingA { std::string name, model; std::vector<std::vector<std::string>> groups; int line;
+                      std::vector<std::string> raw; };  // raw: the port words as written (%types, [ ], nodes)
+    void resolveXspiceAnalog(const PendingA& a, const ModelCard& c, const std::function<int(const std::string&, const std::string&)>& analogNode);
+    std::vector<PendingA> pendingA_;                // XSPICE A lines, resolved after parsing (a body's: per instance)
+    std::map<std::string, std::vector<PendingA>> subcktA_;  // A lines of a .subckt body (local names)
+    // Nodes an analog element names (not only X ports or .subckt pins): a digital-only net that an X line
+    // wired through has a node index, which must not make it analog
+    bool noAnalogRef_ = false;
+    std::set<int> analogTop_, analogGlobal_;
+    std::map<std::string, std::set<int>> analogLocal_;
     std::vector<PendingIC> pendingICs_;           // resolved once every node is known
     std::string pzNames_[4];                       // .pz node names, resolved likewise
     std::string sensOut_, sensRef_;                // .sens v() node names, resolved likewise
@@ -191,7 +201,8 @@ private:
     std::map<std::string, std::map<int, std::string>> subcktGlobals_;  // subckt -> local index -> name
     std::map<std::string, std::vector<PendingInstance>> subcktChildren_;  // nodes are body-local
     std::map<std::string, int> savedInductorIndex_; // top-level K lookup, saved inside a body
-    void expandInstance(const PendingInstance& pi, const std::vector<int>& portNodes, int depth, const std::string& path = "");
+    void expandInstance(const PendingInstance& pi, const std::vector<int>& portNodes, int depth, const std::string& path,
+                        const std::vector<std::string>& portNames, int topLine);
 
     // Model cards collected during parse, merged into netlist at end
     std::map<std::string, ModelCard> modelCards_;

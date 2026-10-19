@@ -10,6 +10,7 @@
 #include "../osdi/osdi_device.h"
 #include "../physics/physics_constants.h"
 #include "../physics/device_temp.h"
+#include "../physics/xspice_analog.h"
 #include <sstream>
 #include <iomanip>
 #include <fstream>
@@ -198,7 +199,8 @@ double SPICEParser::takeMultiplier(std::vector<std::string>& tok) const {
 // scale the device (currents, capacitances; resistances divide). OFF and IC=
 // steer which operating point SPICE finds (ngspice holds OFF junctions at 0 V
 // through MODEINITFIX) and the UIC start: errors until they are modelled, not dropped.
-double SPICEParser::instanceArea(const std::vector<std::string>& tok, size_t from, InstTemp* t, bool* off) const {
+double SPICEParser::instanceArea(const std::vector<std::string>& tok, size_t from, InstTemp* t, bool* off,
+                                 double* ic, int nIc) const {
     double area = 1.0;
     for (size_t i = from; i < tok.size(); ++i) {
         const std::string k = toUpper(tok[i]);
@@ -206,6 +208,11 @@ double SPICEParser::instanceArea(const std::vector<std::string>& tok, size_t fro
         else if (t && (k == "TEMP" || k == "DTEMP") && i + 1 < tok.size() && isValue(tok[i + 1])) (k == "TEMP" ? t->temp : t->dtemp) = parseValue(tok[++i]);
         else if ((k == "AREA" || k == "M") && i + 1 < tok.size() && isValue(tok[i + 1])) area *= parseValue(tok[++i]);
         else if (k == "OFF" && off) *off = true;
+        else if (k == "IC" && ic) {
+            int n = 0;
+            while (n < nIc && i + 1 < tok.size() && isValue(tok[i + 1])) ic[n++] = parseValue(tok[++i]);
+            if (n == 0) throw std::runtime_error(tok[0] + ": IC needs a value");
+        }
         else if (k == "OFF" || k == "IC") throw std::runtime_error(tok[0] + ": " + k + " is not supported yet");
         else throw std::runtime_error(tok[0] + ": parameter " + k + " is not supported yet");
     }
@@ -225,9 +232,13 @@ int SPICEParser::nodeIndex(const std::string& name) {
     auto& map  = inSubckt_ ? subcktNodeMap_ : nodeMap_;
     auto& next = inSubckt_ ? nextLocalNode_ : nextNode_;
     auto it = map.find(upper);
-    if (it != map.end()) return it->second;
+    if (it != map.end()) {
+        if (!noAnalogRef_) (inSubckt_ ? analogLocal_[subcktName_] : analogTop_).insert(it->second);
+        return it->second;
+    }
     if (inSubckt_ && globals_.count(upper)) subcktGlobals_[subcktName_][next] = upper;  // see expandInstance
     map[upper] = next;
+    if (!noAnalogRef_) (inSubckt_ ? analogLocal_[subcktName_] : analogTop_).insert(next);
     return next++;
 }
 
@@ -655,7 +666,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             // Choose target block: subcircuit body or global
             TensorBlock& blk = inSubckt_ ? subcktBlock_ : result_.netlist.globalBlock;
             char type = static_cast<char>(std::toupper(static_cast<unsigned char>(keyword[0])));
-            mult_ = std::strchr("RLIGFJ", type) ? takeMultiplier(tok) : 1.0;
+            mult_ = std::strchr("RLIGFJZ", type) ? takeMultiplier(tok) : 1.0;
 
             switch (type) {
                 case 'R': parseResistor(tok, blk);   break;
@@ -668,12 +679,11 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 case 'M': parseMosfet(tok, blk);      break;
                 case 'Q': parseBJT(tok, blk);         break;
                 case 'J': parseJFET(tok, blk);        break;
+                case 'Z': parseJFET(tok, blk); blk.jfets.back().mes = true; break;  // MESFET: d g s model
+                case 'U': parseURC(tok, blk); break;
                 case 'S': case 'W': parseSwitch(tok, blk); break;
                 case 'N': parseOsdiDevice(tok, blk);  break;
-                case 'A':
-                    if (inSubckt_) throw std::runtime_error(tok[0] + ": XSPICE A devices inside a .subckt are not supported yet");
-                    parseXspice(line, lineNum);
-                    break;
+                case 'A': parseXspice(line, lineNum); break;
                 case 'B': parseBehav(line, tok, blk); break;
                 case 'E': nonlinearForm(tok) ? parseBehav(line, tok, blk) : parseVCVS(tok, blk); break;
                 case 'G': nonlinearForm(tok) ? parseBehav(line, tok, blk) : parseVCCS(tok, blk); break;
@@ -685,9 +695,13 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 case 'X': {
                     // X<name> <nodes...> <subcktName>; expanded after parsing
                     requireFields(tok, 3);
-                    PendingInstance pi{toUpper(tok.back()), {}, lineNum, toUpper(tok[0])};
-                    for (size_t i = 1; i + 1 < tok.size(); ++i)
+                    PendingInstance pi{toUpper(tok.back()), {}, lineNum, toUpper(tok[0]), {}};
+                    noAnalogRef_ = true;  // an X port is analog only if the body uses it so (expandInstance)
+                    for (size_t i = 1; i + 1 < tok.size(); ++i) {
                         pi.nodes.push_back(nodeIndex(tok[i]));
+                        pi.portNames.push_back(toUpper(tok[i]));
+                    }
+                    noAnalogRef_ = false;
                     (inSubckt_ ? subcktChildren_[subcktName_] : topInstances_).push_back(pi);
                     break;
                 }
@@ -712,9 +726,6 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     try { resolveControlledSources(result_.netlist.globalBlock); }
     catch (const std::exception& e) { return fail(lines.back().first, e.what()); }
 
-    // XSPICE A devices (their analog ports are top-level nodes, counted below)
-    int aLine = 0;
-    try { resolveXspice(aLine); } catch (const std::exception& e) { return fail(aLine ? aLine : lines.back().first, e.what()); }
 
     // Finalize: compute numGlobalNodes from nodeMap (max index)
     result_.nodeIndex = nodeMap_;
@@ -868,7 +879,91 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (top) result_.netlist.numGlobalNodes = std::max(result_.netlist.numGlobalNodes, q.thermal);
         }
     };
+    auto supported = [&](const ModelCard* c, const std::vector<const char*>& used) {
+        for (const auto& [k, v] : c->params) {
+            bool ok = v == 0.0 || (k == "LEVEL" && v == 1.0) || (k == "AF" && c->get("KF", 0.0) == 0.0);
+            for (const char* u : used) ok = ok || k == u;
+            if (!ok) throw std::runtime_error("model " + c->name + ": parameter " + k + " is not supported yet");
+        }
+    };
+    // Magnitudes (>= 0) and scales (> 0): a negative value is a sign error, never a
+    // model; it used to be simulated silently (VAF = -5 put 18 V on a 3 V supply).
+    auto bounded = [&](const ModelCard* c, std::initializer_list<const char*> nonNeg,
+                       std::initializer_list<const char*> pos) {
+        for (const char* k : nonNeg)
+            if (c->params.count(k) && !(c->params.at(k) >= 0.0))
+                throw std::runtime_error("model " + c->name + ": " + k + " must be >= 0");
+        for (const char* k : pos)
+            if (c->params.count(k) && !(c->params.at(k) > 0.0))
+                throw std::runtime_error("model " + c->name + ": " + k + " must be > 0");
+    };
+    // U lines (ngspice urcsetup): two R ladders, from either end to the middle, each section's resistance and
+    // capacitance (to n3) growing by K; with ISPERL, diodes (IS, CJO, RS per section) in place of the capacitors
+    auto urcExpand = [&](TensorBlock& blk, bool top) {
+        for (const auto& u : blk.urcs) {
+            const ModelCard* c = card(u.model);
+            if (c->type != "URC") throw std::runtime_error(u.name + ": model " + c->name + " is " + c->type + ", not a URC model");
+            supported(c, {"K", "FMAX", "RPERL", "CPERL", "ISPERL", "RSPERL"});
+            bounded(c, {"CPERL", "ISPERL", "RSPERL"}, {"FMAX", "RPERL"});
+            const double p = c->get("K", 1.5);
+            if (!(p > 1.0)) throw std::runtime_error("model " + c->name + ": K must be > 1");
+            const double r0 = u.length * c->get("RPERL", 1000.0), c0 = u.length * c->get("CPERL", 1e-12), i0 = u.length * c->get("ISPERL", 0.0);
+            int lumps = u.lumps;
+            if (lumps == 0) {
+                const double wnorm = c->get("FMAX", 1e9) * r0 * c0 * 2.0 * M_PI;
+                lumps = wnorm < 35.0 ? 3 : (int)std::max(3.0, std::log(wnorm * ((p - 1) / p) * ((p - 1) / p)) / std::log(p));
+            }
+            const double r1 = r0 * (p - 1) / (2 * std::pow(p, lumps) - 2);
+            const double c1 = c0 * (p - 1) / (std::pow(p, lumps - 1) * (p + 1) - 2);
+            const double i1 = i0 * (p - 1) / (std::pow(p, lumps - 1) * (p + 1) - 2);
+            const bool diodes = c->params.count("ISPERL") > 0;
+            std::string dmodel;
+            if (diodes) {
+                dmodel = toUpper(u.name) + "#DIODEMOD";
+                ModelCard d;
+                d.name = dmodel; d.type = "D";
+                d.params = {{"CJO", c1}, {"RS", u.length * lumps * c->get("RSPERL", 0.0)}, {"IS", i1}};
+                modelCards_[dmodel] = d;
+            }
+            auto node = [&]() {
+                const int n = top ? std::max(nextNode_++, result_.netlist.numGlobalNodes + 1) : ++blk.numInternalNodes;
+                if (top) result_.netlist.numGlobalNodes = std::max(result_.netlist.numGlobalNodes, n);
+                return n;
+            };
+            auto shunt = [&](const std::string& tag, int n, double prop) {
+                if (diodes) {
+                    Diode d;
+                    d.instanceName = u.name + "#" + tag; d.anode = n; d.cathode = u.n3; d.modelName = dmodel;
+                    d.area = prop; d.areaGiven = true;
+                    blk.diodes.push_back(d);
+                } else {
+                    Capacitor cap{};
+                    cap.name = u.name + "#" + tag; cap.nodePlate1 = n; cap.nodePlate2 = u.n3; cap.capacitance_farads = prop * c1;
+                    blk.capacitors.push_back(cap);
+                }
+            };
+            auto res = [&](const std::string& tag, int a, int b, double r) {
+                Resistor x{};
+                x.name = u.name + "#" + tag; x.nodeTerminal1 = a; x.nodeTerminal2 = b; x.resistance_ohms = r;
+                blk.resistors.push_back(x);
+            };
+            int lowl = u.n1, hir = u.n2;
+            double prop = 1.0;
+            for (int i = 1; i <= lumps; ++i) {
+                const int hil = node(), lowr = i == lumps ? hil : node();
+                res("RLO" + std::to_string(i), lowl, lowr, prop * r1);
+                res("RHI" + std::to_string(i), hil, hir, prop * r1);
+                shunt("LO" + std::to_string(i), lowr, prop);
+                if (i != lumps) shunt("HI" + std::to_string(i), hil, prop);
+                prop *= p;
+                lowl = lowr; hir = hil;
+            }
+        }
+        blk.urcs.clear();
+    };
     try {
+        urcExpand(result_.netlist.globalBlock, true);
+        for (auto& [name, blk] : result_.netlist.blockDefinitions) urcExpand(blk, false);
         mosSeries(result_.netlist.globalBlock, true);
         jfetSeries(result_.netlist.globalBlock, true);
         bjtThermal(result_.netlist.globalBlock, true);
@@ -877,8 +972,14 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
 
     // Expand X cards (recursively) now that every .subckt is defined
     for (const auto& pi : topInstances_) {
-        try { expandInstance(pi, pi.nodes, 0); }
+        try { expandInstance(pi, pi.nodes, 0, "", pi.portNames, pi.line); }
         catch (const std::exception& e) { return fail(pi.line, e.what()); }
+    }
+    // XSPICE A devices, a body's per instance (in netlist order: a node folds its drivers in that order)
+    {
+        std::stable_sort(pendingA_.begin(), pendingA_.end(), [](const PendingA& a, const PendingA& b) { return a.line < b.line; });
+        int aLine = 0;
+        try { resolveXspice(aLine); } catch (const std::exception& e) { return fail(aLine ? aLine : lines.back().first, e.what()); }
     }
 
     // .ic / .nodeset may name a node defined later in the file, or a subcircuit internal (x1.n)
@@ -917,24 +1018,6 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     // A parameter the engine does not model is an error, never silently dropped.
     // 0 is accepted for any key (SPICE: off / infinite), AF only without KF.
     // ponytail: a 0 that is not "off" (e.g. TNOM=0) is still accepted.
-    auto supported = [&](const ModelCard* c, const std::vector<const char*>& used) {
-        for (const auto& [k, v] : c->params) {
-            bool ok = v == 0.0 || (k == "LEVEL" && v == 1.0) || (k == "AF" && c->get("KF", 0.0) == 0.0);
-            for (const char* u : used) ok = ok || k == u;
-            if (!ok) throw std::runtime_error("model " + c->name + ": parameter " + k + " is not supported yet");
-        }
-    };
-    // Magnitudes (>= 0) and scales (> 0): a negative value is a sign error, never a
-    // model; it used to be simulated silently (VAF = -5 put 18 V on a 3 V supply).
-    auto bounded = [&](const ModelCard* c, std::initializer_list<const char*> nonNeg,
-                       std::initializer_list<const char*> pos) {
-        for (const char* k : nonNeg)
-            if (c->params.count(k) && !(c->params.at(k) >= 0.0))
-                throw std::runtime_error("model " + c->name + ": " + k + " must be >= 0");
-        for (const char* k : pos)
-            if (c->params.count(k) && !(c->params.at(k) > 0.0))
-                throw std::runtime_error("model " + c->name + ": " + k + " must be > 0");
-    };
     // A top-level device's real parameters for .sens: what its card gives, plus instance W/L as given
     auto sensList = [&](const TensorBlock& blk, const std::string& inst, const ModelCard& c,
                         const std::map<std::string, double>* given = nullptr) {
@@ -955,6 +1038,51 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         for (const char* t : types) if (c->type == t) return sensed(c, inst);
         throw std::runtime_error(inst + ": model " + c->name + " is " + c->type + ", not a " +
                                  std::string(*types.begin()) + "/" + *(types.begin() + 1) + " model");
+    };
+    // VDMOS (ngspice vdmos*.c) through OSDI: tests/models/vdmos_ng.va, a port of ngspice 47's model, as vdmos.osdi
+    // from TREESPICE_OSDI_PATH. M d g s model, or M d g s tj tc model THERMAL (self-heating, tj and tc in deg C).
+    auto vdmosOsdi = [&](const Mosfet& m, const ModelCard& c) {
+        static const std::map<std::string, std::string> alias = {{"VTH0", "VTO"}, {"VTOTC", "TCVTH"}, {"BEX", "MU"}, {"M", "MJ"}};
+        static const std::set<std::string> soa = {"VGS_MAX", "VGD_MAX", "VDS_MAX", "VGSR_MAX", "VGDR_MAX", "PD_MAX",
+                                                  "ID_MAX", "IDR_MAX", "TE_MAX", "RTH_EXT", "DERATING"};  // warnings only
+        static const std::set<std::string> known = {"VTO", "KP", "PHI", "LAMBDA", "THETA", "RD", "RS", "RG", "TNOM",
+            "KF", "AF", "RQ", "VQ", "MTRIODE", "TCVTH", "MU", "TEXP0", "TEXP1", "TRD1", "TRD2", "TRG1", "TRG2", "TRS1",
+            "TRS2", "TRB1", "TRB2", "SUBSHIFT", "KSUBTHRES", "TKSUBTHRES1", "TKSUBTHRES2", "BV", "IBV", "NBV", "RDS", "RB",
+            "N", "TT", "EG", "XTI", "IS", "VJ", "VP", "CJO", "MJ", "FC", "CGDMIN", "CGDMAX", "A", "CGS", "RTHJC", "RTHCA", "CTHJ"};
+        if (!m.given.empty() || !m.osdiParams.empty())
+            throw std::runtime_error(m.instanceName + ": a VDMOS takes M, TEMP, DTEMP and THERMAL only");
+        if (m.thermal != (!m.threeTerm && m.soiNodes.size() == 1))
+            throw std::runtime_error(m.instanceName + ": a VDMOS has 3 nodes (d g s), or 5 (d g s tj tc) with THERMAL");
+        if (m.thermal && !c.params.count("RTHJC"))
+            throw std::runtime_error(m.instanceName + ": THERMAL needs RTHJC on model " + c.name);
+        std::map<std::string, double> p;
+        for (const auto& [k, v] : c.params) {
+            if (soa.count(k)) continue;
+            const auto a = alias.find(k);
+            const std::string key = a == alias.end() ? k : a->second;
+            if (!known.count(key)) throw std::runtime_error("model " + c.name + ": parameter " + k + " is not supported yet");
+            p[key] = v;
+        }
+        bounded(&c, {"RD", "RS", "RG", "RB", "RQ", "TT", "CJO", "CGDMIN", "CGDMAX", "CGS", "CTHJ", "IS", "IBV", "KF"},
+                {"PHI", "N", "NBV", "KSUBTHRES", "RTHJC", "RTHCA"});
+        if (!(c.get("M", 0.5) < 1.0 && c.get("VJ", 0.8) > 0.0))
+            throw std::runtime_error("model " + c.name + ": needs M < 1, VJ > 0");
+        p["TYPE"] = c.type == "VDMOSP" ? -1.0 : 1.0;
+        if (!p.count("TNOM")) p["TNOM"] = tnomC_;
+        if (!osdi::findModule("vdmos_ng")) osdi::loadLibrary("vdmos.osdi");
+        auto& model = osdiModels_[toUpper(c.name) + " VDMOS"];
+        if (!model) model = std::make_shared<osdi::Model>(osdi::findModule("vdmos_ng"), c.name, p);
+        OsdiDevice o;
+        o.instanceName = m.instanceName;
+        o.modelName = c.name;
+        o.nodes = {m.drain, m.gate, m.source, m.thermal ? m.body : 0, m.thermal ? m.soiNodes[0] : 0};
+        if (m.thermal) o.params.push_back({"thermal", 1.0});
+        if (m.extra.mult != 1.0) { o.params.push_back({"m", m.extra.mult}); o.params.push_back({"mult_i", m.extra.mult}); }
+        // ngspice: DTEMP wins over TEMP when both are given; under self-heating TEMP sets the ambient
+        if (m.inst.dtemp != 0.0) o.params.push_back({"dtemp_i", m.inst.dtemp});
+        else if (!std::isnan(m.inst.temp)) o.params.push_back({"temp_i", m.inst.temp + 273.15});
+        o.model = model;
+        return o;
     };
     auto resolveBlock = [&](TensorBlock& blk) {
         // BSIM4 (LEVEL=54 or 14) and BSIM3 (LEVEL=49 or 8) cards, ngspice's native models, run on the OSDI
@@ -1110,22 +1238,37 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         }
         std::vector<Mosfet> level1;
         for (auto& m : blk.mosfets) {
+            const bool icGiven = !std::isnan(m.ic[0]) || !std::isnan(m.ic[1]) || !std::isnan(m.ic[2]);
+            auto native = [&](const char* what) {
+                if (m.off || icGiven) throw std::runtime_error(m.instanceName + ": OFF and IC on a " + what + " device are not supported yet");
+            };
+            if (const ModelCard* v = mosCard(m); v->type == "VDMOSN" || v->type == "VDMOSP") {
+                native("VDMOS");
+                sensList(blk, m.instanceName, *v);
+                blk.osdiDevices.push_back(vdmosOsdi(m, *sensed(v, m.instanceName)));
+                continue;
+            }
+            if (m.threeTerm || m.thermal)
+                throw std::runtime_error(m.instanceName + ": expected 4 nodes (d g s b); 3 nodes and THERMAL are for a VDMOS model");
             if (sens_ && !sens_->model && toUpper(m.instanceName) == sens_->instance)
                 (sens_->param == "W" ? m.w : m.l) = m.given[sens_->param] = sens_->value;
             const ModelCard* c = kind(mosCard(m), m.instanceName, {"NMOS", "PMOS"});
             sensList(blk, m.instanceName, *c, &m.given);
             if (const double level = c->get("LEVEL", 1.0); level == 54.0 || level == 14.0 || level == 49.0 || level == 8.0 ||
                                                            level == 10.0 || level == 58.0) {
+                native(("LEVEL " + std::to_string((int)level)).c_str());
                 blk.osdiDevices.push_back(bsimOsdi(m, *c, level == 49.0 || level == 8.0 ? 3 : level == 10.0 || level == 58.0 ? 10 : 4));
                 continue;
             }
-            const int level = (int)c->get("LEVEL", 1.0);
+            // LEVEL 9 is ngspice's mos9: mos3 with its effective L and W required above 1 um (mos9temp)
+            // ponytail: mos9load also drops mos3load's argb == 0 guard on dldvd / dldem (a degenerate bias); level 3's applies
+            const int levelIn = (int)c->get("LEVEL", 1.0), level = levelIn == 9 ? 3 : levelIn;
             if (level >= 55 && level <= 57)
                 throw std::runtime_error("model " + c->name + ": LEVEL " + std::to_string(level) + " (B3SOI) is not supported yet; B4SOI is LEVEL 10/58");
             if (!m.soiNodes.empty()) throw std::runtime_error(m.instanceName + ": expected 4 nodes (d g s b) for a LEVEL " + std::to_string(level) + " model");
             if (!m.osdiParams.empty()) throw std::runtime_error(m.instanceName + ": parameter " + m.osdiParams.begin()->first + " is not supported yet");
             const bool hi = level == 2 || level == 3;  // native levels 2 and 3 (mos2*.c, mos3*.c)
-            if (level != 1 && !hi) throw std::runtime_error("model " + c->name + ": LEVEL " + std::to_string(level) + " is not supported yet");
+            if (level != 1 && level != 6 && !hi) throw std::runtime_error("model " + c->name + ": LEVEL " + std::to_string(level) + " is not supported yet");
             if (m.extra.nf != 1) throw std::runtime_error(m.instanceName + ": NF is not supported yet (level " + std::to_string(level) + ")");
             // RD, RS and RSH became series resistors in mosSeries(); JSSW is no MOS1 parameter in ngspice
             // (it warns and ignores it), so it stays an error rather than a silently dropped one.
@@ -1136,7 +1279,11 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 for (const char* x : level == 2 ? std::vector<const char*>{"LAMBDA", "UCRIT", "UEXP", "NEFF"}
                                                 : std::vector<const char*>{"ETA", "THETA", "KAPPA", "XL", "WD", "XW"}) used.push_back(x);
                 supported(c, used);
-            } else
+            } else if (level == 6)  // mos6*.c; ngspice reads NVTH and PS but no equation uses them (mos6load)
+                supported(c, {"LEVEL", "VTO", "VT0", "KV", "NV", "KC", "NC", "NVTH", "PS", "GAMMA", "GAMMA1", "SIGMA", "PHI",
+                              "LAMBDA", "LAMBDA0", "LAMBDA1", "RD", "RS", "CBD", "CBS", "IS", "PB", "CGSO", "CGDO", "CGBO",
+                              "RSH", "CJ", "MJ", "CJSW", "MJSW", "JS", "LD", "TOX", "U0", "UO", "FC", "TPG", "NSUB", "NSS", "TNOM"});
+            else
             supported(c, {"KP", "VTO", "LAMBDA", "GAMMA", "PHI", "IS", "LD", "TOX", "UO", "U0",
                           "CGSO", "CGDO", "CGBO", "CBD", "CBS", "CJ", "MJ", "CJSW", "MJSW", "PB", "FC",
                           "RD", "RS", "RSH", "JS", "NSUB", "KF", "AF", "TNOM"});
@@ -1148,12 +1295,17 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             auto& k = m.card;
             k.resolved = true;
             k.pmos = c->type == "PMOS";
-            k.level = hi ? level : 1;
+            k.level = hi || level == 6 ? level : 1;
             k.tox = c->get("TOX", hi ? 1e-7 : 0.0);  // mos2set / mos3set: 100 nm unless given
             // No KP with TOX: KP = UO[cm^2/Vs] * COX (ngspice mos1temp)
             k.kp = c->get("KP", k.tox > 0.0 ? c->get("UO", c->get("U0", 600.0)) * 1e-4 * 3.9 * 8.854214871e-12 / k.tox
                                             : 2e-5);
-            k.vto = c->get("VTO", 0.0); k.lambda = c->get("LAMBDA", 0.0); k.gamma = c->get("GAMMA", 0.0);
+            if (level == 6) {  // mos6set / mos6temp: KC (in kp) from U0 and TOX unless given, LAMBDA0 over LAMBDA
+                k.kp = c->get("KC", k.tox > 0.0 ? 0.5 * c->get("UO", c->get("U0", 600.0)) * 1e-4 * 3.9 * 8.854214871e-12 / k.tox : 5e-5);
+                k.kv = c->get("KV", 2.0); k.nv = c->get("NV", 0.5); k.nc = c->get("NC", 1.0);
+                k.gamma1 = c->get("GAMMA1", 0.0); k.sigma = c->get("SIGMA", 0.0); k.lambda1 = c->get("LAMBDA1", 0.0);
+            }
+            k.vto = first(c, {"VTO", "VT0"}, 0.0); k.lambda = first(c, {"LAMBDA0", "LAMBDA"}, 0.0); k.gamma = c->get("GAMMA", 0.0);
             k.phi = c->get("PHI", 0.6); k.is = c->get("IS", 1e-14); k.ld = c->get("LD", 0.0);
             k.js = c->get("JS", 0.0); k.kf = c->get("KF", 0.0); k.af = c->get("AF", 1.0);
             if (k.kf != 0.0 && !(k.tox > 0.0)) throw std::runtime_error("model " + c->name + ": KF needs TOX (flicker noise divides by the oxide capacitance)");
@@ -1176,7 +1328,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 if (!c->params.count("PHI")) k.phi = std::max(0.1, 2.0 * vt * std::log(nsub / ni));
                 if (!c->params.count("GAMMA"))
                     k.gamma = std::sqrt(2.0 * 11.7 * 8.854214871e-12 * PhysicsConstants::Q_ELECTRON * nsub) / cox;
-                if (!c->params.count("VTO")) {
+                if (!c->params.count("VTO") && !c->params.count("VT0")) {
                     const double tpg = c->get("TPG", 1.0), fermis = type * 0.5 * k.phi, fermig = type * tpg * 0.5 * eg;
                     const double wkfngs = (tpg != 0.0 ? 3.25 + 0.5 * eg - fermig : 3.2) - (3.25 + 0.5 * eg + fermis);
                     k.vto = wkfngs - c->get("NSS", 0.0) * 1e4 * PhysicsConstants::Q_ELECTRON / cox + type * (k.gamma * std::sqrt(k.phi) + k.phi);
@@ -1187,8 +1339,10 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             k.cbd = c->get("CBD", 0.0); k.cbs = c->get("CBS", 0.0); k.cj = c->get("CJ", 0.0);
             k.cjsw = c->get("CJSW", 0.0); k.mj = c->get("MJ", 0.5); k.mjsw = c->get("MJSW", hi ? 0.33 : 0.5);  // mos2set / mos3set grade the sidewall 0.33, mos1set 0.5
             k.pb = c->get("PB", 0.8); k.fc = c->get("FC", 0.5);
-            if (!(m.l - 2.0 * k.ld + k.xl > 0.0 && m.w - 2.0 * k.wd + k.xw > 0.0))
-                throw std::runtime_error(m.instanceName + ": effective L (L - 2*LD + XL) and W (W - 2*WD + XW) must be > 0");
+            const double lmin = levelIn == 9 ? 1e-6 : 0.0;
+            if (!(m.l - 2.0 * k.ld + k.xl > lmin && m.w - 2.0 * k.wd + k.xw > lmin))
+                throw std::runtime_error(m.instanceName + ": effective L (L - 2*LD + XL) and W (W - 2*WD + XW) must be > " +
+                                         (levelIn == 9 ? std::string("1 um (LEVEL 9)") : std::string("0")));
             if (!(k.mj < 1.0 && k.mjsw < 1.0 && k.pb > 0.0 && k.fc < 1.0))
                 throw std::runtime_error("model " + c->name + ": needs MJ, MJSW < 1, PB > 0, FC < 1");
             // mos1temp: KP/T^1.5, PHI, VTO (via the flat-band voltage), IS and the junctions at the instance temperature
@@ -1219,53 +1373,71 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         // junction potentials and capacitances, betas with XTB, the TC-style coefficients; a card at TNOM stays as given.
         for (auto& d : blk.diodes) if (const ModelCard* c = kind(card(d.modelName), d.instanceName, {"D", "D"})) {
             sensList(blk, d.instanceName, *c);
-            supported(c, {"IS", "N", "RS", "CJO", "CJ0", "CJ", "VJ", "PB", "M", "MJ", "FC", "TT", "BV", "IBV",
-                          "EG", "XTI", "TNOM", "TM1", "TM2", "TCV", "TTT1", "TTT2", "TRS", "TRS1", "TRS2",
-                          "JSW", "NS", "CJSW", "MJSW", "PHP", "IKF", "IK", "IKR", "KF", "AF", "ISR", "NR", "NBV",
-                          "CTA", "CTP", "TPB", "TPHP", "TLEVC", "TLEV", "CJP"});
+            supported(c, {"IS", "JS", "N", "RS", "CJO", "CJ0", "CJ", "VJ", "PB", "M", "MJ", "FC", "TT", "BV", "VB", "VRB", "VAR",
+                          "IBV", "IB", "EG", "XTI", "TNOM", "TM1", "TM2", "TCV", "TBV1", "TTT1", "TTT2", "TRS", "TRS1", "TRS2",
+                          "JSW", "ISW", "NS", "CJSW", "MJSW", "PHP", "VJSW", "IKF", "IK", "IKR", "IKP", "KF", "AF", "ISR", "NR",
+                          "NBV", "NZ", "CTA", "CTC", "CTP", "TPB", "TVJ", "TPHP", "TLEVC", "TLEV", "CJP", "FCS", "GAP1", "GAP2",
+                          "JTUN", "JTUNSW", "NTUN", "XTITUN", "KEG", "AREA", "PJ"});
             // Temperature selectors (probed on ngspice 47): TLEV 1 scales BV by (1 - TCV dT) where 0 subtracts TCV dT
-            // (IS follows the same law under both); TLEVC 1 takes CJO (1 + CTA dT), VJ - TPB dT and the sidewall's
-            // CTP / TPHP in place of the junction law, and CTA..TPHP do nothing under TLEVC 0
+            // (IS follows the same law under both); TLEV 2 also takes the band gap EG - GAP1 T^2 / (T + GAP2) for the
+            // saturation currents (exp(EG(Tn)/(N Vt(Tn)) - EG(T)/(N Vt) + XTI/N ln(T/Tn))) and the junction potentials;
+            // TLEVC 1 takes CJO (1 + CTA dT), VJ - TPB dT and the sidewall's CTP / TPHP in place of the junction law,
+            // and CTA..TPHP do nothing under TLEVC 0
             const double tlev = c->get("TLEV", 0.0), tlevc = c->get("TLEVC", 0.0);
-            if ((tlev != 0.0 && tlev != 1.0) || (tlevc != 0.0 && tlevc != 1.0))
-                throw std::runtime_error("model " + c->name + ": TLEV / TLEVC other than 0 or 1 is not supported yet");
-            bounded(c, {"IS", "RS", "CJO", "CJ0", "CJ", "M", "MJ", "TT", "JSW", "CJSW", "MJSW", "IKF", "IK", "IKR", "KF", "ISR"},
-                    {"N", "BV", "NS", "PHP", "NR", "NBV"});  // ngspice: BV = 0 breaks down at 0 V
-            d.saturationCurrent_I_S_A = c->get("IS", 1e-14);
+            if ((tlev != 0.0 && tlev != 1.0 && tlev != 2.0) || (tlevc != 0.0 && tlevc != 1.0))
+                throw std::runtime_error("model " + c->name + ": TLEV other than 0-2 / TLEVC other than 0-1 is not supported yet");
+            bounded(c, {"IS", "JS", "RS", "CJO", "CJ0", "CJ", "M", "MJ", "TT", "JSW", "ISW", "CJSW", "MJSW", "IKF", "IK", "IKR",
+                        "IKP", "KF", "ISR", "JTUN", "JTUNSW", "AREA", "PJ"},
+                    {"N", "BV", "VB", "VRB", "VAR", "NS", "PHP", "VJSW", "NR", "NBV", "NZ", "NTUN"});  // ngspice: BV = 0 breaks down at 0 V
+            if (!d.areaGiven) d.area *= c->get("AREA", 1.0);  // diosetup: the model's AREA / PJ unless the instance gives one
+            if (!d.pjGiven) d.pj = c->get("PJ", 0.0);
+            d.saturationCurrent_I_S_A = first(c, {"IS", "JS"}, 1e-14);
             d.emissionCoefficient_N   = c->get("N", 1.0);
             auto& k = d.card;
             k.rs = c->get("RS", 0.0); k.cjo = first(c, {"CJO", "CJ0", "CJ"}, 0.0);
             k.vj = first(c, {"VJ", "PB"}, 1.0); k.m = first(c, {"M", "MJ"}, 0.5);
             k.fc = c->get("FC", 0.5); k.tt = c->get("TT", 0.0);
-            k.jsw = c->get("JSW", 0.0); k.ns = c->get("NS", 1.0); k.cjsw = first(c, {"CJSW", "CJP"}, 0.0);
-            k.mjsw = c->get("MJSW", 0.33); k.php = c->get("PHP", 1.0);
-            k.ikf = first(c, {"IKF", "IK"}, 0.0); k.ikr = c->get("IKR", 0.0);
+            k.jsw = first(c, {"JSW", "ISW"}, 0.0); k.cjsw = first(c, {"CJSW", "CJP"}, 0.0);
+            k.nsGiven = c->params.count("NS") > 0; k.ns = c->get("NS", 1.0);  // NS's default 1 sets the sidewall's IS law
+            k.mjsw = c->get("MJSW", 0.33); k.php = first(c, {"PHP", "VJSW"}, 1.0); k.fcs = c->get("FCS", 0.5);
+            k.ikf = first(c, {"IKF", "IK"}, 0.0); k.ikr = c->get("IKR", 0.0); k.ikp = c->get("IKP", 0.0);
             k.kf = c->get("KF", 0.0); k.af = c->get("AF", 1.0);
-            k.bvGiven = c->params.count("BV") > 0;  // BV > 0 (checked above)
-            k.bv = c->get("BV", 0.0); k.ibv = c->get("IBV", 1e-3);
-            k.isr = c->get("ISR", 0.0); k.nr = c->get("NR", 2.0); k.nbv = c->get("NBV", NAN);
-            if (!(k.m < 1.0 && k.mjsw < 1.0 && k.vj > 0.0 && k.fc < 1.0 && k.rs >= 0.0 && k.ibv > 0.0))
-                throw std::runtime_error("model " + c->name + ": needs M, MJSW < 1, VJ > 0, FC < 1, RS >= 0, IBV > 0");
+            k.bvGiven = c->params.count("BV") || c->params.count("VB") || c->params.count("VRB") || c->params.count("VAR");
+            k.bv = first(c, {"BV", "VB", "VRB", "VAR"}, 0.0); k.ibv = first(c, {"IBV", "IB"}, 1e-3);
+            k.isr = c->get("ISR", 0.0); k.nr = c->get("NR", 2.0); k.nbv = first(c, {"NBV", "NZ"}, NAN);
+            k.jtun = c->get("JTUN", 0.0); k.jtunsw = c->get("JTUNSW", 0.0); k.ntun = c->get("NTUN", 30.0);
+            if (!(k.m < 1.0 && k.mjsw < 1.0 && k.vj > 0.0 && k.fc < 1.0 && k.fcs < 1.0 && k.rs >= 0.0 && k.ibv > 0.0))
+                throw std::runtime_error("model " + c->name + ": needs M, MJSW < 1, VJ > 0, FC, FCS < 1, RS >= 0, IBV > 0");
             using namespace devtemp;
             const double Tn = c->get("TNOM", tnomC_) + 273.15, T = instK(d.inst), dt = T - Tn;
             d.thermalVoltage_V_T_V = vt(T);
             k.m = std::min(k.m * poly(c->get("TM1", 0.0), c->get("TM2", 0.0), dt), 0.9);
             if (T != Tn) {
-                d.saturationCurrent_I_S_A *= isFactor(T, Tn, std::max(c->get("EG", 1.11), 0.1), c->get("XTI", 3.0), d.emissionCoefficient_N);
+                const double eg = std::max(c->get("EG", 1.11), 0.1), xti = c->get("XTI", 3.0);
+                const Gap gap = tlev == 2.0 ? Gap{eg, c->get("GAP1", 7.02e-4), c->get("GAP2", 1108.0)} : Gap{};
+                // saturation-current law for emission coefficient n, band gap scale keg and exponent x
+                auto law = [&](double n, double keg, double x) {
+                    if (tlev != 2.0) return isFactor(T, Tn, keg * eg, x, n);
+                    return std::exp(keg * egfet(Tn, gap) / (n * vt(Tn)) - keg * egfet(T, gap) / (n * vt(T)) + x / n * std::log(T / Tn));
+                };
+                d.saturationCurrent_I_S_A *= law(d.emissionCoefficient_N, 1.0, xti);
                 if (tlevc == 1.0) {
-                    k.cjo *= 1.0 + c->get("CTA", 0.0) * dt; k.vj -= c->get("TPB", 0.0) * dt;
+                    k.cjo *= 1.0 + first(c, {"CTA", "CTC"}, 0.0) * dt; k.vj -= first(c, {"TPB", "TVJ"}, 0.0) * dt;
                     k.cjsw *= 1.0 + c->get("CTP", 0.0) * dt; k.php -= c->get("TPHP", 0.0) * dt;
                 } else {
-                    k.cjo *= junctionAt(k.vj, k.m, Tn, T);
-                    k.cjsw *= junctionAt(k.php, k.mjsw, Tn, T);
+                    k.cjo *= junctionAt(k.vj, k.m, Tn, T, gap);
+                    k.cjsw *= junctionAt(k.php, k.mjsw, Tn, T, gap);
                 }
-                k.jsw *= isFactor(T, Tn, std::max(c->get("EG", 1.11), 0.1), c->get("XTI", 3.0), d.emissionCoefficient_N);
-                k.isr *= isFactor(T, Tn, std::max(c->get("EG", 1.11), 0.1), c->get("XTI", 3.0), k.nr);  // probed: the NR law
+                k.jsw *= law(k.ns, 1.0, xti);
+                k.isr *= law(k.nr, 1.0, xti);  // probed: the NR law
+                const double ft = law(k.ntun, c->get("KEG", 1.0), c->get("XTITUN", 3.0));
+                k.jtun *= ft; k.jtunsw *= ft;
             }
             if (k.fc * k.vj > 1.0) k.vj = 1.0 / k.fc;  // diotemp: the depletion knee stays below 1 V
             k.tt *= poly(c->get("TTT1", 0.0), c->get("TTT2", 0.0), dt);
             k.rs *= poly(first(c, {"TRS1", "TRS"}, 0.0), c->get("TRS2", 0.0), dt);
-            if (k.bvGiven) k.bv = tlev == 1.0 ? k.bv * (1.0 - c->get("TCV", 0.0) * dt) : k.bv - c->get("TCV", 0.0) * dt;
+            const double tcv = first(c, {"TCV", "TBV1"}, 0.0);
+            if (k.bvGiven) k.bv = tlev != 0.0 ? k.bv * (1.0 - tcv * dt) : k.bv - tcv * dt;
         }
         // HICUM/L2 (LEVEL 8): OpenVAF's hicuml2.va 2.4.0, ngspice's native version (they agree to 4e-5 in ngspice),
         // through OSDI (hicum2.osdi from TREESPICE_OSDI_PATH); its parameter names are ngspice's.
@@ -1332,25 +1504,40 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             supported(c, {"IS", "BF", "BR", "NF", "NR", "VAF", "VA", "VAR", "VB", "IKF", "IK", "IKR",
                           "ISE", "NE", "ISC", "NC", "RB", "RC", "RE", "CJE", "VJE", "PE", "MJE", "ME",
                           "CJC", "VJC", "PC", "MJC", "MC", "XCJC", "CJS", "CCS", "VJS", "PS", "MJS", "MS",
-                          "FC", "TF", "XTF", "VTF", "ITF", "TR", "EG", "XTI", "XTB", "TNOM", "RBM", "IRB", "NK", "KF", "AF", "ISS", "NS", "SUBS"});
-            bounded(c, {"IS", "VAF", "VA", "VAR", "VB", "IKF", "IK", "IKR", "ISE", "ISC", "CJE", "CJC", "CJS", "CCS",
-                        "MJE", "ME", "MJC", "MC", "MJS", "MS", "TF", "XTF", "VTF", "ITF", "TR", "ISS", "RBM", "IRB", "NK", "KF"},
+                          "FC", "TF", "XTF", "VTF", "ITF", "TR", "EG", "XTI", "XTB", "TNOM", "TREF", "RBM", "IRB", "NK", "NKF", "KF", "AF",
+                          "ISS", "NS", "SUBS", "PTF", "C2", "C4", "CSUB", "TLEV", "TLEVC", "CTE", "CTC", "CTS", "TVJE", "TVJC", "TVJS",
+                          "TRB", "TRC", "TRE",
+                          "TVAF1", "TVAF2", "TVAR1", "TVAR2", "TIKF1", "TIKF2", "TIKR1", "TIKR2", "TRB1", "TRB2", "TRC1", "TRC2",
+                          "TRE1", "TRE2", "TRM1", "TRM2", "TIRB1", "TIRB2", "TNF1", "TNF2", "TNR1", "TNR2", "TNE1", "TNE2",
+                          "TNC1", "TNC2", "TNS1", "TNS2", "TITF1", "TITF2", "TTF1", "TTF2", "TTR1", "TTR2", "TMJE1", "TMJE2",
+                          "TMJC1", "TMJC2", "TMJS1", "TMJS2", "TBF1", "TBF2", "TBR1", "TBR2", "TIS1", "TIS2", "TISE1", "TISE2",
+                          "TISC1", "TISC2", "TISS1", "TISS2",
+                          "VBE_MAX", "VBC_MAX", "VCE_MAX", "IC_MAX", "IB_MAX", "PD_MAX", "TE_MAX"});  // SOA: ngspice's warnings only
+            bounded(c, {"IS", "VAF", "VA", "VAR", "VB", "IKF", "IK", "IKR", "ISE", "C2", "ISC", "C4", "CJE", "CJC", "CJS", "CCS", "CSUB",
+                        "MJE", "ME", "MJC", "MC", "MJS", "MS", "TF", "XTF", "VTF", "ITF", "TR", "ISS", "RBM", "IRB", "NK", "NKF", "KF"},
                     {"NE", "NC", "NS"});
+            // Temperature selectors (ngspice bjttemp): TLEV 0 betas (T/Tn)^XTB, 1: 1 + XTB dT; TLEV 3 takes the saturation
+            // currents to the power 1 + TIS1 dT + TIS2 dT^2 (TISE, TISC, TISS likewise). TLEVC 1: CJx (1 + CTx dT), VJx - TVJx dT.
+            // ngspice 47's TLEV 2 leaves IS unset (bjttemp has no branch for it), so it stays an error.
+            const double tlev = c->get("TLEV", 0.0), tlevc = c->get("TLEVC", 0.0);
+            if ((tlev != 0.0 && tlev != 1.0 && tlev != 3.0) || (tlevc != 0.0 && tlevc != 1.0))
+                throw std::runtime_error("model " + c->name + ": BJT TLEV other than 0, 1, 3 / TLEVC other than 0, 1 is not supported");
             q.isNPN = (c->type != "PNP");
             q.saturationCurrent_I_S_A = c->get("IS", 1e-16);
+            // the IS / ISE / ISC / ISS this card gives, before the temperature laws (TLEV 3 raises them to a power)
             q.betaF = c->get("BF", 100.0);
             q.betaR = c->get("BR", 1.0);
             auto& k = q.card;
             k.nf = c->get("NF", 1.0); k.nr = c->get("NR", 1.0);
             k.vaf = first(c, {"VAF", "VA"}, 0.0); k.var = first(c, {"VAR", "VB"}, 0.0);
             k.ikf = first(c, {"IKF", "IK"}, 0.0); k.ikr = c->get("IKR", 0.0);
-            k.ise = c->get("ISE", 0.0); k.ne = c->get("NE", 1.5);
-            k.isc = c->get("ISC", 0.0); k.nc = c->get("NC", 2.0);
+            k.ise = first(c, {"ISE", "C2"}, 0.0); k.ne = c->get("NE", 1.5);
+            k.isc = first(c, {"ISC", "C4"}, 0.0); k.nc = c->get("NC", 2.0);
             k.rb = c->get("RB", 0.0); k.rc = c->get("RC", 0.0); k.re = c->get("RE", 0.0);
             k.cje = c->get("CJE", 0.0); k.vje = first(c, {"VJE", "PE"}, 0.75); k.mje = first(c, {"MJE", "ME"}, 0.33);
             k.cjc = c->get("CJC", 0.0); k.vjc = first(c, {"VJC", "PC"}, 0.75); k.mjc = first(c, {"MJC", "MC"}, 0.33);
             k.xcjc = c->get("XCJC", 1.0);
-            k.cjs = first(c, {"CJS", "CCS"}, 0.0); k.vjs = first(c, {"VJS", "PS"}, 0.75); k.mjs = first(c, {"MJS", "MS"}, 0.0);
+            k.cjs = first(c, {"CJS", "CCS", "CSUB"}, 0.0); k.vjs = first(c, {"VJS", "PS"}, 0.75); k.mjs = first(c, {"MJS", "MS"}, 0.0);
             k.fc = c->get("FC", 0.5);
             k.iss = c->get("ISS", 0.0); k.ns = c->get("NS", 1.0);
             // SUBS (ngspice): 1 vertical (substrate junction to C), -1 lateral (to B); default by polarity
@@ -1358,21 +1545,53 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (subs != 1.0 && subs != -1.0) throw std::runtime_error("model " + c->name + ": SUBS must be 1 or -1");
             k.lateral = subs == -1.0;
             k.tf = c->get("TF", 0.0); k.xtf = c->get("XTF", 0.0); k.vtf = c->get("VTF", 0.0);
-            k.itf = c->get("ITF", 0.0); k.tr = c->get("TR", 0.0);
-            k.rbm = c->get("RBM", k.rb); k.irb = c->get("IRB", 0.0); k.nk = c->get("NK", 0.5);
+            k.itf = c->get("ITF", 0.0); k.tr = c->get("TR", 0.0); k.ptf = c->get("PTF", 0.0);
+            k.rbm = c->get("RBM", k.rb); k.irb = c->get("IRB", 0.0); k.nk = std::min(first(c, {"NKF", "NK"}, 0.5), 1.0);
             k.kf = c->get("KF", 0.0); k.af = c->get("AF", 1.0);
-            const double Tn = c->get("TNOM", tnomC_) + 273.15, T = instK(q.inst);
+            k.td = k.ptf * M_PI / 180.0 * k.tf;
+            const double Tn = first(c, {"TNOM", "TREF"}, tnomC_) + 273.15, T = instK(q.inst), dt = T - Tn;
             q.thermalVoltage_V_T_V = devtemp::vt(T);
-            if (T != Tn) {
+            {
                 using namespace devtemp;
+                auto tc = [&](const char* a, const char* b) { return poly(c->get(a, 0.0), c->get(b, 0.0), dt); };
+                // bjttemp: VAF, VAR, IKF, IKR, RB, RC, RE (TRB / TRC / TRE: the linear terms), RBM, IRB, the emission
+                // coefficients, ITF, TF, TR and the gradings (held below 0.999) by 1 + T*1 dT + T*2 dT^2
+                k.vaf *= tc("TVAF1", "TVAF2"); k.var *= tc("TVAR1", "TVAR2");
+                k.ikf *= tc("TIKF1", "TIKF2"); k.ikr *= tc("TIKR1", "TIKR2");
+                k.rb *= poly(first(c, {"TRB1", "TRB"}, 0.0), c->get("TRB2", 0.0), dt);
+                k.rc *= poly(first(c, {"TRC1", "TRC"}, 0.0), c->get("TRC2", 0.0), dt);
+                k.re *= poly(first(c, {"TRE1", "TRE"}, 0.0), c->get("TRE2", 0.0), dt);
+                k.rbm *= tc("TRM1", "TRM2"); k.irb *= tc("TIRB1", "TIRB2");
+                const double ne0 = k.ne, nc0 = k.nc;  // the leakage laws take the card's NE, NC
+                k.nf *= tc("TNF1", "TNF2"); k.nr *= tc("TNR1", "TNR2"); k.ne *= tc("TNE1", "TNE2"); k.nc *= tc("TNC1", "TNC2");
+                k.ns *= tc("TNS1", "TNS2");
+                k.itf *= tc("TITF1", "TITF2"); k.tf *= tc("TTF1", "TTF2"); k.tr *= tc("TTR1", "TTR2");
+                k.mje = std::min(k.mje * tc("TMJE1", "TMJE2"), 0.999);
+                k.mjc = std::min(k.mjc * tc("TMJC1", "TMJC2"), 0.999);
+                k.mjs = std::min(k.mjs * tc("TMJS1", "TMJS2"), 0.999);
                 const double ratlog = std::log(T / Tn), factlog = (T / Tn - 1) * c->get("EG", 1.11) / vt(T) + c->get("XTI", 3.0) * ratlog;
-                const double fac = std::exp(factlog), bf = std::exp(ratlog * c->get("XTB", 0.0));
-                q.saturationCurrent_I_S_A *= fac; k.iss *= fac;
-                q.betaF *= bf; q.betaR *= bf;
-                k.ise *= std::exp(factlog / k.ne) / bf; k.isc *= std::exp(factlog / k.nc) / bf;
-                k.cje *= junctionAt(k.vje, k.mje, Tn, T);
-                k.cjc *= junctionAt(k.vjc, k.mjc, Tn, T);
-                k.cjs *= junctionAt(k.vjs, k.mjs, Tn, T);
+                const double xtb = c->get("XTB", 0.0), bfac = tlev == 0.0 ? std::exp(ratlog * xtb) : tlev == 1.0 ? 1.0 + xtb * dt : 1.0;
+                if (tlev == 3.0) {
+                    q.saturationCurrent_I_S_A = std::pow(q.saturationCurrent_I_S_A, tc("TIS1", "TIS2"));
+                    k.iss = std::pow(k.iss, tc("TISS1", "TISS2"));
+                    k.ise = std::pow(k.ise, tc("TISE1", "TISE2")); k.isc = std::pow(k.isc, tc("TISC1", "TISC2"));
+                } else {
+                    const double fac = std::exp(factlog);
+                    q.saturationCurrent_I_S_A *= fac; k.iss *= fac;
+                    k.ise *= std::exp(factlog / ne0) / bfac; k.isc *= std::exp(factlog / nc0) / bfac;
+                }
+                const bool tbf = c->params.count("TBF1") || c->params.count("TBF2"), tbr = c->params.count("TBR1") || c->params.count("TBR2");
+                q.betaF *= tbf ? tc("TBF1", "TBF2") : bfac;
+                q.betaR *= tbr ? tc("TBR1", "TBR2") : bfac;
+                if (tlevc == 1.0) {
+                    k.cje *= 1.0 + c->get("CTE", 0.0) * dt; k.vje -= c->get("TVJE", 0.0) * dt;
+                    k.cjc *= 1.0 + c->get("CTC", 0.0) * dt; k.vjc -= c->get("TVJC", 0.0) * dt;
+                    k.cjs *= 1.0 + c->get("CTS", 0.0) * dt; k.vjs -= c->get("TVJS", 0.0) * dt;
+                } else {
+                    k.cje *= junctionAt(k.vje, k.mje, Tn, T);
+                    k.cjc *= junctionAt(k.vjc, k.mjc, Tn, T);
+                    k.cjs *= junctionAt(k.vjs, k.mjs, Tn, T);
+                }
             }
             if (!(k.mje < 1.0 && k.mjc < 1.0 && k.mjs < 1.0 && k.vje > 0.0 && k.vjc > 0.0 && k.vjs > 0.0 &&
                   k.fc < 1.0 && k.xcjc >= 0.0 && k.xcjc <= 1.0 && k.nf > 0.0 && k.nr > 0.0 &&
@@ -1393,6 +1612,26 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         }
         for (auto& j : blk.jfets) if (const ModelCard* c = sensed(card(j.modelName), j.instanceName)) {
             sensList(blk, j.instanceName, *c);
+            if (j.mes) {  // ngspice mes*.c (LEVEL 1, Statz): no temperature dependence, its junctions at REFTEMP's kT/q
+                if (c->type != "NMF" && c->type != "PMF")
+                    throw std::runtime_error(j.instanceName + ": model " + c->name + " is " + c->type + ", not an NMF/PMF model");
+                if (c->get("LEVEL", 1.0) != 1.0)
+                    throw std::runtime_error("model " + c->name + ": MESFET LEVEL 2-4 (MESA) is not supported yet");
+                supported(c, {"VTO", "VT0", "ALPHA", "BETA", "LAMBDA", "B", "RD", "RS", "CGS", "CGD", "PB", "IS", "FC", "KF", "AF"});
+                bounded(c, {"BETA", "LAMBDA", "B", "RD", "RS", "CGS", "CGD", "IS", "KF"}, {"ALPHA", "AF"});
+                if (!(c->get("PB", 1.0) > 0.5)) throw std::runtime_error("model " + c->name + ": PB must be > 0.5 (the Statz charge)");
+                j.isNChannel = c->type == "NMF";
+                j.thermalVoltage_V_T_V = devtemp::vt(devtemp::REFTEMP);
+                j.beta = c->get("BETA", 2.5e-3);
+                j.Vto = c->params.count("VT0") ? c->get("VT0", -2.0) : c->get("VTO", -2.0);
+                j.lambda = c->get("LAMBDA", 0.0);
+                auto& k = j.card;
+                k.n = 1.0; k.b = c->get("B", 0.3); k.alpha = c->get("ALPHA", 2.0); k.is = c->get("IS", 1e-14);
+                k.pb = c->get("PB", 1.0); k.fc = c->get("FC", 0.5);  // FC: mestemp's f1..f3, which no equation reads
+                k.cgs = c->get("CGS", 0.0); k.cgd = c->get("CGD", 0.0);
+                k.kf = c->get("KF", 0.0); k.af = c->get("AF", 1.0);
+                continue;
+            }
             if (c->type != "NJF" && c->type != "PJF" && c->type != "NJFET" && c->type != "PJFET")
                 throw std::runtime_error(j.instanceName + ": model " + c->name + " is " + c->type + ", not an NJF/PJF model");
             supported(c, {"BETA", "VTO", "LAMBDA", "IS", "N", "B", "CGS", "CGD", "PB", "FC", "KF", "AF", "RD", "RS",
@@ -1402,7 +1641,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             const double T = ambientK_, Tn = c->get("TNOM", tnomC_) + 273.15, dT = T - Tn;
             j.thermalVoltage_V_T_V = devtemp::vt(T);
             j.isNChannel = (c->type == "NJF" || c->type == "NJFET");
-            j.beta   = c->get("BETA", 1e-4) * j.m * (c->params.count("BETATCE") ? std::pow(1.01, c->get("BETATCE", 0.0) * dT)
+            j.beta   = c->get("BETA", 1e-4) * (c->params.count("BETATCE") ? std::pow(1.01, c->get("BETATCE", 0.0) * dT)
                                                                                  : std::pow(T / Tn, c->get("BEX", 0.0)));
             j.Vto    = c->params.count("VTOTC") ? c->get("VTO", -2.0) + c->get("VTOTC", 0.0) * dT
                                                 : c->get("VTO", -2.0) - c->get("TCV", 0.0) * dT;
@@ -1733,10 +1972,12 @@ void SPICEParser::parseDiode(const std::vector<std::string>& tok, TensorBlock& b
     std::vector<std::string> rest(tok.begin(), tok.begin() + 4);  // PJ= is the sidewall perimeter; M= also scales it
     for (size_t i = 4; i < tok.size(); ++i) {
         const std::string k = toUpper(tok[i]);
-        if (k == "PJ" && i + 1 < tok.size() && isValue(tok[i + 1])) d.pj = parseValue(tok[++i]);
-        else { if (k == "M" && i + 1 < tok.size() && isValue(tok[i + 1])) d.mult = parseValue(tok[i + 1]); rest.push_back(tok[i]); }
+        if (k == "PJ" && i + 1 < tok.size() && isValue(tok[i + 1])) { d.pj = parseValue(tok[++i]); d.pjGiven = true; continue; }
+        if (k == "AREA" || (i == 4 && isValue(tok[i]))) d.areaGiven = true;
+        if (k == "M" && i + 1 < tok.size() && isValue(tok[i + 1])) d.mult = parseValue(tok[i + 1]);
+        rest.push_back(tok[i]);
     }
-    d.area = instanceArea(rest, 4, &d.inst, &d.off);
+    d.area = instanceArea(rest, 4, &d.inst, &d.off, d.ic, 1);
     d.instanceName = tok[0];
     d.anode = nodeIndex(tok[1]);
     d.cathode = nodeIndex(tok[2]);
@@ -1746,22 +1987,23 @@ void SPICEParser::parseDiode(const std::vector<std::string>& tok, TensorBlock& b
 
 // M<name> <nd> <ng> <ns> <nb> <modelName> [W=] [L=] [AD=] [AS=] [PD=] [PS=] [NRD=] [NRS=] [NF=] [M=]
 void SPICEParser::parseMosfet(const std::vector<std::string>& tok, TensorBlock& blk) {
-    requireFields(tok, 6);
+    requireFields(tok, 5);
     Mosfet m;
     m.instanceName = tok[0];
     m.drain  = nodeIndex(tok[1]);
     m.gate   = nodeIndex(tok[2]);
     m.source = nodeIndex(tok[3]);
-    m.body   = nodeIndex(tok[4]);
     auto isModel = [&](const std::string& t) {  // a .model card, or a binned family NAME.0, NAME.1, ...
         const std::string mu = toUpper(t);
         const auto bin = modelNames_.lower_bound(mu + ".");
         return modelNames_.count(mu) || (bin != modelNames_.end() && bin->compare(0, mu.size() + 1, mu + ".") == 0);
     };
-    size_t mi = 5;  // the model name: after 4 nodes, or after up to 3 more (BSIM-SOI P, B, T)
+    size_t mi = 5;  // the model name: after 4 nodes, or after up to 3 more (BSIM-SOI P, B, T); a VDMOS has 3 (or 5)
+    m.threeTerm = isModel(tok[4]);
+    if (m.threeTerm) { mi = 4; m.body = 0; } else m.body = nodeIndex(tok[4]);
     while (mi < 8 && mi + 1 < tok.size() && !isModel(tok[mi])) ++mi;
-    if (!isModel(tok[mi]))
-        throw std::runtime_error(tok[0] + ": expected 4 nodes (d g s b), then a model name; '" + tok[5] +
+    if (mi >= tok.size() || !isModel(tok[mi]))
+        throw std::runtime_error(tok[0] + ": expected 4 nodes (d g s b), then a model name; '" + tok.back() +
                                  "' is not a .model card");
     for (size_t k = 5; k < mi; ++k) m.soiNodes.push_back(nodeIndex(tok[k]));
     m.modelName = tok[mi];
@@ -1773,7 +2015,19 @@ void SPICEParser::parseMosfet(const std::vector<std::string>& tok, TensorBlock& 
     // .option scale multiplies the lengths (areas by scale^2), as in ngspice.
     for (size_t i = mi + 1; i < tok.size(); ++i) {
         std::string upper = toUpper(tok[i]);
-        if (upper == "OFF") throw std::runtime_error(tok[0] + ": OFF is not supported yet");
+        if (upper == "OFF") { m.off = true; continue; }
+        if (upper == "THERMAL") { m.thermal = true; continue; }
+        if (upper == "IC") {  // IC=vds[,vgs[,vbs]]
+            int n = 0;
+            while (n < 3 && i + 1 < tok.size() && isValue(tok[i + 1])) m.ic[n++] = parseValue(tok[++i]);
+            if (n == 0) throw std::runtime_error(tok[0] + ": IC needs a value");
+            continue;
+        }
+        if (upper == "ICVDS" || upper == "ICVGS" || upper == "ICVBS") {
+            if (i + 1 >= tok.size()) throw std::runtime_error(tok[0] + ": parameter " + upper + " has no value");
+            m.ic[upper == "ICVDS" ? 0 : upper == "ICVGS" ? 1 : 2] = parseValue(tok[++i]);
+            continue;
+        }
         if (i + 1 >= tok.size()) throw std::runtime_error(tok[0] + ": parameter " + upper + " has no value");
         const double s = scale_;
         if (upper == "W")        m.w = parseValue(tok[++i]) * s;
@@ -1818,7 +2072,9 @@ void SPICEParser::parseBJT(const std::vector<std::string>& tok, TensorBlock& blk
     if (modelIdx >= 5) q.substrate = nodeIndex(tok[4]);
     if (modelIdx == 6) q.thermal = nodeIndex(tok[5]);
     q.modelName = tok[modelIdx];
-    q.area = instanceArea(tok, modelIdx + 1, &q.inst, &q.off);
+    q.area = instanceArea(tok, modelIdx + 1, &q.inst, &q.off, q.ic, 2);
+    for (size_t i = modelIdx + 1; i + 1 < tok.size(); ++i)
+        if (toUpper(tok[i]) == "M") q.m = parseValue(tok[i + 1]);
     blk.bjts.push_back(q);
 }
 
@@ -1847,7 +2103,7 @@ void SPICEParser::parseSwitch(const std::vector<std::string>& tok, TensorBlock& 
 void SPICEParser::parseJFET(const std::vector<std::string>& tok, TensorBlock& blk) {
     requireFields(tok, 5);
     JFET j;
-    j.area = instanceArea(tok, 5, nullptr, &j.off);
+    j.area = instanceArea(tok, 5, nullptr, &j.off, j.ic, 2) * mult_;  // ngspice jfetload: M on every stamp, as AREA
     j.instanceName = tok[0];
     j.drain  = nodeIndex(tok[1]);
     j.gate   = nodeIndex(tok[2]);
@@ -1855,6 +2111,25 @@ void SPICEParser::parseJFET(const std::vector<std::string>& tok, TensorBlock& bl
     j.modelName = tok[4];
     j.m = mult_;
     blk.jfets.push_back(j);
+}
+
+// U<name> <n1> <n2> <n3> <model> L=<length> [N=<lumps>]   (uniform distributed RC line, ngspice urc)
+void SPICEParser::parseURC(const std::vector<std::string>& tok, TensorBlock& blk) {
+    requireFields(tok, 5);
+    TensorBlock::URC u;
+    u.name = tok[0];
+    u.n1 = nodeIndex(tok[1]); u.n2 = nodeIndex(tok[2]); u.n3 = nodeIndex(tok[3]);
+    u.model = tok[4];
+    for (size_t i = 5; i < tok.size(); ++i) {
+        const std::string k = toUpper(tok[i]);
+        if (i + 1 >= tok.size()) throw std::runtime_error(tok[0] + ": parameter " + k + " has no value");
+        if (k == "L") u.length = parseValue(tok[++i]) * scale_;
+        else if (k == "N") u.lumps = (int)std::lround(parseValue(tok[++i]));
+        else throw std::runtime_error(tok[0] + ": parameter " + k + " is not supported yet");
+    }
+    if (!(u.length > 0.0)) throw std::runtime_error(tok[0] + ": L must be > 0");
+    if (u.lumps < 0 || u.lumps == 1 || u.lumps == 2) throw std::runtime_error(tok[0] + ": N must be at least 3");
+    blk.urcs.push_back(u);
 }
 
 // N<name> <terminal>... <modelName> [<param> <value>]...   (OSDI device, as ngspice)
@@ -1948,12 +2223,46 @@ void SPICEParser::parseModelCard(const std::vector<std::string>& tok) {
     ModelCard card;
     card.name = tok[1];
     card.type = toUpper(tok[2]);
+    std::vector<std::string> t(tok.begin(), tok.begin() + 3);
+    if (card.type.rfind("VDMOS", 0) == 0) {
+        // ngspice inp_vdmos_model: PCHAN (or VDMOSP) makes it p-channel; the datasheet notes RON, VDS, QG and MFG
+        // (MFG a name) are dropped
+        bool p = card.type == "VDMOSP";
+        for (size_t i = 3; i < tok.size(); ++i) {
+            const std::string k = toUpper(tok[i]);
+            if (k == "PCHAN" || k == "NCHAN") { p = p || k == "PCHAN"; continue; }
+            if ((k == "RON" || k == "VDS" || k == "QG" || k == "MFG") && i + 1 < tok.size()) { ++i; continue; }
+            t.push_back(tok[i]);
+        }
+        card.type = p ? "VDMOSP" : "VDMOSN";
+    } else t = tok;
+
+    // Vector parameters, KEY=[v1 v2 ...] (XSPICE code models): collected and taken out of the key=value pairs
+    {
+        std::vector<std::string> u(t.begin(), t.begin() + std::min<size_t>(3, t.size()));
+        for (size_t i = 3; i < t.size(); ++i) {
+            if (i + 1 >= t.size() || t[i + 1][0] != '[') { u.push_back(t[i]); continue; }
+            const std::string key = toUpper(t[i]);
+            std::vector<double> v;
+            std::string w = t[++i].substr(1);
+            for (;;) {
+                const bool last = !w.empty() && w.back() == ']';
+                if (last) w.pop_back();
+                if (!w.empty()) v.push_back(parseValue(w));
+                if (last) break;
+                if (++i >= t.size()) throw std::runtime_error("model " + card.name + ": " + key + "=[ without ]");
+                w = t[i];
+            }
+            card.vectors[key] = v;
+        }
+        t = u;
+    }
 
     // Parse optional parameters (key=value pairs flattened by tokenizer)
-    for (size_t i = 3; i + 1 < tok.size(); i += 2) {
-        std::string key = toUpper(tok[i]);
-        const std::string word = toUpper(tok[i + 1]);  // XSPICE booleans (inertial_delay=false)
-        double val = word == "TRUE" ? 1.0 : word == "FALSE" ? 0.0 : parseValue(tok[i + 1]);
+    for (size_t i = 3; i + 1 < t.size(); i += 2) {
+        std::string key = toUpper(t[i]);
+        const std::string word = toUpper(t[i + 1]);  // XSPICE booleans (inertial_delay=false)
+        double val = word == "TRUE" ? 1.0 : word == "FALSE" ? 0.0 : parseValue(t[i + 1]);
         card.params[key] = val;
 
         // Extract well-known fields
@@ -1985,7 +2294,9 @@ void SPICEParser::parseSubcktBegin(const std::vector<std::string>& tok) {
     for (size_t i = 2; i < tok.size(); ++i) {
         subcktPorts_.push_back(tok[i]);
         subcktBlock_.pinNames.push_back(tok[i]);
+        noAnalogRef_ = true;
         subcktBlock_.portNodeIndices.push_back(nodeIndex(tok[i]));  // local 1..P
+        noAnalogRef_ = false;
     }
 }
 
@@ -2163,7 +2474,7 @@ void SPICEParser::parseSubcktEnd() {
 // One instance of `pi.subckt` with ports on global nodes `portNodes`: fresh
 // global nodes for its internal nodes, then its own X cards, recursively.
 void SPICEParser::expandInstance(const PendingInstance& pi, const std::vector<int>& portNodes,
-                                 int depth, const std::string& path) {
+                                 int depth, const std::string& path, const std::vector<std::string>& portNames, int topLine) {
     if (depth > 64) throw std::runtime_error("subcircuit nesting deeper than 64 (recursive .subckt?)");
     auto it = result_.netlist.blockDefinitions.find(pi.subckt);
     if (it == result_.netlist.blockDefinitions.end())
@@ -2189,10 +2500,40 @@ void SPICEParser::expandInstance(const PendingInstance& pi, const std::vector<in
     for (const auto& ic : subcktICs_[pi.subckt])  // a body's .ic / .nodeset applies to each instance
         (ic.nodeset ? result_.netlist.nodeSets : result_.netlist.nodeICs).push_back({map[subcktNames_[pi.subckt].at(ic.node) - 1], ic.value});
 
+    for (int l : analogLocal_[pi.subckt]) if (l >= 1 && l <= (int)map.size()) analogGlobal_.insert(map[l - 1]);
+    // the flattened name of a body's node: a pin's is the parent's net, ground and .global ones stay, others x1.n
+    auto flat = [&](const std::string& local) {
+        const std::string u = toUpper(local);
+        if (u == "0" || u == "GND" || globals_.count(u)) return u;
+        for (size_t k = 0; k < blk.pinNames.size(); ++k)
+            if (toUpper(blk.pinNames[k]) == u && k < portNames.size()) return portNames[k];
+        return full + "." + u;
+    };
+    for (const auto& a : subcktA_[pi.subckt]) {  // the body's XSPICE devices, on the flattened nets
+        PendingA x{full + "." + toUpper(a.name), a.model, {}, topLine, {}};
+        for (const auto& w : a.raw) {
+            if (w.empty() || w[0] == '%' || w == "[" || w == "]") { x.raw.push_back(w); continue; }
+            const bool inv = w[0] == '~';
+            const std::string base = inv ? w.substr(1) : w;
+            x.raw.push_back(toUpper(base) == "NULL" ? base : (inv ? "~" : "") + flat(base));
+        }
+        for (const auto& g : a.groups) {
+            std::vector<std::string> fg;
+            for (const auto& n : g) {
+                const bool inv = !n.empty() && n[0] == '~';
+                const std::string base = inv ? n.substr(1) : n;
+                fg.push_back(toUpper(base) == "NULL" ? base : (inv ? "~" : "") + flat(base));
+            }
+            x.groups.push_back(fg);
+        }
+        pendingA_.push_back(x);
+    }
     for (const auto& child : subcktChildren_[pi.subckt]) {
         std::vector<int> childPorts;
+        std::vector<std::string> childNames;
         for (int l : child.nodes) childPorts.push_back(l == 0 ? 0 : map[l - 1]);
-        expandInstance(child, childPorts, depth + 1, full + ".");
+        for (const auto& n : child.portNames) childNames.push_back(flat(n));
+        expandInstance(child, childPorts, depth + 1, full + ".", childNames, topLine);
     }
 }
 
@@ -2209,17 +2550,14 @@ namespace acutesim {
 // %d / %v before a port name its type (the model decides it anyway).
 void SPICEParser::parseXspice(const std::string& line, int lineNum) {
     std::string spaced;
-    for (char c : line) spaced += c == '[' || c == ']' ? std::string(" ") + c + " " : std::string(1, c);
+    for (char c : line) spaced += c == '[' || c == ']' ? std::string(" ") + c + " " : c == '(' || c == ')' ? std::string(" ") : std::string(1, c);
     std::istringstream ss(spaced);
     std::vector<std::string> w;
     for (std::string t; ss >> t;) w.push_back(t);
     if (w.size() < 3) throw std::runtime_error(w[0] + ": expected ports, then a model name");
-    PendingA a{w[0], w.back(), {}, lineNum};
+    PendingA a{w[0], w.back(), {}, lineNum, std::vector<std::string>(w.begin() + 1, w.end() - 1)};
     for (size_t i = 1; i + 1 < w.size(); ++i) {
-        if (w[i][0] == '%') {
-            if (w[i] != "%d" && w[i] != "%v") throw std::runtime_error(a.name + ": port type " + w[i] + " is not supported yet");
-            continue;
-        }
+        if (w[i][0] == '%') continue;  // a port type: the code model checks it (resolveXspice)
         if (w[i] == "]") throw std::runtime_error(a.name + ": ']' without '['");
         if (w[i] != "[") { a.groups.push_back({w[i]}); continue; }
         std::vector<std::string> g;
@@ -2228,7 +2566,7 @@ void SPICEParser::parseXspice(const std::string& line, int lineNum) {
         if (i + 1 >= w.size()) throw std::runtime_error(a.name + ": '[' without ']'");
         a.groups.push_back(g);
     }
-    pendingA_.push_back(a);
+    (inSubckt_ ? subcktA_[subcktName_] : pendingA_).push_back(a);
 }
 
 // The A devices against their .model cards: ngspice 47's d_buffer ... d_dff, adc_bridge and dac_bridge
@@ -2243,15 +2581,32 @@ void SPICEParser::resolveXspice(int& at) {
         {"ADC_BRIDGE", Kind::ADC}, {"DAC_BRIDGE", Kind::DAC}};
     auto net = std::make_shared<xspice::Net>();
     std::map<std::string, int> dnode;  // upper-case name -> digital node
-    auto digital = [&](const std::string& n, const std::string& inst, bool nullOk, bool invOk) -> xspice::Port {
+    std::set<int> orphan;              // node indices X lines gave digital nets
+    auto analogNode = [&](const std::string& n, const std::string& inst) {
+        const std::string key = toUpper(n);
+        if (const auto a = result_.nodeIndex.find(key); a != result_.nodeIndex.end()) {
+            analogTop_.insert(a->second);
+            return a->second;
+        }
+        if (key.find('.') != std::string::npos)
+            throw std::runtime_error(inst + ": analog port " + n + " is on no analog element of its subcircuit");
+        const int idx = nodeIndex(n);  // a top-level node only this bridge names
+        result_.nodeIndex[key] = idx;
+        result_.netlist.numGlobalNodes = std::max(result_.netlist.numGlobalNodes, idx);
+        return idx;
+    };
+    auto digital = [&](const std::string& n, const std::string& inst, bool nullOk) -> xspice::Port {
         if (toUpper(n) == "NULL") {
             if (!nullOk) throw std::runtime_error(inst + ": this port cannot be NULL");
             return {};
         }
-        const bool inv = n[0] == '~';
-        if (inv && !invOk) throw std::runtime_error(inst + ": an inverted (~) output is not supported yet");
+        const bool inv = n[0] == '~';  // inverted: an input reads, an output drives, the inverse
         const std::string name = inv ? n.substr(1) : n, key = toUpper(name);
-        if (nodeMap_.count(key)) throw std::runtime_error(inst + ": node " + name + " is analog; a digital port needs an event node");
+        if (const auto a = result_.nodeIndex.find(key); a != result_.nodeIndex.end()) {
+            if (analogTop_.count(a->second) || analogGlobal_.count(a->second))
+                throw std::runtime_error(inst + ": node " + name + " is analog; a digital port needs an event node");
+            orphan.insert(a->second);  // only X ports and pins name it: no analog node
+        }
         auto [it, fresh] = dnode.emplace(key, (int)net->nodes.size());
         if (fresh) {
             std::string low = name;
@@ -2265,8 +2620,13 @@ void SPICEParser::resolveXspice(int& at) {
         const auto mc = modelCards_.find(toUpper(a.model));
         if (mc == modelCards_.end()) throw std::runtime_error(a.name + ": no .model card " + a.model);
         const ModelCard* c = &mc->second;
+        static const std::set<std::string> analogKinds = {"GAIN", "SUMMER", "MULT", "DIVIDE", "LIMIT", "CLIMIT", "PWL", "ASWITCH"};
+        if (analogKinds.count(c->type)) { resolveXspiceAnalog(a, *c, analogNode); continue; }
         const auto k = kinds.find(c->type);
         if (k == kinds.end()) throw std::runtime_error(a.name + ": XSPICE model type " + c->type + " is not supported yet");
+        for (const auto& w : a.raw)
+            if (w[0] == '%' && w != "%d" && w != "%v") throw std::runtime_error(a.name + ": port type " + w + " is not supported yet");
+        if (!c->vectors.empty()) throw std::runtime_error("model " + c->name + ": parameter " + c->vectors.begin()->first + " is not a " + c->type + " parameter");
         xspice::Inst x;
         x.name = a.name;
         x.kind = k->second;
@@ -2281,33 +2641,33 @@ void SPICEParser::resolveXspice(int& at) {
         switch (x.kind) {
         case Kind::BUF: case Kind::INV:
             need(2);
-            x.in = {digital(single(0), a.name, false, true)};
-            x.out = {digital(single(1), a.name, false, false)};
+            x.in = {digital(single(0), a.name, false)};
+            x.out = {digital(single(1), a.name, false)};
             allowed = {"RISE_DELAY", "FALL_DELAY", "INPUT_LOAD", "INERTIAL_DELAY"};
             break;
         case Kind::AND: case Kind::NAND: case Kind::OR: case Kind::NOR: case Kind::XOR: case Kind::XNOR:
             need(2);
-            for (const auto& n : a.groups[0]) x.in.push_back(digital(n, a.name, false, true));
+            for (const auto& n : a.groups[0]) x.in.push_back(digital(n, a.name, false));
             if (x.in.empty()) throw std::runtime_error(a.name + ": no inputs");
-            x.out = {digital(single(1), a.name, false, false)};
+            x.out = {digital(single(1), a.name, false)};
             allowed = {"RISE_DELAY", "FALL_DELAY", "INPUT_LOAD", "INERTIAL_DELAY"};
             break;
         case Kind::TRI:
             need(3);
-            x.in = {digital(single(0), a.name, false, true), digital(single(1), a.name, false, true)};
-            x.out = {digital(single(2), a.name, false, false)};
-            allowed = {"DELAY", "INPUT_LOAD", "ENABLE_LOAD"};
+            x.in = {digital(single(0), a.name, false), digital(single(1), a.name, false)};
+            x.out = {digital(single(2), a.name, false)};
+            allowed = {"DELAY", "INPUT_LOAD", "ENABLE_LOAD", "INERTIAL_DELAY"};
             break;
         case Kind::PULLUP: case Kind::PULLDOWN:
             need(1);
-            x.out = {digital(single(0), a.name, false, false)};
+            x.out = {digital(single(0), a.name, false)};
             allowed = {"LOAD"};
             break;
         case Kind::DFF:
             need(6);
-            x.in = {digital(single(0), a.name, false, true), digital(single(1), a.name, false, true),
-                    digital(single(2), a.name, true, true), digital(single(3), a.name, true, true)};
-            x.out = {digital(single(4), a.name, true, false), digital(single(5), a.name, true, false)};
+            x.in = {digital(single(0), a.name, false), digital(single(1), a.name, false),
+                    digital(single(2), a.name, true), digital(single(3), a.name, true)};
+            x.out = {digital(single(4), a.name, true), digital(single(5), a.name, true)};
             allowed = {"CLK_DELAY", "SET_DELAY", "RESET_DELAY", "IC", "RISE_DELAY", "FALL_DELAY", "DATA_LOAD", "CLK_LOAD", "SET_LOAD", "RESET_LOAD"};
             break;
         case Kind::ADC: case Kind::DAC: {
@@ -2318,8 +2678,8 @@ void SPICEParser::resolveXspice(int& at) {
             if (an.size() != dn.size() || an.empty()) throw std::runtime_error(a.name + ": the analog and digital port vectors differ in size");
             for (size_t i = 0; i < an.size(); ++i) {
                 if (dnode.count(toUpper(an[i]))) throw std::runtime_error(a.name + ": node " + an[i] + " is digital; this port is analog");
-                x.analog.push_back(nodeIndex(an[i]));
-                (adc ? x.out : x.in).push_back(digital(dn[i], a.name, false, !adc));
+                x.analog.push_back(analogNode(an[i], a.name));
+                (adc ? x.out : x.in).push_back(digital(dn[i], a.name, false));
                 if (!adc) {  // the output: an ideal source to ground, ramped by the simulation (ngspice: a#branch)
                     VoltageSource v{};
                     v.name = toUpper(a.name) + "#" + std::to_string(i);
@@ -2336,7 +2696,9 @@ void SPICEParser::resolveXspice(int& at) {
         }
         for (const auto& [key, v] : c->params)
             if (!allowed.count(key)) throw std::runtime_error("model " + c->name + ": parameter " + key + " is not a " + c->type + " parameter");
-        if (c->get("INERTIAL_DELAY", 0.0) != 0.0) throw std::runtime_error("model " + c->name + ": inertial_delay is not supported yet");
+        x.inertial = c->get("INERTIAL_DELAY", 0.0) != 0.0;
+        if (x.inertial && x.kind == Kind::TRI)  // d_tristate's runs its state and strength as two inertial channels
+            throw std::runtime_error("model " + c->name + ": inertial_delay on a d_tristate is not supported yet");
         const double d = c->get("DELAY", 1e-9);  // d_tristate
         x.rise = x.kind == Kind::TRI ? d : c->get("RISE_DELAY", 1e-9);
         x.fall = x.kind == Kind::TRI ? d : c->get("FALL_DELAY", 1e-9);
@@ -2344,14 +2706,200 @@ void SPICEParser::resolveXspice(int& at) {
         const double ic = c->get("IC", 0.0);
         x.ic = ic == 1.0 ? xspice::L1 : ic == 0.0 ? xspice::L0 : xspice::LU;
         x.lo = c->get("IN_LOW", 0.1); x.hi = c->get("IN_HIGH", 0.9);
-        x.vlo = c->get("OUT_LOW", 0.0); x.vhi = c->get("OUT_HIGH", 1.0); x.vun = c->get("OUT_UNDEF", 0.5);
+        x.vlo = c->get("OUT_LOW", 0.0); x.vhi = c->get("OUT_HIGH", 1.0);
+        // dac_bridge: with out_low and out_high given and out_undef not, U is their mean
+        x.vun = c->params.count("OUT_LOW") && c->params.count("OUT_HIGH") && !c->params.count("OUT_UNDEF") ? (x.vlo + x.vhi) / 2.0
+                                                                                                         : c->get("OUT_UNDEF", 0.5);
         x.trise = c->get("T_RISE", 1e-9); x.tfall = c->get("T_FALL", 1e-9);
         if (!(x.hi > x.lo)) throw std::runtime_error("model " + c->name + ": in_high must be > in_low");
         if (x.kind == Kind::DAC && !(x.trise > 0.0 && x.tfall > 0.0 && x.vhi != x.vlo))
             throw std::runtime_error("model " + c->name + ": needs t_rise, t_fall > 0 and out_high != out_low");
         net->insts.push_back(std::move(x));
     }
-    result_.netlist.digital = net;
+    // A digital net an X line numbered as a node: unnamed (no analog output), held at 0 V (nothing else is on it)
+    for (int idx : orphan) {
+        if (analogTop_.count(idx) || analogGlobal_.count(idx)) continue;  // an adc/dac port made it analog after all
+        for (auto* names : {&nodeMap_, &result_.nodeIndex})
+            for (auto it = names->begin(); it != names->end();) it = it->second == idx ? names->erase(it) : std::next(it);
+        Resistor r{};
+        r.name = "#XSPICE_NET" + std::to_string(idx); r.nodeTerminal1 = idx; r.nodeTerminal2 = 0; r.resistance_ohms = 1.0;
+        result_.netlist.globalBlock.resistors.push_back(r);
+    }
+    if (!net->insts.empty()) result_.netlist.digital = net;
+}
+
+// An XSPICE analog code model (physics/xspice_analog.h): its ports walked by the model's port table (a
+// differential type takes two nodes, a vector port [ ... ]), each output a behavioural source over the inputs.
+// A current input is a zero-volt source across its port (ngspice MIF), read through its branch current.
+void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
+                                      const std::function<int(const std::string&, const std::string&)>& analogNode) {
+    using xspice::AKind;
+    struct Spec { char dir; const char* def; bool vec; };  // dir: i(nput), o(utput), b(oth: a conductance port)
+    static const std::map<std::string, std::pair<AKind, std::vector<Spec>>> table = {
+        {"GAIN", {AKind::GAIN, {{'i', "v", false}, {'o', "v", false}}}},
+        {"SUMMER", {AKind::SUMMER, {{'i', "v", true}, {'o', "v", false}}}},
+        {"MULT", {AKind::MULT, {{'i', "v", true}, {'o', "v", false}}}},
+        {"DIVIDE", {AKind::DIVIDE, {{'i', "v", false}, {'i', "v", false}, {'o', "v", false}}}},
+        {"LIMIT", {AKind::LIMIT, {{'i', "v", false}, {'o', "v", false}}}},
+        {"CLIMIT", {AKind::CLIMIT, {{'i', "v", false}, {'i', "v", false}, {'i', "v", false}, {'o', "v", false}}}},
+        {"PWL", {AKind::PWL, {{'i', "v", false}, {'o', "v", false}}}},
+        {"ASWITCH", {AKind::ASWITCH, {{'i', "v", false}, {'b', "gd", false}}}}};
+    const auto& [kind, specs] = table.at(c.type);
+    struct Port { std::string type; int n1 = 0, n2 = 0; std::string vname; };
+    std::vector<std::vector<Port>> ports;  // per spec, its elements
+    size_t p = 0;
+    const auto& w = a.raw;
+    auto one = [&](const Spec& sp) {
+        Port pt;
+        pt.type = sp.def;
+        if (p < w.size() && w[p][0] == '%') {
+            pt.type = w[p].substr(1);
+            for (auto& ch : pt.type) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            ++p;
+        }
+        static const std::set<std::string> in = {"v", "vd", "i", "id", "vnam"}, out = {"v", "vd", "i", "id"};
+        if (!(sp.dir == 'b' ? pt.type == "gd" : (sp.dir == 'i' ? in : out).count(pt.type)))
+            throw std::runtime_error(a.name + ": port type %" + pt.type + " is not allowed (or not supported yet) on this " + c.type + " port");
+        const bool diff = pt.type == "vd" || pt.type == "id" || pt.type == "gd";
+        auto node = [&]() {
+            if (p >= w.size() || w[p] == "[" || w[p] == "]" || w[p][0] == '%') throw std::runtime_error(a.name + ": missing a node for " + c.type);
+            const std::string n = w[p++];
+            if (toUpper(n) == "NULL" || n[0] == '~') throw std::runtime_error(a.name + ": " + n + " on an analog port");
+            return n;
+        };
+        if (pt.type == "vnam") { pt.vname = toUpper(node()); return pt; }
+        pt.n1 = analogNode(node(), a.name);
+        if (diff) pt.n2 = analogNode(node(), a.name);
+        return pt;
+    };
+    for (const auto& sp : specs) {
+        std::vector<Port> el;
+        if (sp.vec) {
+            if (p >= w.size() || w[p] != "[") throw std::runtime_error(a.name + ": " + c.type + " takes a [ ... ] vector of inputs");
+            for (++p; p < w.size() && w[p] != "]";) el.push_back(one(sp));
+            if (p >= w.size()) throw std::runtime_error(a.name + ": '[' without ']'");
+            ++p;
+            if (el.empty()) throw std::runtime_error(a.name + ": no inputs");
+        } else el.push_back(one(sp));
+        ports.push_back(el);
+    }
+    if (p != w.size()) throw std::runtime_error(a.name + ": " + c.type + " takes " + std::to_string(specs.size()) + " ports; '" + w[p] + "' is one too many");
+
+    // parameters: the card's, ngspice's defaults (ifspec.ifs)
+    auto m = std::make_shared<xspice::AnalogModel>();
+    m->kind = kind;
+    std::set<std::string> allowed;
+    auto num = [&](const char* k, double def) { allowed.insert(k); return c.get(k, def); };
+    auto flag = [&](const char* k, bool def) { allowed.insert(k); return c.params.count(k) ? c.params.at(k) != 0.0 : def; };
+    auto vec = [&](const char* k, size_t n, double def) {
+        allowed.insert(k);
+        const auto it = c.vectors.find(k);
+        std::vector<double> v = it == c.vectors.end() ? std::vector<double>() : it->second;
+        if (v.empty() && c.params.count(k)) v = {c.params.at(k)};
+        if (v.empty()) v.assign(n, def);
+        if (v.size() != n) throw std::runtime_error("model " + c.name + ": " + k + " has " + std::to_string(v.size()) + " values for " + std::to_string(n) + " inputs");
+        return v;
+    };
+    const size_t nin = ports[0].size();
+    switch (kind) {
+    case AKind::GAIN:
+        m->inOffset = num("IN_OFFSET", 0.0); m->gain = num("GAIN", 1.0); m->outOffset = num("OUT_OFFSET", 0.0);
+        for (const char* k : {"NOISE_VOLTAGE", "NOISE_CURRENT", "NOISE_CORNER", "NOISE_EXPONENT"}) allowed.insert(k);
+        if (c.get("NOISE_VOLTAGE", 0.0) != 0.0 || c.get("NOISE_CURRENT", 0.0) != 0.0)
+            throw std::runtime_error("model " + c.name + ": the gain code model's noise is not supported yet");
+        break;
+    case AKind::SUMMER: case AKind::MULT:
+        m->inOffsets = vec("IN_OFFSET", nin, 0.0); m->inGains = vec("IN_GAIN", nin, 1.0);
+        m->outGain = num("OUT_GAIN", 1.0); m->outOffset = num("OUT_OFFSET", 0.0);
+        break;
+    case AKind::DIVIDE:
+        m->numOffset = num("NUM_OFFSET", 0.0); m->numGain = num("NUM_GAIN", 1.0);
+        m->denOffset = num("DEN_OFFSET", 0.0); m->denGain = num("DEN_GAIN", 1.0);
+        m->denLower = num("DEN_LOWER_LIMIT", 1e-10); m->denDomain = num("DEN_DOMAIN", 1e-16); m->fraction = flag("FRACTION", false);
+        m->outGain = num("OUT_GAIN", 1.0); m->outOffset = num("OUT_OFFSET", 0.0);
+        break;
+    case AKind::LIMIT: case AKind::CLIMIT:
+        m->inOffset = num("IN_OFFSET", 0.0); m->gain = num("GAIN", 1.0);
+        m->range = num("LIMIT_RANGE", 1e-6); m->fraction = flag("FRACTION", false);
+        if (kind == AKind::LIMIT) {
+            allowed.insert("OUT_LOWER_LIMIT"); allowed.insert("OUT_UPPER_LIMIT");
+            if (!c.params.count("OUT_LOWER_LIMIT") || !c.params.count("OUT_UPPER_LIMIT"))
+                throw std::runtime_error("model " + c.name + ": limit needs out_lower_limit and out_upper_limit");
+            m->lo = c.params.at("OUT_LOWER_LIMIT"); m->hi = c.params.at("OUT_UPPER_LIMIT");
+            if (m->fraction) { m->range *= m->hi - m->lo; m->fraction = false; }
+        } else { m->upperDelta = num("UPPER_DELTA", 0.0); m->lowerDelta = num("LOWER_DELTA", 0.0); }
+        break;
+    case AKind::PWL: {
+        allowed.insert("X_ARRAY"); allowed.insert("Y_ARRAY");
+        const auto xi = c.vectors.find("X_ARRAY"), yi = c.vectors.find("Y_ARRAY");
+        if (xi == c.vectors.end() || yi == c.vectors.end() || xi->second.size() != yi->second.size() || xi->second.size() < 2)
+            throw std::runtime_error("model " + c.name + ": pwl needs x_array and y_array of the same size, 2 points at least");
+        const auto& x = xi->second; const auto& y = yi->second;
+        for (size_t i = 1; i < x.size(); ++i)
+            if (!(x[i] > x[i - 1])) throw std::runtime_error("model " + c.name + ": pwl x_array must increase");
+        const size_t n = x.size() + 2;
+        m->x.assign(n, 0.0); m->y.assign(n, 0.0);
+        for (size_t i = 1; i + 1 < n; ++i) { m->x[i] = x[i - 1]; m->y[i] = y[i - 1]; }
+        m->x[0] = 2 * m->x[1] - m->x[2]; m->x[n - 1] = 2 * m->x[n - 2] - m->x[n - 3];
+        if (flag("LIMIT", false)) { m->y[0] = m->y[1]; m->y[n - 1] = m->y[n - 2]; }
+        else { m->y[0] = 2 * m->y[1] - m->y[2]; m->y[n - 1] = 2 * m->y[n - 2] - m->y[n - 3]; }
+        m->domain = num("INPUT_DOMAIN", 0.01); m->fraction = flag("FRACTION", true);
+        break;
+    }
+    case AKind::ASWITCH:
+        m->cntlOff = num("CNTL_OFF", 0.0); m->cntlOn = num("CNTL_ON", 1.0);
+        m->rOff = num("R_OFF", 1e12); m->rOn = num("R_ON", 1.0);
+        m->logR = flag("LOG", true); m->limitR = flag("LIMIT", false);
+        if (std::abs(m->cntlOn - m->cntlOff) < 1e-12) throw std::runtime_error("model " + c.name + ": aswitch needs |cntl_on - cntl_off| >= 1e-12");
+        if (m->logR && !(m->rOff > 0.0)) throw std::runtime_error("model " + c.name + ": aswitch log needs r_off > 0");
+        break;
+    }
+    for (const auto& [k, v] : c.params)
+        if (!allowed.count(k)) throw std::runtime_error("model " + c.name + ": parameter " + k + " is not a " + c.type + " parameter");
+    for (const auto& [k, v] : c.vectors)
+        if (!allowed.count(k)) throw std::runtime_error("model " + c.name + ": parameter " + k + " is not a " + c.type + " parameter");
+
+    // inputs -> references (one per input element, in port order)
+    auto& blk = result_.netlist.globalBlock;
+    std::vector<Behavioural::Ref> refs;
+    int sense = 0;
+    for (size_t s = 0; s < specs.size(); ++s) {
+        if (specs[s].dir != 'i') continue;
+        for (const auto& pt : ports[s]) {
+            Behavioural::Ref r;
+            if (pt.type == "v" || pt.type == "vd") { r.kind = 0; r.a = pt.n1; r.b = pt.n2; }
+            else {
+                r.kind = 1;
+                if (pt.type == "vnam") {
+                    int idx = -1;
+                    for (size_t k = 0; k < blk.voltageSources.size(); ++k) if (toUpper(blk.voltageSources[k].name) == pt.vname) idx = (int)k;
+                    if (idx < 0) throw std::runtime_error(a.name + ": %vnam " + pt.vname + " is no top-level voltage source");
+                    r.a = idx;
+                } else {  // %i / %id: a zero-volt source across the port, + to -
+                    VoltageSource v{};
+                    v.name = toUpper(a.name) + "#IN" + std::to_string(sense++);
+                    v.nodePositive = pt.n1; v.nodeNegative = pt.n2;
+                    r.a = (int)blk.voltageSources.size();
+                    blk.voltageSources.push_back(v);
+                }
+            }
+            refs.push_back(r);
+        }
+    }
+    // outputs: a voltage (v, vd) or current (i, id; gd: the switch's own port current, its voltage the last input)
+    for (size_t s = 0; s < specs.size(); ++s) {
+        if (specs[s].dir == 'i') continue;
+        for (const auto& pt : ports[s]) {
+            Behavioural b;
+            b.name = toUpper(a.name);
+            b.outPos = pt.n1; b.outNeg = pt.n2;
+            b.voltage = pt.type == "v" || pt.type == "vd";
+            b.refs = refs;
+            if (pt.type == "gd") b.refs.push_back({0, pt.n1, pt.n2, ""});
+            b.cm = m;
+            blk.behavioural.push_back(b);
+        }
+    }
 }
 
 }  // namespace acutesim

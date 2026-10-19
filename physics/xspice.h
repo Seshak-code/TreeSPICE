@@ -47,6 +47,7 @@ struct Inst {
     double rise = 1e-9, fall = 1e-9;              // output delays (tristate: its delay, both)
     double clk = 1e-9, set = 1e-9, reset = 1e-9;  // d_dff: added to rise / fall
     Lv ic = L0;
+    bool inertial = false;                        // inertial_delay (buffer, inverter, gates): a pulse shorter than the delay is dropped
     double lo = 0.1, hi = 0.9;                                             // adc_bridge in_low / in_high
     double vlo = 0.0, vhi = 1.0, vun = 0.5, trise = 1e-9, tfall = 1e-9;    // dac_bridge
 };
@@ -78,6 +79,8 @@ public:
             st_[i].drive.assign(x.out.size(), Val{});
             st_[i].last.assign(x.out.size(), Val{});
             st_[i].prev.assign(x.in.size(), LU);
+            st_[i].when.assign(x.out.size(), -1.0);
+            st_[i].iprev.assign(x.out.size(), LU);
             st_[i].adc.assign(x.kind == Kind::ADC ? x.analog.size() : 0, LU);
             st_[i].dac.assign(x.kind == Kind::DAC ? x.analog.size() : 0, -1e300);
         }
@@ -151,6 +154,8 @@ private:
         std::vector<Lv> prev;          // inputs at the last evaluation (d_dff edges)
         std::vector<Lv> adc;           // adc_bridge: the last level computed per channel
         std::vector<double> dac;       // dac_bridge: the voltage each output heads for
+        std::vector<double> when;      // inertial: the pending change's time per output (<= now: none)
+        std::vector<Lv> iprev;         // inertial: the output's value before that change
     };
     std::shared_ptr<const Net> net_;
     std::vector<Val> node_;
@@ -194,22 +199,41 @@ private:
         for (int i : evalList) eval(i, t, dc);
     }
 
-    // Post output p's new value (ngspice: an output change cancels its pending events from that time on).
-    // At DC it applies at once. Returns whether the computed output changed.
-    bool post(int i, int p, Val v, double t, double delay, bool dc) {
-        auto &s = st_[i];
-        if (v == s.last[p]) return false;
-        s.last[p] = v;
-        const auto &x = net_->insts[i];
-        if (dc) {
-            s.drive[p] = v;
-            propagate({x.out[p].node}, 0.0, true);
-            return true;
-        }
-        const double te = t + std::max(delay, 1e-12);  // a zero delay is 1 ps in ngspice
+    // Queue output p's value v at te (ngspice EVTqueue_output: it cancels the output's pending events from te on).
+    // An inverted output (~out) drives the inverse.
+    void queue(int i, int p, Val v, double te) {
+        if (net_->insts[i].out[p].inv) v.v = invert(v.v);
         for (auto it = queue_.begin(); it != queue_.end();)
             it = it->first >= te && it->second.inst == i && it->second.port == p ? queue_.erase(it) : std::next(it);
         queue_.insert({te, {i, p, v}});
+    }
+    // Post output p's new value. At DC it applies at once. Returns whether the computed output changed.
+    // Inertial (ngspice's buffer / gate code models): a change while one is pending either reverts it, the
+    // output scheduled back at half the remaining delay (a glitch shorter than the delay vanishes), or, to a third
+    // value, restores the old value there and then posts the new one with its own delay.
+    bool post(int i, int p, Val v, double t, double delay, bool dc) {
+        auto &s = st_[i];
+        if (v == s.last[p]) return false;
+        const Val old = s.last[p];
+        s.last[p] = v;
+        const auto &x = net_->insts[i];
+        if (dc) {
+            s.drive[p] = x.out[p].inv ? Val{invert(v.v), v.s} : v;
+            propagate({x.out[p].node}, 0.0, true);
+            return true;
+        }
+        if (x.inertial) {
+            if (s.when[p] <= t) { s.iprev[p] = old.v; s.when[p] = t + delay; }
+            else if (v.v != s.iprev[p]) {
+                queue(i, p, {s.iprev[p], SS}, t + (s.when[p] - t) / 2.0);
+                if (v.v == LU) delay = s.iprev[p] == L0 ? x.rise : x.fall;
+                s.when[p] = t + delay;
+            } else {
+                delay = (s.when[p] - t) / 2.0;
+                s.when[p] = -1.0;
+            }
+        }
+        queue(i, p, v, t + std::max(delay, 1e-12));  // a zero delay is 1 ps in ngspice
         return true;
     }
     // ngspice's delay choice: rise to 1, fall to 0; to U, rise from 0 and fall from 1

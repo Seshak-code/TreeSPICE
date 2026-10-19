@@ -1,0 +1,8 @@
+* Diode parameter aliases (ngspice dio.c IOPR): JS, ISW, VJSW, NZ, VB, IB, TBV1 at 80 C; CTC, TVJ under TLEVC 1 (AC)
+VD a 0 DC 0 AC 1
+R1 a k 100
+D1 k 0 da PJ=20u
+.model da D(JS=2e-14 N=1.1 ISW=1e-10 VJSW=0.8 CJSW=1e-12 NZ=1.5 VB=8 IB=1e-4 TBV1=1e-3 CJO=2p VJ=0.7 TLEVC=1 CTC=2e-3 TVJ=1.5e-3 TNOM=27)
+.temp 80
+.dc VD -9 1 0.05
+.end

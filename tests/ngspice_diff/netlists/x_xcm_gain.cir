@@ -1,0 +1,19 @@
+* XSPICE analog code models: gain, summer (vector), mult, divide (its denominator floor), DC sweep
+VA a 0 DC 0
+VB b 0 DC 1.5
+a1 a o1 g1
+.model g1 gain(in_offset=0.2 gain=-3 out_offset=0.5)
+a2 [a b %vd a b] o2 s1
+.model s1 summer(in_offset=[0.1 0 -0.2] in_gain=[1 -2 0.5] out_gain=1.5 out_offset=-0.3)
+a3 [a b] o3 m1
+.model m1 mult(in_offset=[0.5 0] in_gain=[2 1] out_gain=0.7 out_offset=0.1)
+a4 b a o4 d1
+.model d1 divide(den_offset=0 den_lower_limit=0.05 den_domain=0.02 out_gain=2)
+R1 o1 0 1k
+R2 o2 0 1k
+R3 o3 0 1k
+R4 o4 0 1k
+* ngspice converges a code model's sweep only to RELTOL (each point's .op agrees exactly): tight options
+.options reltol=1e-7 abstol=1e-15 vntol=1e-12
+.dc VA -2 2 0.01
+.end

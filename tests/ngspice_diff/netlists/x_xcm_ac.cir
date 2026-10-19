@@ -1,0 +1,14 @@
+* XSPICE code models in AC: gain, summer and pwl gains at the operating point (aswitch: test_engine_fixes;
+* ngspice 47's AC load negates its conductance)
+VA a 0 DC 0.3 AC 1
+a1 a o1 g1
+.model g1 gain(gain=-3 out_offset=0.5)
+a2 [a o1] o2 s1
+.model s1 summer(in_gain=[2 0.5])
+a3 a o3 p1
+.model p1 pwl(x_array=[-1 0 1] y_array=[-1 0.2 3])
+R2 o1 0 1k
+R3 o2 0 1k
+R4 o3 0 1k
+.ac dec 5 1k 10meg
+.end
