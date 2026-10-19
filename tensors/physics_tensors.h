@@ -73,7 +73,9 @@ inline DiodeModel<double> diodeModel(const Diode& d, double gmin = PhysicsConsta
     p.vte = d.emissionCoefficient_N * vt;
     p.rs = c.rs / d.area;
     p.cjo = c.cjo * d.area; p.vj = c.vj; p.m = c.m; p.fc = c.fc; p.tt = c.tt;
-    p.isw = c.jsw * d.pj * d.mult; p.vtesw = c.ns * vt;
+    p.isw = c.jsw * d.pj * d.mult; p.vtesw = c.ns * vt; p.swOwn = c.nsGiven;
+    p.fcs = c.fcs; p.ikp = c.ikp * d.pj * d.mult;
+    p.itun = c.jtun * d.area; p.itunsw = c.jtunsw * d.pj * d.mult; p.vtt = c.ntun * vt;
     p.cjsw = c.cjsw * d.pj * d.mult; p.mjsw = c.mjsw; p.vjsw = c.php;
     p.ikf = c.ikf * d.area; p.ikr = c.ikr * d.area;
     p.isr = c.isr * d.area; p.vtr = c.nr * vt;

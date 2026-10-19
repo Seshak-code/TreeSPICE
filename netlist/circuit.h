@@ -607,9 +607,13 @@ struct Diode {
         bool bvGiven = false;
         double isr = 0.0, nr = 2.0;  // recombination current (ISR at the temperature)
         double nbv = NAN;            // breakdown emission coefficient (NaN: N)
+        bool nsGiven = false;        // NS given: the sidewall has its own characteristic (else N's)
+        double fcs = 0.5, ikp = 0.0; // sidewall FC and knee current
+        double jtun = 0.0, jtunsw = 0.0, ntun = 30.0;  // tunnelling (at the temperature)
     } card;
     double area = 1.0;
     double pj = 0.0, mult = 1.0;  // PJ= (sidewall perimeter) and M= (the sidewall terms scale by M, not by AREA)
+    bool areaGiven = false, pjGiven = false;  // else the model's AREA / PJ (ngspice diosetup)
     InstTemp inst;  // card and saturation current are held at the instance temperature (resolved by the parser)
 };
 

@@ -1,0 +1,8 @@
+* Diode TLEV 2 junction capacitance at 125 C (the junction potential follows the TLEV 2 band gap)
+VD a 0 DC -1 AC 1
+R1 a k 1k
+D1 k 0 d2
+.model d2 D(TLEV=2 IS=1e-14 EG=1.12 GAP1=6.5e-4 GAP2=900 CJO=3p VJ=0.75 M=0.4 TNOM=30)
+.temp 125
+.ac dec 5 1meg 10g
+.end

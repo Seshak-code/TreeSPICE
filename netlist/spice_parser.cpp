@@ -1297,53 +1297,71 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         // junction potentials and capacitances, betas with XTB, the TC-style coefficients; a card at TNOM stays as given.
         for (auto& d : blk.diodes) if (const ModelCard* c = kind(card(d.modelName), d.instanceName, {"D", "D"})) {
             sensList(blk, d.instanceName, *c);
-            supported(c, {"IS", "N", "RS", "CJO", "CJ0", "CJ", "VJ", "PB", "M", "MJ", "FC", "TT", "BV", "IBV",
-                          "EG", "XTI", "TNOM", "TM1", "TM2", "TCV", "TTT1", "TTT2", "TRS", "TRS1", "TRS2",
-                          "JSW", "NS", "CJSW", "MJSW", "PHP", "IKF", "IK", "IKR", "KF", "AF", "ISR", "NR", "NBV",
-                          "CTA", "CTP", "TPB", "TPHP", "TLEVC", "TLEV", "CJP"});
+            supported(c, {"IS", "JS", "N", "RS", "CJO", "CJ0", "CJ", "VJ", "PB", "M", "MJ", "FC", "TT", "BV", "VB", "VRB", "VAR",
+                          "IBV", "IB", "EG", "XTI", "TNOM", "TM1", "TM2", "TCV", "TBV1", "TTT1", "TTT2", "TRS", "TRS1", "TRS2",
+                          "JSW", "ISW", "NS", "CJSW", "MJSW", "PHP", "VJSW", "IKF", "IK", "IKR", "IKP", "KF", "AF", "ISR", "NR",
+                          "NBV", "NZ", "CTA", "CTC", "CTP", "TPB", "TVJ", "TPHP", "TLEVC", "TLEV", "CJP", "FCS", "GAP1", "GAP2",
+                          "JTUN", "JTUNSW", "NTUN", "XTITUN", "KEG", "AREA", "PJ"});
             // Temperature selectors (probed on ngspice 47): TLEV 1 scales BV by (1 - TCV dT) where 0 subtracts TCV dT
-            // (IS follows the same law under both); TLEVC 1 takes CJO (1 + CTA dT), VJ - TPB dT and the sidewall's
-            // CTP / TPHP in place of the junction law, and CTA..TPHP do nothing under TLEVC 0
+            // (IS follows the same law under both); TLEV 2 also takes the band gap EG - GAP1 T^2 / (T + GAP2) for the
+            // saturation currents (exp(EG(Tn)/(N Vt(Tn)) - EG(T)/(N Vt) + XTI/N ln(T/Tn))) and the junction potentials;
+            // TLEVC 1 takes CJO (1 + CTA dT), VJ - TPB dT and the sidewall's CTP / TPHP in place of the junction law,
+            // and CTA..TPHP do nothing under TLEVC 0
             const double tlev = c->get("TLEV", 0.0), tlevc = c->get("TLEVC", 0.0);
-            if ((tlev != 0.0 && tlev != 1.0) || (tlevc != 0.0 && tlevc != 1.0))
-                throw std::runtime_error("model " + c->name + ": TLEV / TLEVC other than 0 or 1 is not supported yet");
-            bounded(c, {"IS", "RS", "CJO", "CJ0", "CJ", "M", "MJ", "TT", "JSW", "CJSW", "MJSW", "IKF", "IK", "IKR", "KF", "ISR"},
-                    {"N", "BV", "NS", "PHP", "NR", "NBV"});  // ngspice: BV = 0 breaks down at 0 V
-            d.saturationCurrent_I_S_A = c->get("IS", 1e-14);
+            if ((tlev != 0.0 && tlev != 1.0 && tlev != 2.0) || (tlevc != 0.0 && tlevc != 1.0))
+                throw std::runtime_error("model " + c->name + ": TLEV other than 0-2 / TLEVC other than 0-1 is not supported yet");
+            bounded(c, {"IS", "JS", "RS", "CJO", "CJ0", "CJ", "M", "MJ", "TT", "JSW", "ISW", "CJSW", "MJSW", "IKF", "IK", "IKR",
+                        "IKP", "KF", "ISR", "JTUN", "JTUNSW", "AREA", "PJ"},
+                    {"N", "BV", "VB", "VRB", "VAR", "NS", "PHP", "VJSW", "NR", "NBV", "NZ", "NTUN"});  // ngspice: BV = 0 breaks down at 0 V
+            if (!d.areaGiven) d.area *= c->get("AREA", 1.0);  // diosetup: the model's AREA / PJ unless the instance gives one
+            if (!d.pjGiven) d.pj = c->get("PJ", 0.0);
+            d.saturationCurrent_I_S_A = first(c, {"IS", "JS"}, 1e-14);
             d.emissionCoefficient_N   = c->get("N", 1.0);
             auto& k = d.card;
             k.rs = c->get("RS", 0.0); k.cjo = first(c, {"CJO", "CJ0", "CJ"}, 0.0);
             k.vj = first(c, {"VJ", "PB"}, 1.0); k.m = first(c, {"M", "MJ"}, 0.5);
             k.fc = c->get("FC", 0.5); k.tt = c->get("TT", 0.0);
-            k.jsw = c->get("JSW", 0.0); k.ns = c->get("NS", 1.0); k.cjsw = first(c, {"CJSW", "CJP"}, 0.0);
-            k.mjsw = c->get("MJSW", 0.33); k.php = c->get("PHP", 1.0);
-            k.ikf = first(c, {"IKF", "IK"}, 0.0); k.ikr = c->get("IKR", 0.0);
+            k.jsw = first(c, {"JSW", "ISW"}, 0.0); k.cjsw = first(c, {"CJSW", "CJP"}, 0.0);
+            k.nsGiven = c->params.count("NS") > 0; k.ns = c->get("NS", 1.0);  // NS's default 1 sets the sidewall's IS law
+            k.mjsw = c->get("MJSW", 0.33); k.php = first(c, {"PHP", "VJSW"}, 1.0); k.fcs = c->get("FCS", 0.5);
+            k.ikf = first(c, {"IKF", "IK"}, 0.0); k.ikr = c->get("IKR", 0.0); k.ikp = c->get("IKP", 0.0);
             k.kf = c->get("KF", 0.0); k.af = c->get("AF", 1.0);
-            k.bvGiven = c->params.count("BV") > 0;  // BV > 0 (checked above)
-            k.bv = c->get("BV", 0.0); k.ibv = c->get("IBV", 1e-3);
-            k.isr = c->get("ISR", 0.0); k.nr = c->get("NR", 2.0); k.nbv = c->get("NBV", NAN);
-            if (!(k.m < 1.0 && k.mjsw < 1.0 && k.vj > 0.0 && k.fc < 1.0 && k.rs >= 0.0 && k.ibv > 0.0))
-                throw std::runtime_error("model " + c->name + ": needs M, MJSW < 1, VJ > 0, FC < 1, RS >= 0, IBV > 0");
+            k.bvGiven = c->params.count("BV") || c->params.count("VB") || c->params.count("VRB") || c->params.count("VAR");
+            k.bv = first(c, {"BV", "VB", "VRB", "VAR"}, 0.0); k.ibv = first(c, {"IBV", "IB"}, 1e-3);
+            k.isr = c->get("ISR", 0.0); k.nr = c->get("NR", 2.0); k.nbv = first(c, {"NBV", "NZ"}, NAN);
+            k.jtun = c->get("JTUN", 0.0); k.jtunsw = c->get("JTUNSW", 0.0); k.ntun = c->get("NTUN", 30.0);
+            if (!(k.m < 1.0 && k.mjsw < 1.0 && k.vj > 0.0 && k.fc < 1.0 && k.fcs < 1.0 && k.rs >= 0.0 && k.ibv > 0.0))
+                throw std::runtime_error("model " + c->name + ": needs M, MJSW < 1, VJ > 0, FC, FCS < 1, RS >= 0, IBV > 0");
             using namespace devtemp;
             const double Tn = c->get("TNOM", tnomC_) + 273.15, T = instK(d.inst), dt = T - Tn;
             d.thermalVoltage_V_T_V = vt(T);
             k.m = std::min(k.m * poly(c->get("TM1", 0.0), c->get("TM2", 0.0), dt), 0.9);
             if (T != Tn) {
-                d.saturationCurrent_I_S_A *= isFactor(T, Tn, std::max(c->get("EG", 1.11), 0.1), c->get("XTI", 3.0), d.emissionCoefficient_N);
+                const double eg = std::max(c->get("EG", 1.11), 0.1), xti = c->get("XTI", 3.0);
+                const Gap gap = tlev == 2.0 ? Gap{eg, c->get("GAP1", 7.02e-4), c->get("GAP2", 1108.0)} : Gap{};
+                // saturation-current law for emission coefficient n, band gap scale keg and exponent x
+                auto law = [&](double n, double keg, double x) {
+                    if (tlev != 2.0) return isFactor(T, Tn, keg * eg, x, n);
+                    return std::exp(keg * egfet(Tn, gap) / (n * vt(Tn)) - keg * egfet(T, gap) / (n * vt(T)) + x / n * std::log(T / Tn));
+                };
+                d.saturationCurrent_I_S_A *= law(d.emissionCoefficient_N, 1.0, xti);
                 if (tlevc == 1.0) {
-                    k.cjo *= 1.0 + c->get("CTA", 0.0) * dt; k.vj -= c->get("TPB", 0.0) * dt;
+                    k.cjo *= 1.0 + first(c, {"CTA", "CTC"}, 0.0) * dt; k.vj -= first(c, {"TPB", "TVJ"}, 0.0) * dt;
                     k.cjsw *= 1.0 + c->get("CTP", 0.0) * dt; k.php -= c->get("TPHP", 0.0) * dt;
                 } else {
-                    k.cjo *= junctionAt(k.vj, k.m, Tn, T);
-                    k.cjsw *= junctionAt(k.php, k.mjsw, Tn, T);
+                    k.cjo *= junctionAt(k.vj, k.m, Tn, T, gap);
+                    k.cjsw *= junctionAt(k.php, k.mjsw, Tn, T, gap);
                 }
-                k.jsw *= isFactor(T, Tn, std::max(c->get("EG", 1.11), 0.1), c->get("XTI", 3.0), d.emissionCoefficient_N);
-                k.isr *= isFactor(T, Tn, std::max(c->get("EG", 1.11), 0.1), c->get("XTI", 3.0), k.nr);  // probed: the NR law
+                k.jsw *= law(k.ns, 1.0, xti);
+                k.isr *= law(k.nr, 1.0, xti);  // probed: the NR law
+                const double ft = law(k.ntun, c->get("KEG", 1.0), c->get("XTITUN", 3.0));
+                k.jtun *= ft; k.jtunsw *= ft;
             }
             if (k.fc * k.vj > 1.0) k.vj = 1.0 / k.fc;  // diotemp: the depletion knee stays below 1 V
             k.tt *= poly(c->get("TTT1", 0.0), c->get("TTT2", 0.0), dt);
             k.rs *= poly(first(c, {"TRS1", "TRS"}, 0.0), c->get("TRS2", 0.0), dt);
-            if (k.bvGiven) k.bv = tlev == 1.0 ? k.bv * (1.0 - c->get("TCV", 0.0) * dt) : k.bv - c->get("TCV", 0.0) * dt;
+            const double tcv = first(c, {"TCV", "TBV1"}, 0.0);
+            if (k.bvGiven) k.bv = tlev != 0.0 ? k.bv * (1.0 - tcv * dt) : k.bv - tcv * dt;
         }
         // HICUM/L2 (LEVEL 8): OpenVAF's hicuml2.va 2.4.0, ngspice's native version (they agree to 4e-5 in ngspice),
         // through OSDI (hicum2.osdi from TREESPICE_OSDI_PATH); its parameter names are ngspice's.
@@ -1831,8 +1849,10 @@ void SPICEParser::parseDiode(const std::vector<std::string>& tok, TensorBlock& b
     std::vector<std::string> rest(tok.begin(), tok.begin() + 4);  // PJ= is the sidewall perimeter; M= also scales it
     for (size_t i = 4; i < tok.size(); ++i) {
         const std::string k = toUpper(tok[i]);
-        if (k == "PJ" && i + 1 < tok.size() && isValue(tok[i + 1])) d.pj = parseValue(tok[++i]);
-        else { if (k == "M" && i + 1 < tok.size() && isValue(tok[i + 1])) d.mult = parseValue(tok[i + 1]); rest.push_back(tok[i]); }
+        if (k == "PJ" && i + 1 < tok.size() && isValue(tok[i + 1])) { d.pj = parseValue(tok[++i]); d.pjGiven = true; continue; }
+        if (k == "AREA" || (i == 4 && isValue(tok[i]))) d.areaGiven = true;
+        if (k == "M" && i + 1 < tok.size() && isValue(tok[i + 1])) d.mult = parseValue(tok[i + 1]);
+        rest.push_back(tok[i]);
     }
     d.area = instanceArea(rest, 4, &d.inst, &d.off, d.ic, 1);
     d.instanceName = tok[0];

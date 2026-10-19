@@ -1,0 +1,8 @@
+* Diode tunnelling current: JTUN (bottom), JTUNSW (sidewall), NTUN, XTITUN, KEG, at -20 and 100 C
+VD a 0 DC 0
+R1 a k 100
+D1 k 0 dt PJ=10u
+.model dt D(IS=1e-15 JTUN=1e-9 JTUNSW=1e-10 NTUN=25 XTITUN=4 KEG=0.9 EG=1.12)
+.temp -20 100
+.dc VD -4 0.8 0.05
+.end

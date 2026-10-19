@@ -529,6 +529,9 @@ struct DiodeModel {
     P vtb = PhysicsConstants::V_THERMAL_NOM;               // NBV*Vt: the breakdown slope
     P isr = 0.0, vtr = 2.0 * PhysicsConstants::V_THERMAL_NOM;  // recombination: ISR*AREA, NR*Vt
     P gmin = PhysicsConstants::JUNCTION_GMIN;
+    bool swOwn = false;                                    // NS given: the sidewall has its own characteristic (and breakdown)
+    P fcs = 0.5, ikp = 0.0;                                // sidewall FC, knee current (IKP*PJ*M; 0: none)
+    P itun = 0.0, itunsw = 0.0, vtt = 30.0 * PhysicsConstants::V_THERMAL_NOM;  // tunnelling: JTUN*AREA, JTUNSW*PJ, NTUN*Vt
 };
 
 // Breakdown voltage xbv such that the reverse current at -BV is IBV (ngspice
@@ -552,7 +555,7 @@ inline double diode_breakdown_xbv(double bv, double ibv, double is, double vte, 
 template <typename T, typename P>
 inline std::pair<T, T> diode_iq(T vd, const DiodeModel<P>& p)
 {
-    using std::exp;
+    using std::exp; using std::sqrt;
     // Recombination current (ISR, NR; probed on ngspice 47): ISR (exp(vd/(NR Vt)) - 1) ((1 - vd/VJ)^2 + 0.005)^(M/2),
     // held at its -3 N Vt value below that (ngspice's reverse region does not recompute it), also in breakdown
     T crec = T(0.0);
@@ -562,21 +565,31 @@ inline std::pair<T, T> diode_iq(T vd, const DiodeModel<P>& p)
         const T a = 1.0 - v / p.vj;
         crec = p.isr * (exp(v / p.vtr) - 1.0) * pow(a * a + 0.005, p.m / 2.0);
     }
+    // The sidewall (JSW*PJ): its own characteristic when NS is given, breakdown included; else the bottom's,
+    // whose breakdown it does not follow (ngspice dioload evaluates it at the separate sidewall voltage, 0 there)
+    T cdsw(0.0);
+    const bool brk = p.breakdown && vd < -p.xbv;
+    if (p.isw != P(0.0) && p.swOwn)
+        cdsw = vd >= T(-3.0 * p.vtesw) || !brk ? spice_junction(vd, p.isw, p.vtesw) : -p.isw * exp(-(p.xbv + vd) / p.vtb);
     T cdb;
     // breakdown only below the forward region (ngspice dioload's order): a large NBV makes xbv negative (IHP's
     // antenna diodes: xbv = -18 V), and the forward branch still applies there
-    if (p.breakdown && vd < -p.xbv && vd < T(-3.0 * p.vte)) cdb = -p.is * exp(-(p.xbv + vd) / p.vtb) + crec;
+    if (brk && vd < T(-3.0 * p.vte)) cdb = -p.is * exp(-(p.xbv + vd) / p.vtb) + crec;
     else {
-        cdb = spice_junction(vd, p.is, p.vte) + crec;  // the knees act on both (probed)
-        // high-injection knees (ngspice dioload): forward IKF, reverse IKR; the bottom current only
-        using std::sqrt;
-        if (p.ikf > P(0.0) && cdb > T(0.0)) cdb = cdb / (1.0 + sqrt(cdb / p.ikf));
-        else if (p.ikr > P(0.0) && cdb < T(0.0)) cdb = cdb / (1.0 + sqrt(-cdb / p.ikr));
-        if (p.isw != P(0.0)) cdb = cdb + spice_junction(vd, p.isw, p.vtesw);
+        cdb = spice_junction(vd, p.is, p.vte) + crec;
+        if (p.isw != P(0.0) && !p.swOwn) cdsw = spice_junction(vd, p.isw, p.vte);
     }
+    if (p.itunsw != P(0.0)) cdsw = cdsw - p.itunsw * (exp(-vd / p.vtt) - 1.0);  // tunnelling (JTUNSW, JTUN)
+    if (p.itun != P(0.0)) cdb = cdb - p.itun * (exp(-vd / p.vtt) - 1.0);
+    // high-injection knees (ngspice dioload): forward IKF, reverse IKR (breakdown included) on the bottom current
+    // (recombination and tunnelling in it, probed), IKP on the sidewall's
+    if (vd >= T(-3.0 * p.vte)) { if (p.ikf > P(0.0) && cdb > P(1e-18)) cdb = cdb / (1.0 + sqrt(cdb / p.ikf)); }
+    else if (p.ikr > P(0.0) && cdb < P(-1e-18)) cdb = cdb / (1.0 + sqrt(-cdb / p.ikr));
+    if (p.ikp > P(0.0) && cdsw > P(1e-18)) cdsw = cdsw / (1.0 + sqrt(cdsw / p.ikp));
+    const T cd = cdb + cdsw + p.gmin * vd;
     // the transit-time charge follows the junction current with its GMIN (ngspice: TT*GMIN of capacitance at any bias)
-    const T q = depletion_charge(vd, p.cjo, p.m, p.vj, p.fc) + depletion_charge(vd, p.cjsw, p.mjsw, p.vjsw, p.fc) + p.tt * (cdb + p.gmin * vd);
-    return {cdb + p.gmin * vd, q};
+    const T q = depletion_charge(vd, p.cjo, p.m, p.vj, p.fc) + depletion_charge(vd, p.cjsw, p.mjsw, p.vjsw, p.fcs) + p.tt * cd;
+    return {cd, q};
 }
 
 // Gummel-Poon BJT, parameters resolved (AREA applied; ngspice bjt level 1
