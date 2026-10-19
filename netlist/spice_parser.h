@@ -24,6 +24,8 @@
 #include <set>
 #include <functional>
 
+namespace xspice { struct Inst; }
+
 namespace acutesim {
 
 // .print / .save / .probe: kind 'p' (print) or 's' (save, probe); analysis "" (any), tran, ac, dc or op;
@@ -136,6 +138,7 @@ private:
     void parseOsdiDevice (const std::vector<std::string>& tok, TensorBlock& blk);
     void parseXspice     (const std::string& line, int lineNum);  // A<name> ports... model: resolved once the models are known
     void resolveXspice   (int& line);  // line: the A card an error refers to
+    void readDigitalSource(::xspice::Inst& x, const std::string& file, const std::string& model);  // d_source's vector file
     void parseVCVS       (const std::vector<std::string>& tok, TensorBlock& blk);
     void parseVCCS       (const std::vector<std::string>& tok, TensorBlock& blk);
     void parseCCVS       (const std::vector<std::string>& tok, TensorBlock& blk);
@@ -215,6 +218,7 @@ private:
     std::map<std::string, std::shared_ptr<osdi::Model>> osdiModels_; // per card, shared by its N devices
 
     double tnomC_ = 27.0;                   // .options tnom: where the models' parameters are given
+    std::string baseDir_;                   // the netlist's directory (parse's baseDir): d_source input_file resolves there
     double ambientK_ = 300.15;              // circuit temperature of this parse
     double instK(const InstTemp& t) const { return t.kelvin(ambientK_); }
 

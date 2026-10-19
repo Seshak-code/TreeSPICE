@@ -363,6 +363,7 @@ std::vector<std::pair<int, std::string>> SPICEParser::expandIncludes(
 SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::string& baseDir, double tempC,
                                     const std::map<std::string, double>& paramOverrides, const SensParam* sens) {
     result_ = SPICEParseResult{};
+    baseDir_ = baseDir;
     sens_ = sens;
     tnomC_ = 27.0;
     nodeMap_.clear();
@@ -2259,8 +2260,14 @@ void SPICEParser::parseModelCard(const std::vector<std::string>& tok) {
     }
 
     // Parse optional parameters (key=value pairs flattened by tokenizer)
+    static const std::set<std::string> stringTypes = {"D_LUT", "D_SOURCE"};  // the code models with string parameters
     for (size_t i = 3; i + 1 < t.size(); i += 2) {
         std::string key = toUpper(t[i]);
+        const std::string& raw = t[i + 1];
+        if (stringTypes.count(card.type) && raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
+            card.strings[key] = raw.substr(1, raw.size() - 2);
+            continue;
+        }
         const std::string word = toUpper(t[i + 1]);  // XSPICE booleans (inertial_delay=false)
         double val = word == "TRUE" ? 1.0 : word == "FALSE" ? 0.0 : parseValue(t[i + 1]);
         card.params[key] = val;
@@ -2571,6 +2578,43 @@ void SPICEParser::parseXspice(const std::string& line, int lineNum) {
 
 // The A devices against their .model cards: ngspice 47's d_buffer ... d_dff, adc_bridge and dac_bridge
 // (parameters and defaults probed; see physics/xspice.h). A dac_bridge output becomes a voltage source.
+// ngspice d_source's vector file: rows "time state..." (one 12-state token per output, as 0s 1r Uz), lines starting
+// with * and blank lines skipped, tokens split at blanks = ( ) and commas. ngspice reports a bad file and holds the
+// outputs at U; here it is an error.
+void SPICEParser::readDigitalSource(::xspice::Inst& x, const std::string& file, const std::string& model) {
+    std::filesystem::path path(file);
+    if (path.is_relative() && !baseDir_.empty() && std::filesystem::is_regular_file(std::filesystem::path(baseDir_) / path))
+        path = std::filesystem::path(baseDir_) / path;
+    std::ifstream in(path);
+    if (!in) throw std::runtime_error("model " + model + ": cannot open d_source input_file " + file);
+    static const std::string states[12] = {"0s", "1s", "Us", "0r", "1r", "Ur", "0z", "1z", "Uz", "0u", "1u", "Uu"};
+    std::string line;
+    for (int n = 1; std::getline(in, line); ++n) {
+        if (line.empty() || line[0] == '*') continue;
+        for (char& ch : line) if (ch == '=' || ch == '(' || ch == ')' || ch == ',') ch = ' ';
+        std::istringstream ss(line);
+        std::vector<std::string> tok;
+        for (std::string w; ss >> w;) tok.push_back(w);
+        if (tok.empty()) continue;
+        const std::string where = "model " + model + ": " + file + " line " + std::to_string(n) + ": ";
+        if (tok.size() != x.out.size() + 1)
+            throw std::runtime_error(where + "expected a time and " + std::to_string(x.out.size()) + " states");
+        const double t = parseValue(tok[0]);
+        if (!x.times.empty() && !(t > x.times.back())) throw std::runtime_error(where + "times must increase");
+        // ngspice queues each row 0.1 ns early and posts it with a 0.1 ns delay: a row in (0, 0.1 ns) lands before t = 0
+        if (t < 0.0 || (t > 0.0 && t < 1e-10)) throw std::runtime_error(where + "a time in (0, 0.1 ns) or below 0 is not supported");
+        std::vector<::xspice::Val> row;
+        for (size_t k = 1; k < tok.size(); ++k) {
+            const auto* hit = std::find(states, states + 12, tok[k]);
+            if (hit == states + 12) throw std::runtime_error(where + "unknown state " + tok[k]);
+            const int i = static_cast<int>(hit - states);
+            row.push_back({static_cast<::xspice::Lv>(i % 3), static_cast<::xspice::St>(i / 3)});
+        }
+        x.times.push_back(t);
+        x.rows.push_back(std::move(row));
+    }
+}
+
 void SPICEParser::resolveXspice(int& at) {
     if (pendingA_.empty()) return;
     using xspice::Kind;
@@ -2579,6 +2623,8 @@ void SPICEParser::resolveXspice(int& at) {
         {"D_OR", Kind::OR}, {"D_NOR", Kind::NOR}, {"D_XOR", Kind::XOR}, {"D_XNOR", Kind::XNOR},
         {"D_TRISTATE", Kind::TRI}, {"D_PULLUP", Kind::PULLUP}, {"D_PULLDOWN", Kind::PULLDOWN}, {"D_DFF", Kind::DFF},
         {"D_JKFF", Kind::JKFF}, {"D_TFF", Kind::TFF}, {"D_SRFF", Kind::SRFF},
+        {"D_DLATCH", Kind::DLATCH}, {"D_SRLATCH", Kind::SRLATCH}, {"D_OPEN_C", Kind::OPENC}, {"D_OPEN_E", Kind::OPENE},
+        {"D_FDIV", Kind::FDIV}, {"D_LUT", Kind::LUT}, {"D_SOURCE", Kind::SOURCE}, {"D_OSC", Kind::OSC}, {"D_PWM", Kind::PWM},
         {"ADC_BRIDGE", Kind::ADC}, {"DAC_BRIDGE", Kind::DAC}};
     auto net = std::make_shared<xspice::Net>();
     std::map<std::string, int> dnode;  // upper-case name -> digital node
@@ -2627,7 +2673,10 @@ void SPICEParser::resolveXspice(int& at) {
         if (k == kinds.end()) throw std::runtime_error(a.name + ": XSPICE model type " + c->type + " is not supported yet");
         for (const auto& w : a.raw)
             if (w[0] == '%' && w != "%d" && w != "%v") throw std::runtime_error(a.name + ": port type " + w + " is not supported yet");
-        if (!c->vectors.empty()) throw std::runtime_error("model " + c->name + ": parameter " + c->vectors.begin()->first + " is not a " + c->type + " parameter");
+        for (const auto& [key, v] : c->vectors)
+            if (!(k->second == Kind::OSC && (key == "CNTL_ARRAY" || key == "FREQ_ARRAY")) &&
+                !(k->second == Kind::PWM && (key == "CNTL_ARRAY" || key == "DC_ARRAY")))
+                throw std::runtime_error("model " + c->name + ": parameter " + key + " is not a " + c->type + " parameter");
         xspice::Inst x;
         x.name = a.name;
         x.kind = k->second;
@@ -2646,6 +2695,76 @@ void SPICEParser::resolveXspice(int& at) {
             x.out = {digital(single(1), a.name, false)};
             allowed = {"RISE_DELAY", "FALL_DELAY", "INPUT_LOAD", "INERTIAL_DELAY"};
             break;
+        case Kind::OPENC: case Kind::OPENE:
+            need(2);
+            x.in = {digital(single(0), a.name, false)};
+            x.out = {digital(single(1), a.name, false)};
+            allowed = {x.kind == Kind::OPENC ? "FALL_DELAY" : "RISE_DELAY", "OPEN_DELAY", "INPUT_LOAD", "INERTIAL_DELAY"};
+            break;
+        case Kind::FDIV: {
+            need(2);
+            x.in = {digital(single(0), a.name, false)};
+            x.out = {digital(single(1), a.name, false)};
+            allowed = {"DIV_FACTOR", "HIGH_CYCLES", "I_COUNT", "RISE_DELAY", "FALL_DELAY", "FREQ_IN_LOAD"};
+            auto integer = [&](const char* k, int dflt) {
+                const double v = c->get(k, dflt);
+                if (v != std::floor(v) || std::abs(v) > 1e9) throw std::runtime_error("model " + c->name + ": " + k + " must be an integer");
+                return static_cast<int>(v);
+            };
+            x.div = integer("DIV_FACTOR", 2); x.high = integer("HIGH_CYCLES", 1); x.icount = integer("I_COUNT", 0);
+            break;
+        }
+        case Kind::LUT: {
+            need(2);
+            for (const auto& n : a.groups[0]) x.in.push_back(digital(n, a.name, false));
+            if (x.in.empty() || x.in.size() > 20) throw std::runtime_error(a.name + ": d_lut takes 1 to 20 inputs");
+            x.out = {digital(single(1), a.name, false)};
+            allowed = {"RISE_DELAY", "FALL_DELAY", "INPUT_LOAD"};
+            const auto tv = c->strings.find("TABLE_VALUES");
+            if (tv == c->strings.end()) throw std::runtime_error("model " + c->name + ": d_lut needs table_values=\"...\" (quoted)");
+            // ngspice: '1' / '0' per entry, anything else U; a short table is padded with U, a long one cut
+            x.table.assign(size_t{1} << x.in.size(), xspice::LU);
+            for (size_t k = 0; k < x.table.size() && k < tv->second.size(); ++k)
+                x.table[k] = tv->second[k] == '1' ? xspice::L1 : tv->second[k] == '0' ? xspice::L0 : xspice::LU;
+            break;
+        }
+        case Kind::OSC: case Kind::PWM: {
+            const bool pwm = x.kind == Kind::PWM;
+            need(2);
+            const std::string cn = single(0);
+            if (dnode.count(toUpper(cn))) throw std::runtime_error(a.name + ": node " + cn + " is digital; cntl_in is analog");
+            x.analog = {analogNode(cn, a.name)};
+            x.out = {digital(single(1), a.name, false)};
+            // ngspice's d_osc and d_pwm never apply rise_delay / fall_delay
+            allowed = {pwm ? "FREQUENCY" : "DUTY_CYCLE", "INIT_PHASE", "RISE_DELAY", "FALL_DELAY"};
+            const char* tab = pwm ? "DC_ARRAY" : "FREQ_ARRAY";
+            x.ctl = c->vectors.count("CNTL_ARRAY") ? c->vectors.at("CNTL_ARRAY") : pwm ? std::vector<double>{-1.0, 1.0} : std::vector<double>{0.0, 1.0};
+            x.freq = c->vectors.count(tab) ? c->vectors.at(tab) : pwm ? std::vector<double>{0.0, 1.0} : std::vector<double>{1e6, 2e6};
+            if (x.ctl.size() < 2 || x.ctl.size() != x.freq.size())
+                throw std::runtime_error("model " + c->name + ": cntl_array and " + (pwm ? "dc_array" : "freq_array") + " need the same size, 2 or more");
+            for (size_t i = 0; i < x.ctl.size(); ++i) {
+                if (i && !(x.ctl[i] > x.ctl[i - 1])) throw std::runtime_error("model " + c->name + ": cntl_array must increase");
+                if (pwm) {  // ngspice: dc_array is limited to [0, 1], and 0 / 1 entries become 0.01 / 0.99 (its default [0 1] too)
+                    if (!(x.freq[i] >= 0.0 && x.freq[i] <= 1.0)) throw std::runtime_error("model " + c->name + ": dc_array values must be in [0, 1]");
+                    x.freq[i] = x.freq[i] <= 0.0 ? 0.01 : x.freq[i] >= 1.0 ? 0.99 : x.freq[i];
+                } else if (!(x.freq[i] > 0.0)) throw std::runtime_error("model " + c->name + ": freq_array values must be > 0");
+            }
+            x.period = 1.0 / c->get("FREQUENCY", 1e6);
+            if (pwm && !(c->get("FREQUENCY", 1e6) >= 1e-6)) throw std::runtime_error("model " + c->name + ": frequency must be >= 1e-6");
+            x.duty = c->get("DUTY_CYCLE", 0.5);
+            x.phase = c->get("INIT_PHASE", 0.0);
+            if (!(x.duty >= 1e-6 && x.duty <= 0.999999)) throw std::runtime_error("model " + c->name + ": duty_cycle must be in [1e-6, 0.999999]");
+            if (!(x.phase >= -180.0 && x.phase <= 360.0)) throw std::runtime_error("model " + c->name + ": init_phase must be in [-180, 360]");
+            break;
+        }
+        case Kind::SOURCE: {
+            need(1);
+            for (const auto& n : a.groups[0]) x.out.push_back(digital(n, a.name, false));
+            if (x.out.empty()) throw std::runtime_error(a.name + ": no outputs");
+            allowed = {"INPUT_LOAD"};
+            readDigitalSource(x, c->strings.count("INPUT_FILE") ? c->strings.at("INPUT_FILE") : "source.txt", c->name);
+            break;
+        }
         case Kind::AND: case Kind::NAND: case Kind::OR: case Kind::NOR: case Kind::XOR: case Kind::XNOR:
             need(2);
             for (const auto& n : a.groups[0]) x.in.push_back(digital(n, a.name, false));
@@ -2664,15 +2783,20 @@ void SPICEParser::resolveXspice(int& at) {
             x.out = {digital(single(0), a.name, false)};
             allowed = {"LOAD"};
             break;
-        case Kind::DFF: case Kind::JKFF: case Kind::TFF: case Kind::SRFF: {
-            const size_t nd = x.kind == Kind::JKFF || x.kind == Kind::SRFF ? 2 : 1;  // data inputs, then clk set reset out Nout
+        case Kind::DFF: case Kind::JKFF: case Kind::TFF: case Kind::SRFF: case Kind::DLATCH: case Kind::SRLATCH: {
+            // data inputs, then clk (latches: enable) set reset out Nout
+            const size_t nd = x.kind == Kind::JKFF || x.kind == Kind::SRFF || x.kind == Kind::SRLATCH ? 2 : 1;
             need(nd + 5);
             for (size_t k = 0; k <= nd; ++k) x.in.push_back(digital(single(k), a.name, false));
             x.in.push_back(digital(single(nd + 1), a.name, true));
             x.in.push_back(digital(single(nd + 2), a.name, true));
             x.out = {digital(single(nd + 3), a.name, true), digital(single(nd + 4), a.name, true)};
-            allowed = {"CLK_DELAY", "SET_DELAY", "RESET_DELAY", "IC", "RISE_DELAY", "FALL_DELAY", "CLK_LOAD", "SET_LOAD", "RESET_LOAD",
-                       x.kind == Kind::DFF ? "DATA_LOAD" : x.kind == Kind::JKFF ? "JK_LOAD" : x.kind == Kind::TFF ? "T_LOAD" : "SR_LOAD"};
+            if (x.kind == Kind::DLATCH || x.kind == Kind::SRLATCH)
+                allowed = {"ENABLE_DELAY", "SET_DELAY", "RESET_DELAY", "IC", "RISE_DELAY", "FALL_DELAY", "ENABLE_LOAD", "SET_LOAD", "RESET_LOAD",
+                           x.kind == Kind::DLATCH ? "DATA_DELAY" : "SR_DELAY", x.kind == Kind::DLATCH ? "DATA_LOAD" : "SR_LOAD"};
+            else
+                allowed = {"CLK_DELAY", "SET_DELAY", "RESET_DELAY", "IC", "RISE_DELAY", "FALL_DELAY", "CLK_LOAD", "SET_LOAD", "RESET_LOAD",
+                           x.kind == Kind::DFF ? "DATA_LOAD" : x.kind == Kind::JKFF ? "JK_LOAD" : x.kind == Kind::TFF ? "T_LOAD" : "SR_LOAD"};
             break;
         }
         case Kind::ADC: case Kind::DAC: {
@@ -2701,13 +2825,17 @@ void SPICEParser::resolveXspice(int& at) {
         }
         for (const auto& [key, v] : c->params)
             if (!allowed.count(key)) throw std::runtime_error("model " + c->name + ": parameter " + key + " is not a " + c->type + " parameter");
+        for (const auto& [key, v] : c->strings)
+            if (!(key == "TABLE_VALUES" && x.kind == Kind::LUT) && !(key == "INPUT_FILE" && x.kind == Kind::SOURCE)) throw std::runtime_error("model " + c->name + ": parameter " + key + " is not a " + c->type + " string parameter");
         x.inertial = c->get("INERTIAL_DELAY", 0.0) != 0.0;
         if (x.inertial && x.kind == Kind::TRI)  // d_tristate's runs its state and strength as two inertial channels
             throw std::runtime_error("model " + c->name + ": inertial_delay on a d_tristate is not supported yet");
         const double d = c->get("DELAY", 1e-9);  // d_tristate
-        x.rise = x.kind == Kind::TRI ? d : c->get("RISE_DELAY", 1e-9);
-        x.fall = x.kind == Kind::TRI ? d : c->get("FALL_DELAY", 1e-9);
-        x.clk = c->get("CLK_DELAY", 1e-9); x.set = c->get("SET_DELAY", 1e-9); x.reset = c->get("RESET_DELAY", 1e-9);
+        x.rise = x.kind == Kind::TRI ? d : c->get(x.kind == Kind::OPENC ? "OPEN_DELAY" : "RISE_DELAY", 1e-9);
+        x.fall = x.kind == Kind::TRI ? d : c->get(x.kind == Kind::OPENE ? "OPEN_DELAY" : "FALL_DELAY", 1e-9);
+        x.clk = c->get(x.kind == Kind::DLATCH || x.kind == Kind::SRLATCH ? "ENABLE_DELAY" : "CLK_DELAY", 1e-9);
+        x.data = c->get(x.kind == Kind::DLATCH ? "DATA_DELAY" : "SR_DELAY", 1e-9);
+        x.set = c->get("SET_DELAY", 1e-9); x.reset = c->get("RESET_DELAY", 1e-9);
         const double ic = c->get("IC", 0.0);
         x.ic = ic == 1.0 ? xspice::L1 : ic == 0.0 ? xspice::L0 : xspice::LU;
         x.lo = c->get("IN_LOW", 0.1); x.hi = c->get("IN_HIGH", 0.9);

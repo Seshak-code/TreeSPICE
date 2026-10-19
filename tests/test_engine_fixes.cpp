@@ -477,6 +477,7 @@ int main() {
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 NM W=10u\n.model NM NMOS\n", "expected 4 nodes"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 y inv\n.model inv d_inverter\n", "supported in .tran only"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 [d0] [a0] w [d1] ram\n.model ram d_ram\n", "D_RAM is not supported yet"},
+            {"V1 1 0 DC 1\nR1 1 0 1k\na1 [q] src\n.model src d_source(input_file=\"no_such_dsource.txt\")\n", "cannot open d_source input_file"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 d2 d3 tri\n.model tri d_tristate(inertial_delay=true)\n", "inertial_delay on a d_tristate is not supported yet"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 y inv\n.model inv d_inverter(delay=1n)\n", "DELAY is not a D_INVERTER parameter"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 0 NM\n.model NM NMOS\n", "expected 4 nodes (d g s b) for a LEVEL 1"},

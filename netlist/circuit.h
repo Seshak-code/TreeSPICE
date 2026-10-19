@@ -50,6 +50,7 @@ struct ModelCard {
     int level = 1;           // Model level (1 = Shichman-Hodges, 4 = BSIM4, etc.)
     std::map<std::string, double> params;  // Key-value: "KP"->200e-6, "VTO"->0.7, etc.
     std::map<std::string, std::vector<double>> vectors;  // KEY=[v1 v2 ...] (XSPICE code models' vector parameters)
+    std::map<std::string, std::string> strings;          // KEY="text" (XSPICE code models' string parameters, unquoted)
 
     double get(const std::string& key, double defaultVal) const {
         auto it = params.find(key);
