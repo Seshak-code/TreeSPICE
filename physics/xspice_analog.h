@@ -12,7 +12,7 @@
 
 namespace xspice {
 
-enum class AKind { GAIN, SUMMER, MULT, DIVIDE, LIMIT, CLIMIT, PWL, ASWITCH, INT, D_DT, S_XFER, SLEW, HYST, SINE, TRIANGLE, SQUARE, ZENER, MIPWL, OTA, ILIMIT, ONESHOT, POT, CAPIC, INDIC, SIDIODE, PSWITCH, MEMRISTOR, FILESRC, PWLTS, XFER };
+enum class AKind { GAIN, SUMMER, MULT, DIVIDE, LIMIT, CLIMIT, PWL, ASWITCH, INT, D_DT, S_XFER, SLEW, HYST, SINE, TRIANGLE, SQUARE, ZENER, MIPWL, OTA, ILIMIT, ONESHOT, POT, CAPIC, INDIC, SIDIODE, PSWITCH, MEMRISTOR, FILESRC, PWLTS, XFER, CORE, LCOUPLE };
 
 // A code model's state at the last accepted time point (int: its limited output; d_dt: its input; s_xfer:
 // its integrator chain, lowest first; slew: input and output; hyst: its leg, -1 before the first evaluation)
@@ -20,10 +20,12 @@ struct AnalogState { double out = 0.0, in = 0.0; std::vector<double> v; int leg 
 inline bool oscillator(AKind k) { return k == AKind::SINE || k == AKind::TRIANGLE || k == AKind::SQUARE; }
 inline bool stateful(AKind k) {
     return k == AKind::INT || k == AKind::D_DT || k == AKind::S_XFER || k == AKind::SLEW || k == AKind::HYST || k == AKind::ONESHOT ||
-           k == AKind::CAPIC || k == AKind::INDIC || k == AKind::MEMRISTOR || oscillator(k);
+           k == AKind::CAPIC || k == AKind::INDIC || k == AKind::MEMRISTOR || k == AKind::CORE || k == AKind::LCOUPLE ||
+           oscillator(k);
 }
 inline bool acFunction(AKind k) {  // AC gain not the DC slope
-    return k == AKind::INT || k == AKind::D_DT || k == AKind::S_XFER || k == AKind::CAPIC || k == AKind::INDIC || k == AKind::XFER;
+    return k == AKind::INT || k == AKind::D_DT || k == AKind::S_XFER || k == AKind::CAPIC || k == AKind::INDIC || k == AKind::XFER ||
+           k == AKind::LCOUPLE;
 }
 
 struct AnalogModel {
@@ -59,6 +61,10 @@ struct AnalogModel {
     // oneshot (x, y: cntl_array, pw_array; outLow / outHigh, tRise / tFall): clk_trig, its edge, the delays, retrig
     double trig = 0.5, rDelay = 1e-9, fDelay = 1e-9;
     bool posEdge = true, retrig = false, clearNull = false, cntlNull = false;
+    // core: area, length; coreHyst: hysteresis mode (hyst's fields), else pwl on H = mmf / length (x, y: H, B as given)
+    // lcouple: num_turns (gain)
+    double area = 1.0, length = 1.0;
+    bool coreHyst = false;
     // xfer: x its angular frequencies (increasing), sx its complex gains there
     std::vector<std::complex<double>> sx;
     // filesource: x the times, y the values row by row (width columns); fraction: amplstep
@@ -217,6 +223,25 @@ template <typename T>
 inline T smoothCorner(const T &x, double xc, double yc, double d, double s0, double s1) {
     const double xu = xc + d, yu = yc + s1 * d, a = (s1 - s0) / 4.0 / d, b = s1 - 2.0 * a * xu, c = yu - a * xu * xu - b * xu;
     return a * x * x + b * x + c;
+}
+
+// pwl's value at v (x, y with ngspice's extra end pair for pwl / pwlts; core's arrays as given)
+template <typename T>
+inline T pwlValue(const AnalogModel &m, const T &v) {
+    const auto &x = m.x, &y = m.y;
+    const size_t n = x.size();
+    if (v <= (x[0] + x[1]) / 2.0) return y[0] + (v - x[0]) * ((y[1] - y[0]) / (x[1] - x[0]));
+    if (v >= (x[n - 2] + x[n - 1]) / 2.0) return y[n - 1] + (v - x[n - 1]) * ((y[n - 1] - y[n - 2]) / (x[n - 1] - x[n - 2]));
+    for (size_t i = 1; i + 1 < n; ++i) {
+        if (!(v < (x[i] + x[i + 1]) / 2.0)) continue;
+        const double lseg = x[i] - x[i - 1], useg = x[i + 1] - x[i];
+        const double dom = m.fraction ? m.domain * std::min(lseg, useg) : m.domain;
+        const double sl = (y[i] - y[i - 1]) / lseg, su = (y[i + 1] - y[i]) / useg;
+        if (v < x[i] - dom) return y[i] + (v - x[i]) * sl;
+        if (v < x[i] + dom) return smoothCorner(v, x[i], y[i], dom, sl, su);
+        return y[i] + (v - x[i]) * su;
+    }
+    return T(y[n - 1]);  // unreachable: the last midpoint test above
 }
 
 // int / d_dt: ngspice's limit with cm_smooth_corner's corners at lo / hi (range r) on the raw output
@@ -519,23 +544,15 @@ T analogOut(const AnalogModel &m, const std::vector<T> &in, const AnalogState *s
         }
         return m.out == 0 ? -ipos : m.out == 1 ? -ineg : -iout;
     }
-    case AKind::PWL: case AKind::PWLTS: {
-        const auto &x = m.x, &y = m.y;
-        const size_t n = x.size();
-        const T v = m.kind == AKind::PWLTS ? T(t) : in[0];
-        if (v <= (x[0] + x[1]) / 2.0) return y[0] + (v - x[0]) * ((y[1] - y[0]) / (x[1] - x[0]));
-        if (v >= (x[n - 2] + x[n - 1]) / 2.0) return y[n - 1] + (v - x[n - 1]) * ((y[n - 1] - y[n - 2]) / (x[n - 1] - x[n - 2]));
-        for (size_t i = 1; i + 1 < n; ++i) {
-            if (!(v < (x[i] + x[i + 1]) / 2.0)) continue;
-            const double lseg = x[i] - x[i - 1], useg = x[i + 1] - x[i];
-            const double dom = m.fraction ? m.domain * std::min(lseg, useg) : m.domain;
-            const double sl = (y[i] - y[i - 1]) / lseg, su = (y[i + 1] - y[i]) / useg;
-            if (v < x[i] - dom) return y[i] + (v - x[i]) * sl;
-            if (v < x[i] + dom) return smoothCorner(v, x[i], y[i], dom, sl, su);
-            return y[i] + (v - x[i]) * su;
-        }
-        return y[n - 1];  // unreachable: the last midpoint test above
-    }
+    case AKind::CORE:  // ngspice cm_core: flux from mmf, as hyst (mode 2) or as pwl's B(H) times area
+        if (m.coreHyst) return hystOut(m, in[0], st ? hystLeg(m, in[0], *st) : 0).first;
+        return pwlValue(m, T(in[0] / m.length)) * m.area;
+    case AKind::LCOUPLE:
+        // ngspice cm_lcouple: refs the winding's current, the core port's (its flux is minus it); outputs the winding
+        // voltage N dflux/dt (backward difference over the step; 0 at the operating point) and the mmf N i
+        if (m.out == 1) return m.gain * in[0];
+        return h > 0.0 && st ? m.gain * (-in[1] - st->in) / h : T(0.0);
+    case AKind::PWL: case AKind::PWLTS: return pwlValue(m, m.kind == AKind::PWLTS ? T(t) : in[0]);
     case AKind::ASWITCH: {
         using std::exp;
         const double ron = std::max(m.rOn, 1e-3);
@@ -552,7 +569,15 @@ T analogOut(const AnalogModel &m, const std::vector<T> &in, const AnalogState *s
 
 // The small-signal gain of a stateful model at angular frequency w (ngspice's AC_GAIN) beyond the slope its
 // operating-point Jacobian already gives: int gain / jw, d_dt gain jw, s_xfer gain N(jw)/D(jw)
+// Whether input k of a model with an AC function takes analogAcGain (lcouple's winding: only the core port's current)
+inline bool acInput(const AnalogModel &m, size_t k) {
+    if (m.kind == AKind::LCOUPLE) return m.out == 0 && k == 1;
+    return true;
+}
 inline std::complex<double> analogAcGain(const AnalogModel &m, double w) {
+    // lcouple's winding: -jwN on the core port's current (the transient's N dflux/dt, flux = -i). ngspice 47 gives
+    // +jwN, so its winding is an inductor in a transient and the negative of one in AC: a deliberate divergence
+    if (m.kind == AKind::LCOUPLE) return std::complex<double>(0.0, -w * m.gain);
     if (m.kind == AKind::S_XFER) {  // gain N(jw) / D(jw)
         const std::complex<double> s(0.0, w);
         std::complex<double> nn(0.0), dd(0.0), p(1.0);

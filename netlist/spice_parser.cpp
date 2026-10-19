@@ -2736,7 +2736,7 @@ void SPICEParser::resolveXspice(int& at) {
         const auto mc = modelCards_.find(toUpper(a.model));
         if (mc == modelCards_.end()) throw std::runtime_error(a.name + ": no .model card " + a.model);
         const ModelCard* c = &mc->second;
-        static const std::set<std::string> analogKinds = {"GAIN", "SUMMER", "MULT", "DIVIDE", "LIMIT", "CLIMIT", "PWL", "ASWITCH", "INT", "D_DT", "S_XFER", "SLEW", "HYST", "SINE", "TRIANGLE", "SQUARE", "ZENER", "MULTI_INPUT_PWL", "OTA", "ILIMIT", "ONESHOT", "POTENTIOMETER", "CAPACITORIC", "INDUCTORIC", "SIDIODE", "PSWITCH", "MEMRISTOR", "FILESOURCE", "PWLTS", "XFER"};
+        static const std::set<std::string> analogKinds = {"GAIN", "SUMMER", "MULT", "DIVIDE", "LIMIT", "CLIMIT", "PWL", "ASWITCH", "INT", "D_DT", "S_XFER", "SLEW", "HYST", "SINE", "TRIANGLE", "SQUARE", "ZENER", "MULTI_INPUT_PWL", "OTA", "ILIMIT", "ONESHOT", "POTENTIOMETER", "CAPACITORIC", "INDUCTORIC", "SIDIODE", "PSWITCH", "MEMRISTOR", "FILESOURCE", "PWLTS", "XFER", "CORE", "LCOUPLE"};
         if (analogKinds.count(c->type)) { resolveXspiceAnalog(a, *c, analogNode); continue; }
         const auto k = kinds.find(c->type);
         if (k == kinds.end()) throw std::runtime_error(a.name + ": XSPICE model type " + c->type + " is not supported yet");
@@ -2989,6 +2989,8 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         {"ZENER", {AKind::ZENER, {{'b', "gd", false}}}},
         {"MULTI_INPUT_PWL", {AKind::MIPWL, {{'i', "vd", true}, {'o', "vd", false}}}},
         {"OTA", {AKind::OTA, {{'b', "gd", false}, {'b', "g", false}}}},
+        {"CORE", {AKind::CORE, {{'b', "gd", false, "g gd"}}}},
+        {"LCOUPLE", {AKind::LCOUPLE, {{'h', "hd", false, "h hd"}, {'h', "hd", false}}}},
         {"XFER", {AKind::XFER, {{'i', "v", false}, {'o', "v", false}}}},
         {"PWLTS", {AKind::PWLTS, {{'o', "v", false}}}},
         {"FILESOURCE", {AKind::FILESRC, {{'o', "v", true}}}},
@@ -3015,7 +3017,7 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         }
         static const std::set<std::string> in = {"v", "vd", "i", "id", "vnam"}, out = {"v", "vd", "i", "id"};
         if (sp.nullOk && p < w.size() && toUpper(w[p]) == "NULL") { ++p; pt.type = "null"; return pt; }
-        if (!(sp.dir == 'h' ? pt.type == "hd" : sp.dir == 'b' ? (sp.allow ? (" " + std::string(sp.allow) + " ").find(" " + pt.type + " ") != std::string::npos : pt.type == sp.def)
+        if (!(sp.dir == 'h' || sp.dir == 'b' ? (sp.allow ? (" " + std::string(sp.allow) + " ").find(" " + pt.type + " ") != std::string::npos : pt.type == sp.def)
                             : (sp.dir == 'i' ? in : out).count(pt.type)))
             throw std::runtime_error(a.name + ": port type %" + pt.type + " is not allowed (or not supported yet) on this " + c.type + " port");
         const bool diff = pt.type == "vd" || pt.type == "id" || pt.type == "gd" || pt.type == "hd";
@@ -3199,6 +3201,33 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         m->gate = static_cast<int>(gi - gates.begin());
         break;
     }
+    case AKind::CORE: {
+        const double mode = num("MODE", 1.0);
+        m->coreHyst = mode == 2.0;
+        m->domain = num("INPUT_DOMAIN", 0.01); m->fraction = flag("FRACTION", true);
+        m->inLow = num("IN_LOW", 0.0); m->inHigh = num("IN_HIGH", 1.0); m->hyst = num("HYST", 0.1);
+        m->lo = num("OUT_LOWER_LIMIT", 0.0); m->hi = num("OUT_UPPER_LIMIT", 1.0);
+        allowed.insert("H_ARRAY"); allowed.insert("B_ARRAY"); allowed.insert("AREA"); allowed.insert("LENGTH");
+        const auto hi = c.vectors.find("H_ARRAY"), bi = c.vectors.find("B_ARRAY");
+        if (hi == c.vectors.end() || bi == c.vectors.end() || hi->second.size() != bi->second.size() || hi->second.size() < 2)
+            throw std::runtime_error("model " + c.name + ": core needs h_array and b_array of the same size, 2 points at least");
+        if (!c.params.count("AREA") || !c.params.count("LENGTH") || !(c.params.at("AREA") > 0.0) || !(c.params.at("LENGTH") > 0.0))
+            throw std::runtime_error("model " + c.name + ": core needs area > 0 and length > 0");
+        m->x = hi->second; m->y = bi->second; m->area = c.params.at("AREA"); m->length = c.params.at("LENGTH");
+        if (m->coreHyst) {  // ngspice requires the pwl parameters in hysteresis mode too, and ignores them
+            if (!(m->inHigh > m->inLow)) throw std::runtime_error("model " + c.name + ": core (hysteresis) needs in_high > in_low");
+            break;
+        }
+        for (size_t i = 1; i < m->x.size(); ++i) {
+            if (!(m->x[i] > m->x[i - 1])) throw std::runtime_error("model " + c.name + ": core h_array must increase");
+            if (!m->fraction && m->x[i] - m->x[i - 1] < 2.0 * m->domain)  // ngspice then gives no output at all
+                throw std::runtime_error("model " + c.name + ": core h_array steps must be at least 2 input_domain (fraction false)");
+        }
+        break;
+    }
+    case AKind::LCOUPLE:
+        m->gain = num("NUM_TURNS", 1.0);
+        break;
     case AKind::XFER: {
         // ngspice cm_xfer's table: span numbers per entry, the frequency [Hz] then a pair at offset (magnitude in dB
         // and phase in degrees by default; r_i: real / imaginary; db false: magnitude; rad: phase in radians)
@@ -3388,9 +3417,24 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
             refs.push_back(r);
         }
     }
-    // conductance ports (g, gd): their voltages follow the inputs, in port order, for every output
+    // conductance ports (g, gd): their voltages follow the inputs, in port order, for every output; then the
+    // current of each h / hd port (a voltage source: its index among the block's voltage behavioural sources,
+    // counting the outputs below in their order)
     for (size_t s = 0; s < specs.size(); ++s)
         if (specs[s].dir == 'b') for (const auto& pt : ports[s]) refs.push_back({0, pt.n1, pt.n2, ""});  // NULL: 0 - 0
+    {
+        int bv = 0;
+        for (const auto& o : blk.behavioural) bv += o.voltage;
+        for (size_t s = 0; s < specs.size(); ++s) {
+            if (specs[s].dir == 'i') continue;
+            for (const auto& pt : ports[s]) {
+                if (pt.type == "null") continue;
+                const bool v = pt.type == "v" || pt.type == "vd" || pt.type == "h" || pt.type == "hd";
+                if (specs[s].dir == 'h') refs.push_back({3, bv, 0, ""});
+                bv += v;
+            }
+        }
+    }
     // outputs: a voltage (v, vd) or current (i, id; g, gd: the port's own current), each its own model copy
     // knowing which output it is (AnalogModel::out)
     int outIndex = 0;
@@ -3401,13 +3445,8 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
             Behavioural b;
             b.name = toUpper(a.name);
             b.outPos = pt.n1; b.outNeg = pt.n2;
-            b.voltage = pt.type == "v" || pt.type == "vd" || pt.type == "hd";
+            b.voltage = pt.type == "v" || pt.type == "vd" || pt.type == "h" || pt.type == "hd";
             b.refs = refs;
-            if (pt.type == "hd") {  // its own branch current, counted among the block's voltage behavioural sources
-                int bv = 0;
-                for (const auto& o : blk.behavioural) bv += o.voltage;
-                b.refs.push_back({3, bv, 0, ""});
-            }
             b.cm = m;
             if (outIndex > 0) {
                 auto copy = std::make_shared<xspice::AnalogModel>(*m);

@@ -1710,7 +1710,11 @@ public:
         b.cmState->v = xspice::oneshotStep(*b.cm, in[0], in[1], in[2], *b.cmState, t, h).st;
         return;
       }
-      if (b.cm->kind == xspice::AKind::HYST) {
+      if (b.cm->kind == xspice::AKind::LCOUPLE) {  // the flux at this point (minus the core port's current)
+        b.cmState->in = -in[1];
+        return;
+      }
+      if (b.cm->kind == xspice::AKind::HYST || (b.cm->kind == xspice::AKind::CORE && b.cm->coreHyst)) {
         const double v = in.empty() ? 0.0 : in[0];
         b.cmState->leg = xspice::hystOut(*b.cm, v, xspice::hystLeg(*b.cm, v, *b.cmState)).second;
         return;

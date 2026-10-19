@@ -1087,7 +1087,9 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
     if (!b.cm || !xspice::acFunction(b.cm->kind)) return;
     const auto cm = b.cm;
     const int np = sl.map(b.outPos) - 1, nn = sl.map(b.outNeg) - 1;
-    for (const auto &r : b.refs) {
+    for (size_t k = 0; k < b.refs.size(); ++k) {
+      const auto &r = b.refs[k];
+      if (!xspice::acInput(*cm, k)) continue;
       const int ca = r.kind == 0 ? sl.map(r.a) - 1 : r.kind == 1 ? sl.vs + r.a : r.kind == 2 ? sl.ind + r.a : sl.bv + r.a;
       const int cb = r.kind == 0 ? sl.map(r.b) - 1 : -1;
       auto put = [&](int rr, int cc, double sign) {

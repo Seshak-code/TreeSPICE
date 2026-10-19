@@ -382,6 +382,19 @@ int main() {
             check(ok2 && near(ra.waveformPoints[0].nodeVoltages[1], 0.7597469, 1e-6),
                   "XSPICE pswitch in AC is its resistance (" + (ok2 ? std::to_string(ra.waveformPoints[0].nodeVoltages[1]) : ra.errorDetail) + " V)");
         }
+        // XSPICE lcouple on a linear core in AC is the inductor N^2 mu A / length = 100 uH it is in a transient
+        // (ngspice 47's winding gain is +jwN against its transient's -N d/dt on the core current: a negative
+        // inductor in AC): re jwl/(1+jwl) = 0.283043 at 1 kHz over 1 ohm, as the L element beside it
+        {
+            req.source.payload = "* lcouple ac\nVS s 0 DC 0 AC 1\nR1 s x 1\na1 x 0 mm 0 lc\n.model lc lcouple(num_turns=10)\n"
+                                 "a2 mm 0 cr\n.model cr core(h_array=[-1000 1000] b_array=[-1 1] area=1e-4 length=0.1)\n"
+                                 "R2 s y 1\nL2 y 0 1e-4\n.ac lin 1 1k 1k\n";
+            const auto ra = engine->createSession()->runAC(req, cb);
+            const bool ok2 = ra.converged && ra.waveformPoints.size() == 1;
+            check(ok2 && near(ra.waveformPoints[0].nodeVoltages[1], ra.waveformPoints[0].nodeVoltages[2], 1e-9) &&
+                      near(ra.waveformPoints[0].nodeVoltages[1], 0.283043, 1e-5),
+                  "XSPICE lcouple in AC is its inductor (" + (ok2 ? std::to_string(ra.waveformPoints[0].nodeVoltages[1]) : ra.errorDetail) + " V)");
+        }
         // XSPICE inductoric in AC is an inductor's admittance 1/(jwl) (ngspice 47 gives jwl: a shunt one read as the
         // series divider, 0.8467 V here): the same as an L element, re jwl/(1+jwl) = 0.283043 at 100 kHz over 1 ohm
         {
