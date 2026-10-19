@@ -93,6 +93,7 @@ inline JfetModel<double> jfetModel(const JFET& j, double gmin = PhysicsConstants
     p.beta = j.beta * j.area; p.vto = j.Vto; p.lambda = j.lambda; p.b = c.b;
     p.is = c.is * j.area; p.vt = c.n * j.thermalVoltage_V_T_V;
     p.cgs = c.cgs * j.area; p.cgd = c.cgd * j.area; p.pb = c.pb; p.fc = c.fc;
+    p.mes = j.mes; p.alpha = c.alpha;
     return p;
 }
 

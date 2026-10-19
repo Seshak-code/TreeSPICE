@@ -12,7 +12,7 @@ ENGINE = next((p for p in (os.path.join(ROOT, "build", "acutesim_engine_dump"),
                if os.access(p, os.X_OK)), os.path.join(ROOT, "build", "acutesim_engine_dump"))
 GROUND = {"0", "GND"}  # ngspice: vss / ground are ordinary nodes
 NODE_POS = {**{c: [1, 2] for c in "RCLVIDHFB"}, **{c: [1, 2, 3, 4] for c in "MEGT"},
-            "Q": [1, 2, 3], "J": [1, 2, 3], "S": [1, 2, 3, 4], "W": [1, 2], "K": []}
+            "Q": [1, 2, 3], "J": [1, 2, 3], "Z": [1, 2, 3], "S": [1, 2, 3, 4], "W": [1, 2], "K": []}
 SUFFIX = {"t": 1e12, "g": 1e9, "meg": 1e6, "k": 1e3, "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15}
 
 # Tolerance policy (all overridable by flags).

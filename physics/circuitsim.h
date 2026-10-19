@@ -899,9 +899,10 @@ public:
     else return v + T(sh->d[k], sh->seed ? sh->d[k] : 0.0);
   }
 
+  // hist: a MESFET's charges advance from the last accepted step (j.st); false: the operating point itself
   template <typename T>
   int junctionCharges(const Junction &j, const std::array<T, 7> &x, T *v, T *q,
-                      const JShift *sh = nullptr) const {
+                      const JShift *sh = nullptr, bool hist = true) const {
     if (j.d) {
       v[0] = shifted(T(x[2] - x[1]), sh, 0);
       q[0] = diode_iq(v[0], diodeModel(*j.d, gmin_)).second;
@@ -910,7 +911,8 @@ public:
     if (j.f) {
       const double t = jfetType(*j.f);
       v[0] = shifted(T(t * (x[1] - x[2])), sh, 0); v[1] = shifted(T(t * (x[1] - x[0])), sh, 1);
-      const auto c = jfet_charges(v[0], v[1], jfetModel(*j.f, gmin_));
+      const double prev[4] = {j.st ? j.st->v[0][0] : 0.0, j.st ? j.st->v[0][1] : 0.0, j.st ? j.st->q[0] : 0.0, j.st ? j.st->q[1] : 0.0};
+      const auto c = jfet_charges(v[0], v[1], jfetModel(*j.f, gmin_), hist && j.st ? prev : nullptr);
       q[0] = c[0]; q[1] = c[1];
       return 2;
     }

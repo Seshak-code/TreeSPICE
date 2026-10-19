@@ -225,7 +225,7 @@ int main() {
         // (an NPN would not conduct at all; ignoring IS from the card gives 3.662)
         check(r.converged && near(V(r, 2), 3.7205, 2e-3),
               ".model after the device still makes it a PNP (V(e)=" + std::to_string(V(r, 2)) + ")");
-        r = run(mode, "* unknown\nV1 1 0 5\nZ1 1 0 5\n.op\n");
+        r = run(mode, "* unknown\nV1 1 0 5\n9Z1 1 0 5\n.op\n");  // no element letter (Z is a MESFET)
         check(!r.converged && r.errorDetail.find("unknown element") != std::string::npos,
               "unknown element is a parse error: " + r.errorDetail);
         // MNA branch currents: F/H read V1's branch current (1e-6 tolerance: every
@@ -456,6 +456,8 @@ int main() {
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 NM OFF\n.model NM NMOS\n", "OFF is not supported"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 MM IC=1,1,0\n.model MM NMOS\n", "IC is not supported"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 1 0 VM THERMAL\n.model VM VDMOS(RTHJC=1)\n", "or 5 (d g s tj tc) with THERMAL"},
+            {"V1 1 0 DC 1\nR1 1 2 1k\nZ1 2 1 0 MZ\n.model MZ NMF(LEVEL=2)\n", "MESA) is not supported yet"},
+            {"V1 1 0 DC 1\nR1 1 2 1k\nZ1 2 1 0 MZ\n.model MZ NJF\n", "not an NMF/PMF model"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 1 0 3 4 VM THERMAL\n.model VM VDMOS\n", "THERMAL needs RTHJC"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 1 0 VM W=1u\n.model VM VDMOS\n", "a VDMOS takes M, TEMP, DTEMP and THERMAL only"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nQ1 2 2 0 NM\n.model NM NMOS\n", "is NMOS, not a NPN/PNP model"},
@@ -593,6 +595,12 @@ int main() {
             const auto a = run(PrecisionMode::Native_F64, std::string("hicum\nVC c 0 2\nVB b 0 0.8\nQ1 c b 0 q area=2\n.model q npn level=8 ") + card + "\n.op\n.end\n");
             check(!a.converged && a.errorDetail.find("AREA/M on a HICUM device") != std::string::npos,
                   "HICUM AREA is an explicit error (" + a.errorDetail + ")");
+        }
+        {   // A MESFET's positional area is its AREA (ngspice 47's INP2Z drops it for MES, keeping area= only)
+            const auto r = run(PrecisionMode::Native_F64, "z\nVDD 1 0 DC 3\nRA 1 2 1k\nRB 1 3 1k\nRC 1 4 1k\n"
+                               "Z1 2 0 0 mn 2\nZ2 3 0 0 mn area=2\nZ3 4 0 0 mn\n.model mn NMF(VTO=-1.5 BETA=1e-3)\n.op\n.end\n");
+            check(r.converged && near(V(r, 2), V(r, 3), 1e-9) && !near(V(r, 2), V(r, 4), 1e-3),
+                  "MESFET positional area is AREA (" + std::to_string(V(r, 2)) + " V)");
         }
         {   // m= on a subcircuit multiplies its OSDI devices too: an m=3 cell keeps the m=1 cell's voltages
             // (ngspice 47 multiplies only the non-OSDI devices, so it cannot be the reference)

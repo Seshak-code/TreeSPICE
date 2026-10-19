@@ -696,7 +696,7 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
     std::array<double, 7> xv{};
     for (int k = 0; k < j.terms; ++k) xv[k] = getV(j.n[k]);
     double v[5], q[5];
-    const int K = junctionCharges(j, xv, v, q);
+    const int K = junctionCharges(j, xv, v, q, nullptr, false);
     auto given = [](const double *ic, int n) { for (int k = 0; k < n; ++k) if (!std::isnan(ic[k])) return true; return false; };
     auto or_ = [](double ic, double node) { return std::isnan(ic) ? node : ic; };
     const bool fromIc = uic && (j.d ? given(j.d->ic, 1) : j.f ? given(j.f->ic, 2) : given(j.q->ic, 2));
@@ -1108,7 +1108,7 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
       std::array<Dual<double>, 7> x;
       for (int k = 0; k < 7; ++k) x[k] = Dual<double>(V(k), k < j.terms && j.n[k] == j.n[u] ? 1.0 : 0.0);
       Dual<double> v[5], q[5];
-      const int K = junctionCharges(j, x, v, q);
+      const int K = junctionCharges(j, x, v, q, nullptr, false);
       double Q[7] = {};
       for (int k = 0; k < K; ++k) {
         const double s = (j.q && k == 3 ? j.subSign : 1.0) * type;  // substrate: to Junction::sub

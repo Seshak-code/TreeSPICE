@@ -1,0 +1,7 @@
+* MESFET (ngspice Z, Statz LEVEL 1): output curves into reverse, ALPHA knee, B doping tail, LAMBDA, RD / RS, gate diodes, AREA
+VD d 0 DC 3
+VG g 0 DC 0
+Z1 d g 0 mn area=2
+.model mn NMF(VTO=-1.5 BETA=1.2e-3 B=0.4 ALPHA=2.5 LAMBDA=0.05 RD=20 RS=15 IS=1e-13 PB=0.8)
+.dc VD -1 4 0.05 VG -2 0.6 0.4
+.end

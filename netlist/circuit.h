@@ -754,6 +754,7 @@ struct JFET {
     int source = -1;                      // S terminal
     std::string modelName = "default";
     bool isNChannel = true;               // true=N-ch, false=P-ch
+    bool mes = false;                     // a Z element: ngspice's MESFET (Statz, mes*.c) on the JFET terminals
     double m = 1.0;                       // M, already in area; flicker noise is M KF (Id/M)^AF (ngspice jfetnoi)
     bool off = false;                     // OFF, as Diode::off
     double ic[2] = {NAN, NAN};            // IC=vds,vgs: the junctions' state at t = 0 under UIC (NaN: nodes)
@@ -768,6 +769,7 @@ struct JFET {
     // (scales BETA, IS, CGS, CGD; RD and RS become parser-added series resistors)
     struct Card {
         double is = 1e-14, n = 1.0, b = 1.0, cgs = 0.0, cgd = 0.0, pb = 1.0, fc = 0.5, kf = 0.0, af = 1.0;
+        double alpha = 2.0;  // MESFET saturation voltage parameter (B is its doping tail)
     } card;
     double area = 1.0;
 

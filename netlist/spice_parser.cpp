@@ -661,7 +661,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             // Choose target block: subcircuit body or global
             TensorBlock& blk = inSubckt_ ? subcktBlock_ : result_.netlist.globalBlock;
             char type = static_cast<char>(std::toupper(static_cast<unsigned char>(keyword[0])));
-            mult_ = std::strchr("RLIGFJ", type) ? takeMultiplier(tok) : 1.0;
+            mult_ = std::strchr("RLIGFJZ", type) ? takeMultiplier(tok) : 1.0;
 
             switch (type) {
                 case 'R': parseResistor(tok, blk);   break;
@@ -674,6 +674,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 case 'M': parseMosfet(tok, blk);      break;
                 case 'Q': parseBJT(tok, blk);         break;
                 case 'J': parseJFET(tok, blk);        break;
+                case 'Z': parseJFET(tok, blk); blk.jfets.back().mes = true; break;  // MESFET: d g s model
                 case 'S': case 'W': parseSwitch(tok, blk); break;
                 case 'N': parseOsdiDevice(tok, blk);  break;
                 case 'A':
@@ -1464,6 +1465,26 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         }
         for (auto& j : blk.jfets) if (const ModelCard* c = sensed(card(j.modelName), j.instanceName)) {
             sensList(blk, j.instanceName, *c);
+            if (j.mes) {  // ngspice mes*.c (LEVEL 1, Statz): no temperature dependence, its junctions at REFTEMP's kT/q
+                if (c->type != "NMF" && c->type != "PMF")
+                    throw std::runtime_error(j.instanceName + ": model " + c->name + " is " + c->type + ", not an NMF/PMF model");
+                if (c->get("LEVEL", 1.0) != 1.0)
+                    throw std::runtime_error("model " + c->name + ": MESFET LEVEL 2-4 (MESA) is not supported yet");
+                supported(c, {"VTO", "VT0", "ALPHA", "BETA", "LAMBDA", "B", "RD", "RS", "CGS", "CGD", "PB", "IS", "FC", "KF", "AF"});
+                bounded(c, {"BETA", "LAMBDA", "B", "RD", "RS", "CGS", "CGD", "IS", "KF"}, {"ALPHA", "AF"});
+                if (!(c->get("PB", 1.0) > 0.5)) throw std::runtime_error("model " + c->name + ": PB must be > 0.5 (the Statz charge)");
+                j.isNChannel = c->type == "NMF";
+                j.thermalVoltage_V_T_V = devtemp::vt(devtemp::REFTEMP);
+                j.beta = c->get("BETA", 2.5e-3);
+                j.Vto = c->params.count("VT0") ? c->get("VT0", -2.0) : c->get("VTO", -2.0);
+                j.lambda = c->get("LAMBDA", 0.0);
+                auto& k = j.card;
+                k.n = 1.0; k.b = c->get("B", 0.3); k.alpha = c->get("ALPHA", 2.0); k.is = c->get("IS", 1e-14);
+                k.pb = c->get("PB", 1.0); k.fc = c->get("FC", 0.5);  // FC: mestemp's f1..f3, which no equation reads
+                k.cgs = c->get("CGS", 0.0); k.cgd = c->get("CGD", 0.0);
+                k.kf = c->get("KF", 0.0); k.af = c->get("AF", 1.0);
+                continue;
+            }
             if (c->type != "NJF" && c->type != "PJF" && c->type != "NJFET" && c->type != "PJFET")
                 throw std::runtime_error(j.instanceName + ": model " + c->name + " is " + c->type + ", not an NJF/PJF model");
             supported(c, {"BETA", "VTO", "LAMBDA", "IS", "N", "B", "CGS", "CGD", "PB", "FC", "KF", "AF", "RD", "RS",

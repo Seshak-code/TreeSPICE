@@ -4,6 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <array>
+#include <type_traits>
 
 /*
  * device_physics.h - Pure Constitutive Equations for Semiconductor Devices
@@ -680,7 +681,34 @@ struct JfetModel {
     P is = 1e-14, vt = PhysicsConstants::V_THERMAL_NOM; // IS*AREA, N*Vt (gate junctions)
     P cgs = 0.0, cgd = 0.0, pb = 1.0, fc = 0.5;        // CGS*AREA, CGD*AREA, PB, FC
     P gmin = PhysicsConstants::JUNCTION_GMIN;
+    bool mes = false;                                  // MESFET (ngspice mesload): Statz channel and charge, B its doping tail
+    P alpha = 2.0;
 };
+
+// MESFET drain current of the normal mode (ngspice mesload, Statz): BETA vgst^2 / (1 + B vgst) (1 + LAMBDA vds),
+// times 1 - (1 - ALPHA vds / 3)^3 below vds = 3 / ALPHA
+template <typename T, typename P>
+inline T mes_channel(T vgst, T vds, const JfetModel<P>& p)
+{
+    if (vgst <= P(0.0)) return T(0.0);
+    T id = p.beta * (1.0 + p.lambda * vds) * vgst * vgst / (1.0 + p.b * vgst);
+    if (vds < 3.0 / p.alpha) { const T a = 1.0 - p.alpha * vds / 3.0; id = id * (1.0 - a * a * a); }
+    return id;
+}
+
+// MESFET total gate charge at vgs, vgd (ngspice qggnew, Statz)
+template <typename T, typename P>
+inline T mes_qgg(T vgs, T vgd, const JfetModel<P>& p)
+{
+    using std::sqrt;
+    const P vcap = 1.0 / p.alpha, del = 0.2, vmax = 0.5;
+    const T veroot = sqrt((vgs - vgd) * (vgs - vgd) + vcap * vcap);
+    const T veff1 = 0.5 * (vgs + vgd + veroot), veff2 = veff1 - veroot;
+    const T vnroot = sqrt((veff1 - p.vto) * (veff1 - p.vto) + del * del);
+    T vnew1 = 0.5 * (veff1 + p.vto + vnroot), ext(0.0);
+    if (vnew1 >= vmax) { ext = (vnew1 - vmax) / std::sqrt(1.0 - vmax / p.pb); vnew1 = T(vmax); }
+    return p.cgs * (2.0 * p.pb * (1.0 - sqrt(1.0 - vnew1 / p.pb)) + ext) + p.cgd * veff2;
+}
 
 // Drain current of the normal mode (vds >= 0) at overdrive vgst (ngspice jfetload).
 template <typename T, typename P>
@@ -706,15 +734,24 @@ inline JfetEval<T> jfet_eval(T vgs, T vgd, const JfetModel<P>& p)
     JfetEval<T> r;
     r.igs = spice_junction(vgs, p.is, p.vt) + p.gmin * vgs;
     r.igd = spice_junction(vgd, p.is, p.vt) + p.gmin * vgd;
-    r.id = vds >= P(0.0) ? jfet_channel(vgs - p.vto, vds, p) : -jfet_channel(vgd - p.vto, -vds, p);
+    if (p.mes) r.id = vds >= P(0.0) ? mes_channel(vgs - p.vto, vds, p) : -mes_channel(vgd - p.vto, -vds, p);
+    else r.id = vds >= P(0.0) ? jfet_channel(vgs - p.vto, vds, p) : -jfet_channel(vgd - p.vto, -vds, p);
     return r;
 }
 
-// Depletion charges of the gate-source and gate-drain junctions (grading 0.5).
+// Depletion charges of the gate-source and gate-drain junctions (grading 0.5). A MESFET's gate charge
+// Q(vgs, vgd) splits between them as ngspice mesload does from the last accepted step prev = {vgs, vgd, qgs, qgd}:
+// each takes the mean of its two one-sided differences, so qgs + qgd follows Q. prev null: the operating point
+// itself (the small-signal C = dQ/dvgs, dQ/dvgd).
 template <typename T, typename P>
-inline std::array<T, 2> jfet_charges(T vgs, T vgd, const JfetModel<P>& p)
+inline std::array<T, 2> jfet_charges(T vgs, T vgd, const JfetModel<P>& p, const double* prev = nullptr)
 {
-    return {depletion_charge(vgs, p.cgs, P(0.5), p.pb, p.fc), depletion_charge(vgd, p.cgd, P(0.5), p.pb, p.fc)};
+    if (!p.mes) return {depletion_charge(vgs, p.cgs, P(0.5), p.pb, p.fc), depletion_charge(vgd, p.cgd, P(0.5), p.pb, p.fc)};
+    auto val = [](const T& v) { if constexpr (std::is_same_v<T, double>) return v; else return v.val; };
+    const double vgs1 = prev ? prev[0] : val(vgs), vgd1 = prev ? prev[1] : val(vgd);
+    const T qa = mes_qgg(vgs, vgd, p), qb = mes_qgg(T(vgs1), vgd, p), qc = mes_qgg(vgs, T(vgd1), p);
+    const double qd = mes_qgg(vgs1, vgd1, p);
+    return {(prev ? prev[2] : 0.0) + 0.5 * (qa - qb + qc - qd), (prev ? prev[3] : 0.0) + 0.5 * (qa - qc + qb - qd)};
 }
 
 

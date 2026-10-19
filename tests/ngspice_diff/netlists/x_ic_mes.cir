@@ -1,0 +1,8 @@
+* MESFET IC=vds,vgs under UIC: the Statz gate charge starts there
+VDD d0 0 DC 5
+RD d0 d 2k
+RG 0 g 1meg
+Z1 d g 0 mn IC=3,-0.8
+.model mn NMF(VTO=-1.5 BETA=1e-3 B=0.3 ALPHA=2 CGS=2p CGD=1p PB=0.8)
+.tran 1n 1u uic
+.end
