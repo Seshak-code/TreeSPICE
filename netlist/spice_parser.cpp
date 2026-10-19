@@ -1395,7 +1395,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                           "IBV", "IB", "EG", "XTI", "TNOM", "TM1", "TM2", "TCV", "TBV1", "TTT1", "TTT2", "TRS", "TRS1", "TRS2",
                           "JSW", "ISW", "NS", "CJSW", "MJSW", "PHP", "VJSW", "IKF", "IK", "IKR", "IKP", "KF", "AF", "ISR", "NR",
                           "NBV", "NZ", "CTA", "CTC", "CTP", "TPB", "TVJ", "TPHP", "TLEVC", "TLEV", "CJP", "FCS", "GAP1", "GAP2",
-                          "JTUN", "JTUNSW", "NTUN", "XTITUN", "KEG", "AREA", "PJ", "TREF", "VP",
+                          "JTUN", "JTUNSW", "NTUN", "XTITUN", "KEG", "AREA", "PJ", "TREF", "VP", "RSW",
                           "FV_MAX", "BV_MAX", "ID_MAX", "TE_MAX", "PD_MAX",  // SOA: ngspice's warnings only
                           "RTH0", "CTH0"});  // self-heating: only a THERMAL instance (D a k tj, not supported yet) uses them
             // Temperature selectors (probed on ngspice 47): TLEV 1 scales BV by (1 - TCV dT) where 0 subtracts TCV dT
@@ -1406,7 +1406,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             const double tlev = c->get("TLEV", 0.0), tlevc = c->get("TLEVC", 0.0);
             if ((tlev != 0.0 && tlev != 1.0 && tlev != 2.0) || (tlevc != 0.0 && tlevc != 1.0))
                 throw std::runtime_error("model " + c->name + ": TLEV other than 0-2 / TLEVC other than 0-1 is not supported yet");
-            bounded(c, {"IS", "JS", "RS", "CJO", "CJ0", "CJ", "M", "MJ", "TT", "JSW", "ISW", "CJSW", "MJSW", "IKF", "IK", "IKR",
+            bounded(c, {"IS", "JS", "RS", "RSW", "CJO", "CJ0", "CJ", "M", "MJ", "TT", "JSW", "ISW", "CJSW", "MJSW", "IKF", "IK", "IKR",
                         "IKP", "KF", "ISR", "JTUN", "JTUNSW", "AREA", "PJ"},
                     {"N", "BV", "VB", "VRB", "VAR", "NS", "PHP", "VJSW", "NR", "NBV", "NZ", "NTUN"});  // ngspice: BV = 0 breaks down at 0 V
             if (!d.areaGiven) d.area *= c->get("AREA", 1.0);  // diosetup: the model's AREA / PJ unless the instance gives one
@@ -1427,6 +1427,10 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             k.isr = c->get("ISR", 0.0); k.nr = c->get("NR", 2.0); k.nbv = first(c, {"NBV", "NZ"}, NAN);
             k.jtun = c->get("JTUN", 0.0); k.jtunsw = c->get("JTUNSW", 0.0); k.ntun = c->get("NTUN", 30.0);
             k.vp = c->get("VP", 0.0);
+            k.rswGiven = c->params.count("RSW") > 0; k.rsw = c->get("RSW", 0.0);
+            // ngspice lumps a separate sidewall's charge onto the bottom junction under soft recovery (dioload), whose
+            // small-signal capacitance then is not that charge's
+            if (k.rswGiven && k.qp()) throw std::runtime_error("model " + c->name + ": VP with RSW is not supported yet");
             if (!(k.m < 1.0 && k.mjsw < 1.0 && k.vj > 0.0 && k.fc < 1.0 && k.fcs < 1.0 && k.rs >= 0.0 && k.ibv > 0.0))
                 throw std::runtime_error("model " + c->name + ": needs M, MJSW < 1, VJ > 0, FC, FCS < 1, RS >= 0, IBV > 0");
             using namespace devtemp;
@@ -1457,6 +1461,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (k.fc * k.vj > 1.0) k.vj = 1.0 / k.fc;  // diotemp: the depletion knee stays below 1 V
             k.tt *= poly(c->get("TTT1", 0.0), c->get("TTT2", 0.0), dt);
             k.rs *= poly(first(c, {"TRS1", "TRS"}, 0.0), c->get("TRS2", 0.0), dt);
+            k.rsw *= poly(first(c, {"TRS1", "TRS"}, 0.0), c->get("TRS2", 0.0), dt);
             const double tcv = first(c, {"TCV", "TBV1"}, 0.0);
             if (k.bvGiven) k.bv = tlev != 0.0 ? k.bv * (1.0 - tcv * dt) : k.bv - tcv * dt;
         }

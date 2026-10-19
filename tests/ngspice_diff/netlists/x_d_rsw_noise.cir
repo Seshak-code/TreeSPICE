@@ -1,0 +1,7 @@
+* Diode RSW noise: RSW's thermal noise and the sidewall junction's shot and flicker noise at A_sw
+V1 1 0 DC 0.7 AC 1
+R1 1 2 200
+D1 2 0 DN PJ=40u
+.model DN D(IS=1e-14 RS=5 JSW=4e-9 NS=1.1 RSW=800 KF=1e-14 AF=1.2)
+.noise v(2) V1 dec 10 10 100Meg
+.end

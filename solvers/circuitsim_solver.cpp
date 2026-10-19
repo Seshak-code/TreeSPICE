@@ -732,7 +732,7 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
     auto given = [](const double *ic, int n) { for (int k = 0; k < n; ++k) if (!std::isnan(ic[k])) return true; return false; };
     auto or_ = [](double ic, double node) { return std::isnan(ic) ? node : ic; };
     const bool fromIc = uic && (j.d ? given(j.d->ic, 1) : j.f ? given(j.f->ic, 2) : given(j.q->ic, 2));
-    if (uic && j.d && given(j.d->ic, 1)) { auto xi = xv; xi[2] = xi[1] + j.d->ic[0]; junctionCharges(j, xi, v, q, nullptr, false); }
+    if (uic && j.d && given(j.d->ic, 1)) { auto xi = xv; xi[2] = xi[4] = xi[1] + j.d->ic[0]; junctionCharges(j, xi, v, q, nullptr, false); }
     else if (uic && j.f && given(j.f->ic, 2)) {  // node vds, vgs: D - S, G - S
       const double t = jfetType(*j.f), vgs = or_(j.f->ic[1], xv[1] - xv[2]), vds = or_(j.f->ic[0], xv[0] - xv[2]);
       v[0] = t * vgs; v[1] = t * (vgs - vds);
@@ -1224,7 +1224,7 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
         const double s = (j.q && k == 3 ? j.subSign : 1.0) * type;  // substrate: to Junction::sub
         Q[from[k]] += s * q[k].grad;
         Q[j.q && k == 3 ? j.sub : to[k]] -= s * q[k].grad;
-        if (j.d && k == 1) { const double g = (1.0 - j.d->card.vp) / j.d->card.tt * q[k].grad; Q[2] += g; Q[1] -= g; }  // soft recovery
+        if (j.d && k == 1 && j.d->card.qp()) { const double g = (1.0 - j.d->card.vp) / j.d->card.tt * q[k].grad; Q[2] += g; Q[1] -= g; }  // soft recovery
       }
       for (int t = 0; t < j.terms; ++t) if (Q[t] != 0.0) addC(j.n[t] - 1, j.n[u] - 1, Q[t]);
     }
@@ -1360,11 +1360,18 @@ CircuitSim::NoiseResult CircuitSim::solveNoise(TensorNetlist &netlist, const std
     if (j.d) {
       const auto m = diodeModel(*j.d, gmin_);
       if (m.rs > 0.0) gens.push_back({j.n[0], j.n[2], kT4 / m.rs});
-      const double id = diode_iq(V(j.n[2]) - V(j.n[1]), m).first;
-      gens.push_back({j.n[2], j.n[1], q2 * std::abs(id)});
-      if (j.d->card.kf != 0.0)  // flicker: M KF (|Id|/M)^AF / f
-        gens.push_back({j.n[2], j.n[1], 0.0, [kf = j.d->card.kf, af = j.d->card.af, M = j.d->mult, id = std::abs(id)](double f) {
-                          return M * kf * std::pow(std::max(id / M, 1e-38), af) / f; }});
+      const double vd = V(j.n[2]) - V(j.n[1]), id = diode_iq(vd, m).first;
+      auto junction = [&](int a, double i) {  // shot 2q|I|, flicker M KF (|I|/M)^AF / f
+        gens.push_back({a, j.n[1], q2 * std::abs(i)});
+        if (j.d->card.kf != 0.0)
+          gens.push_back({a, j.n[1], 0.0, [kf = j.d->card.kf, af = j.d->card.af, M = j.d->mult, i = std::abs(i)](double f) {
+                            return M * kf * std::pow(std::max(i / M, 1e-38), af) / f; }});
+      };
+      junction(j.n[2], id);
+      if (m.swSep) {  // the separate sidewall: RSW's thermal noise and its own junction's
+        if (m.gsw > 0.0) gens.push_back({j.n[0], j.n[4], kT4 * m.gsw});
+        junction(j.n[4], diode_sw_iq(vd, V(j.n[4]) - V(j.n[1]), m).first);
+      }
       return;
     }
     if (j.f) {  // ngspice jfetnoi: channel 8kT gm/3 and flicker KF |Id|^AF / f between D and S (RD, RS are resistors)

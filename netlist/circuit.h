@@ -620,6 +620,8 @@ struct Diode {
         double fcs = 0.5, ikp = 0.0; // sidewall FC and knee current
         double jtun = 0.0, jtunsw = 0.0, ntun = 30.0;  // tunnelling (at the temperature)
         double vp = 0.0;             // soft reverse recovery (VP; with TT the diode gets the qp node)
+        double rsw = 0.0;            // RSW (at the temperature); given: the sidewall's own node A_sw
+        bool rswGiven = false;
         bool qp() const { return vp != 0.0 && tt != 0.0; }
     } card;
     double area = 1.0;

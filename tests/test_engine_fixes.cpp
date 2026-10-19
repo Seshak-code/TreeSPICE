@@ -376,6 +376,36 @@ int main() {
                   "BJT quasi-saturation: 10 Hz AC gain equals the DC slope dv(c)/dVIN (" +
                       (okq ? std::to_string(ra.waveformPoints[0].nodeVoltages[3]) : ra.errorDetail) + " vs " + std::to_string(sq) + ")");
         }
+        // Diode RSW: the separate sidewall's transient charge is its depletion charge (ngspice 47 stores the
+        // capacitance as that charge, so its sidewall current is d(C)/dt: 10 pF behind 1 ohm nearly vanishes, v(2)
+        // -4.02 V at 3 ns): a microohm RSW follows the common sidewall's -0.6965 V (ngspice's own, without RSW)
+        {
+            const auto d = [](const char* rsw) {
+                return "* diode rsw tran\nV1 1 0 PULSE(0 -5 1n 1n 1n 50n 100n)\nR1 1 2 1k\nD1 2 0 ds PJ=1\nR2 1 3 1k\nD2 3 0 dc PJ=1\n"
+                       ".model ds D(IS=1e-14 CJSW=10p MJSW=0.01 JSW=1e-15 " + std::string(rsw) + ")\n"
+                       ".model dc D(IS=1e-14 CJSW=10p MJSW=0.01 JSW=1e-15)\n.tran 0.1n 3n\n";
+            };
+            const auto rt = run(mode, d("RSW=1e-6"), 1e-10, 3e-9);
+            check(rt.converged && near(V(rt, 2), V(rt, 3), 1e-4) && near(V(rt, 3), -0.6965, 5e-3),
+                  "diode RSW: the sidewall's transient charge is its depletion charge (" + std::to_string(V(rt, 2)) + " vs " +
+                      std::to_string(V(rt, 3)) + " V)");
+        }
+        // Diode RSW with the bottom's characteristic in AC: the sidewall current follows the bottom's vd, which
+        // ngspice 47's AC load stamps as a conductance at A_sw behind RSW (0.295 here against its own DC slope
+        // 0.205): the 10 Hz gain equals the central difference of v(2) over VB
+        {
+            const auto dr = [](double vb, const char* an) {
+                return "* diode rsw ac\nVB 1 0 DC " + std::to_string(vb) + " AC 1\nR3 1 2 300\nD3 2 0 dc PJ=50u\n"
+                       ".model dc D(IS=1e-14 CJO=1p JSW=1e-9 CJSW=3e-7 RSW=100)\n" + std::string(an);
+            };
+            req.source.payload = dr(0.68, ".ac lin 1 10 10\n");
+            const auto ra = engine->createSession()->runAC(req, cb);
+            const double hd = 1e-5, sd = (V(run(mode, dr(0.68 + hd, "")), 2) - V(run(mode, dr(0.68 - hd, "")), 2)) / (2 * hd);
+            const bool okd = ra.converged && ra.waveformPoints.size() == 1;
+            check(okd && near(ra.waveformPoints[0].nodeVoltages[1], sd, 1e-5 * std::abs(sd)) && near(sd, 0.205, 2e-3),
+                  "diode RSW (bottom characteristic): 10 Hz AC gain equals the DC slope dv(2)/dVB (" +
+                      (okd ? std::to_string(ra.waveformPoints[0].nodeVoltages[1]) : ra.errorDetail) + " vs " + std::to_string(sd) + ")");
+        }
         // XSPICE aswitch in AC is the resistance its control sets (ngspice 47's AC load negates the conductance:
         // a 1 V source over 1k and the switch read 1.46 V there): the same divider as a resistor of that value
         {
@@ -528,6 +558,7 @@ int main() {
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 NM W=10u\n.model NM NMOS\n", "expected 4 nodes"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 y inv\n.model inv d_inverter\n", "supported in .tran only"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 1 2 sg\n.model sg seegen\n", "SEEGEN is not supported yet"},
+            {"V1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DV\n.model DV D(TT=1n VP=0.5 RSW=10)\n", "VP with RSW is not supported yet"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 [q] src\n.model src d_source(input_file=\"no_such_dsource.txt\")\n", "cannot open d_source input_file"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 [i] c NULL [q] sm\n.model sm d_state(state_file=\"no_such_state.txt\")\n", "cannot open d_state state_file"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 d2 d3 tri\n.model tri d_tristate(inertial_delay=true)\n", "inertial_delay on a d_tristate is not supported yet"},

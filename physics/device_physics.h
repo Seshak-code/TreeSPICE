@@ -532,6 +532,7 @@ struct DiodeModel {
     bool swOwn = false;                                    // NS given: the sidewall has its own characteristic (and breakdown)
     P fcs = 0.5, ikp = 0.0;                                // sidewall FC, knee current (IKP*PJ*M; 0: none)
     P itun = 0.0, itunsw = 0.0, vtt = 30.0 * PhysicsConstants::V_THERMAL_NOM;  // tunnelling: JTUN*AREA, JTUNSW*PJ, NTUN*Vt
+    bool swSep = false; P gsw = 0.0;                       // RSW given: the sidewall's own node A_sw, through PJ*M/RSW
 };
 
 // Breakdown voltage xbv such that the reverse current at -BV is IBV (ngspice
@@ -550,10 +551,11 @@ inline double diode_breakdown_xbv(double bv, double ibv, double is, double vte, 
     return xbv;
 }
 
-// Junction current (with GMIN across the junction) and charge (depletion +
-// TT * diffusion) at junction voltage vd (ngspice dioload).
+// Bottom and sidewall junction currents (ngspice dioload), without GMIN; vds: the sidewall voltage its own
+// characteristic (NS) sees, the separate sidewall's (RSW) or vd. The common characteristic and the tunnelling
+// see vd, and a separate sidewall does not break down.
 template <typename T, typename P>
-inline std::pair<T, T> diode_iq(T vd, const DiodeModel<P>& p)
+inline std::pair<T, T> diode_junction(T vd, T vds, const DiodeModel<P>& p)
 {
     using std::exp; using std::sqrt;
     // Recombination current (ISR, NR; probed on ngspice 47): ISR (exp(vd/(NR Vt)) - 1) ((1 - vd/VJ)^2 + 0.005)^(M/2),
@@ -569,8 +571,10 @@ inline std::pair<T, T> diode_iq(T vd, const DiodeModel<P>& p)
     // whose breakdown it does not follow (ngspice dioload evaluates it at the separate sidewall voltage, 0 there)
     T cdsw(0.0);
     const bool brk = p.breakdown && vd < -p.xbv;
-    if (p.isw != P(0.0) && p.swOwn)
-        cdsw = vd >= T(-3.0 * p.vtesw) || !brk ? spice_junction(vd, p.isw, p.vtesw) : -p.isw * exp(-(p.xbv + vd) / p.vtb);
+    if (p.isw != P(0.0) && p.swOwn) {
+        if (vds >= T(-3.0 * p.vtesw) || !(p.breakdown && vds < -p.xbv)) cdsw = spice_junction(vds, p.isw, p.vtesw);
+        else if (!p.swSep) cdsw = -p.isw * exp(-(p.xbv + vds) / p.vtb);
+    }
     T cdb;
     // breakdown only below the forward region (ngspice dioload's order): a large NBV makes xbv negative (IHP's
     // antenna diodes: xbv = -18 V), and the forward branch still applies there
@@ -586,10 +590,27 @@ inline std::pair<T, T> diode_iq(T vd, const DiodeModel<P>& p)
     if (vd >= T(-3.0 * p.vte)) { if (p.ikf > P(0.0) && cdb > P(1e-18)) cdb = cdb / (1.0 + sqrt(cdb / p.ikf)); }
     else if (p.ikr > P(0.0) && cdb < P(-1e-18)) cdb = cdb / (1.0 + sqrt(-cdb / p.ikr));
     if (p.ikp > P(0.0) && cdsw > P(1e-18)) cdsw = cdsw / (1.0 + sqrt(cdsw / p.ikp));
-    const T cd = cdb + cdsw + p.gmin * vd;
+    return {cdb, cdsw};
+}
+
+// Junction current (with GMIN across the junction) and charge (depletion +
+// TT * diffusion) at junction voltage vd (ngspice dioload); a separate sidewall (RSW) is not in them (diode_sw_iq).
+template <typename T, typename P>
+inline std::pair<T, T> diode_iq(T vd, const DiodeModel<P>& p)
+{
+    const auto [cdb, cdsw] = diode_junction(vd, vd, p);
+    const T cd = cdb + (p.swSep ? T(0.0) : cdsw) + p.gmin * vd;
     // the transit-time charge follows the junction current with its GMIN (ngspice: TT*GMIN of capacitance at any bias)
-    const T q = depletion_charge(vd, p.cjo, p.m, p.vj, p.fc) + depletion_charge(vd, p.cjsw, p.mjsw, p.vjsw, p.fcs) + p.tt * cd;
+    T q = depletion_charge(vd, p.cjo, p.m, p.vj, p.fc) + p.tt * cd;
+    if (!p.swSep) q = q + depletion_charge(vd, p.cjsw, p.mjsw, p.vjsw, p.fcs);
     return {cd, q};
+}
+
+// A separate sidewall's (RSW) current, GMIN at vdsw included, and depletion charge at vdsw; vd: the bottom's
+template <typename T, typename P>
+inline std::pair<T, T> diode_sw_iq(T vd, T vdsw, const DiodeModel<P>& p)
+{
+    return {diode_junction(vd, vdsw, p).second + p.gmin * vdsw, depletion_charge(vdsw, p.cjsw, p.mjsw, p.vjsw, p.fcs)};
 }
 
 // Gummel-Poon BJT, parameters resolved (AREA applied; ngspice bjt level 1

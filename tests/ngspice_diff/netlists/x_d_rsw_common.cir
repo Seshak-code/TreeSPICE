@@ -1,0 +1,11 @@
+* Diode RSW with the bottom's characteristic: the sidewall current follows the bottom vd (with JTUNSW), through
+* RSW (200 Ohm at PJ); TRS at 80 C. ngspice stamps that current's partial at A_sw: tight tolerances, as its
+* Newton stops short at RELTOL (by 15% at an RSW of megohms, where it also fails to converge in forward bias).
+VD a 0 DC 0
+R2 a k2 50
+D2 k2 0 DB PJ=20u
+.model DB D(IS=1e-14 RS=2 JSW=2e-8 RSW=4e-3 JTUNSW=1e-9 NTUN=20 TRS1=4e-3 TNOM=27)
+.temp 80
+.options reltol=1e-7 abstol=1e-15 vntol=1e-12
+.dc VD -2 1.2 0.02
+.end
