@@ -65,6 +65,7 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
   if (!offHold_ && prevVoltages_.empty()) {
     bool anyOff = false;
     forEachJunction(netlist, [&](const Junction &j) { anyOff |= j.d ? j.d->off : j.f ? j.f->off : j.q->off; });
+    forEachMosfet(netlist, [&](const Mosfet &m, const std::array<int, 4> &, const BlockState::DeviceCharge *) { anyOff |= m.off; });
     if (anyOff) {
       struct Hold { bool &f; ~Hold() { f = false; } } hold{offHold_};
       offHold_ = true;
@@ -676,11 +677,14 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
     }
   };
   seed(netlist.globalBlock, netlist.globalState, [](int n) { return n; });
-  // MOSFET charges at x, zero current (Meyer charges count from here: only their change matters)
+  // MOSFET charges at x, zero current (Meyer charges count from here: only their change matters). Under UIC an
+  // IC=vds,vgs,vbs device starts there (ngspice MODEINITJCT with TRANOP|UIC); a value not given from the nodes.
   forEachMosfet(netlist, [&](const Mosfet &m, const std::array<int, 4> &n, const BlockState::DeviceCharge *st) {
     if (!st) return;
     const double zero[5] = {};
-    const auto c = mos1_charges(getV(n[0]), getV(n[1]), getV(n[2]), getV(n[3]), mos1Params(m, gmin_), zero, zero, zero);
+    const double vs = getV(n[2]);
+    auto at = [&](int k, int node) { return uic && !std::isnan(m.ic[k]) ? vs + m.ic[k] : getV(node); };
+    const auto c = mos1_charges(at(0, n[0]), at(1, n[1]), vs, at(2, n[3]), mos1Params(m, gmin_), zero, zero, zero);
     auto *s = const_cast<BlockState::DeviceCharge *>(st);  // netlist is non-const here
     *s = {};
     for (auto &vh : s->v) std::copy(c.v, c.v + 5, vh);

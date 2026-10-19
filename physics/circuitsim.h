@@ -583,12 +583,28 @@ public:
           }
   }
 
-  // Newton stamp of mosCurrents() at v. The Jacobian comes from Dual (one pass
+  // An OFF MOSFET in the first operating-point solve (offHold_): ngspice's INITFIX companion at vgs = vds = vbs = 0,
+  // I(0) + J(0) x (the currents depend on the terminal voltages' differences only). The stamp and the KCL audit.
+  template <typename T>
+  std::array<T, 4> mosHeld(const std::array<T, 4> &x, const Mos1Params<double> &p) const {
+      std::array<T, 4> I;
+      for (auto &i : I) i = T(0.0);
+      for (int k = 0; k < 4; ++k) {
+          std::array<Dual<double>, 4> x0;
+          for (int c = 0; c < 4; ++c) x0[c] = Dual<double>(0.0, c == k ? 1.0 : 0.0);
+          const auto I0 = mosCurrents(x0, p, nullptr, 0.0);
+          for (int t = 0; t < 4; ++t) I[t] = I[t] + I0[t].grad * x[k] + (k == 0 ? I0[t].val : 0.0);
+      }
+      return I;
+  }
+
+  // Newton stamp of mosCurrents() at v (held: mosHeld). The Jacobian comes from Dual (one pass
   // per terminal), so it is the exact derivative of the currents the KCL audit
   // checks: gm, gds, gmbs, the junctions and charges, either orientation.
   void stampMos1(const std::array<int, 4>& n, const Mos1Params<double>& p,
-                 const BlockState::DeviceCharge* st, double h, const std::vector<double>& v) {
-      stampByDual(n, 4, v, [&](const std::array<Dual<double>, 4> &x) { return mosCurrents(x, p, st, h); });
+                 const BlockState::DeviceCharge* st, double h, const std::vector<double>& v, bool held = false) {
+      if (held) stampByDual(n, 4, v, [&](const std::array<Dual<double>, 4> &x) { return mosHeld(x, p); });
+      else stampByDual(n, 4, v, [&](const std::array<Dual<double>, 4> &x) { return mosCurrents(x, p, st, h); });
   }
 
   // Diodes and BJTs ("junction devices"): one evaluation of currents and charges
@@ -1731,8 +1747,8 @@ public:
     // 3.55 MOSFETs, global block and every instance: the stamped mosCurrents()
     forEachMosfet(netlist, [&](const Mosfet &m, const std::array<int, 4> &t,
                                const BlockState::DeviceCharge *st) {
-        const auto I = mosCurrents<double>({getV(t[0]), getV(t[1]), getV(t[2]), getV(t[3])},
-                                           mos1Params(m, gmin_), st, h);
+        const std::array<double, 4> x{getV(t[0]), getV(t[1]), getV(t[2]), getV(t[3])};
+        const auto I = offHold_ && m.off ? mosHeld(x, mos1Params(m, gmin_)) : mosCurrents<double>(x, mos1Params(m, gmin_), st, h);
         for (int k = 0; k < 4; ++k) addRes(t[k], -I[k]);
     });
     // 3.6 Diodes and BJTs, global block and every instance: the stamped
@@ -1740,7 +1756,16 @@ public:
     forEachJunction(netlist, [&](const Junction &j) {
         std::array<double, 7> x{};
         for (int k = 0; k < j.terms; ++k) x[k] = getV(j.n[k]);
-        const auto I = junctionCurrents(j, x, h);
+        auto I = junctionCurrents(j, x, h);
+        if (offHold_ && (j.d ? j.d->off : j.f ? j.f->off : j.q->off)) {
+          // held (ngspice INITFIX): the companion I(vl) + G (v - vl) at junctions held at 0 V, as stampJunction
+          JShift sh = junctionLimit(j, v_candidate);
+          sh.seed = true;
+          std::array<Dual<double>, 7> xd;
+          for (int k = 0; k < 7; ++k) xd[k] = Dual<double>(x[k], 0.0);
+          const auto c = junctionCurrents(j, xd, h, nullptr, &sh);
+          for (int k = 0; k < j.terms; ++k) I[k] = c[k].val - c[k].grad;
+        }
         for (int k = 0; k < j.terms; ++k)
           if (j.n[k] > 0 && j.n[k] <= (int)node_residuals.size()) node_residuals[j.n[k] - 1] -= I[k];
     });
@@ -2267,7 +2292,7 @@ public:
     stampBranchSystem(netlist, h, time);
     forEachBehav(netlist, [&](const Behavioural &b, const BranchSlot &sl, int row) { stampBehav(b, sl, row, v_guess, time); });
     forEachMosfet(netlist, [&](const Mosfet &m, const std::array<int, 4> &n,
-                               const BlockState::DeviceCharge *st) { stampMos1(n, mos1Params(m, gmin_), st, h, v_guess); });
+                               const BlockState::DeviceCharge *st) { stampMos1(n, mos1Params(m, gmin_), st, h, v_guess, offHold_ && m.off); });
     forEachJunction(netlist, [&](const Junction &j) { stampJunction(j, v_guess, h); });
     forEachSwitch(netlist, [&](const SwitchRef &w, const std::array<int, 2> &c) {
       *w.on = !swAcOff_ && switchState(w, c, v_guess);

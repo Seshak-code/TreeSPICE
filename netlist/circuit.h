@@ -621,6 +621,8 @@ struct Mosfet {
     int body;                         // B (Bulk/Substrate) terminal; E (substrate) of a BSIM-SOI device
     std::vector<int> soiNodes;        // BSIM-SOI P, B, T after E (M d g s e [p [b [t]]]), LEVEL 10/58 only
     std::map<std::string, double> osdiParams;  // instance parameters only an OSDI model takes (BSIM-SOI SOIMOD, RTH0, ...)
+    bool off = false;                 // OFF: held at vgs = vds = vbs = 0 in the first operating-point solve (ngspice INITFIX)
+    double ic[3] = {NAN, NAN, NAN};   // IC=vds,vgs,vbs (ICVDS, ICVGS, ICVBS): the charges' state at t = 0 under UIC
     bool threeTerm = false;           // M d g s model: a VDMOS (body is ground)
     bool thermal = false;             // the THERMAL flag (VDMOS self-heating: M d g s tj tc model THERMAL)
     

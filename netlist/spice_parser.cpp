@@ -1162,7 +1162,12 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         }
         std::vector<Mosfet> level1;
         for (auto& m : blk.mosfets) {
+            const bool icGiven = !std::isnan(m.ic[0]) || !std::isnan(m.ic[1]) || !std::isnan(m.ic[2]);
+            auto native = [&](const char* what) {
+                if (m.off || icGiven) throw std::runtime_error(m.instanceName + ": OFF and IC on a " + what + " device are not supported yet");
+            };
             if (const ModelCard* v = mosCard(m); v->type == "VDMOSN" || v->type == "VDMOSP") {
+                native("VDMOS");
                 sensList(blk, m.instanceName, *v);
                 blk.osdiDevices.push_back(vdmosOsdi(m, *sensed(v, m.instanceName)));
                 continue;
@@ -1175,6 +1180,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             sensList(blk, m.instanceName, *c, &m.given);
             if (const double level = c->get("LEVEL", 1.0); level == 54.0 || level == 14.0 || level == 49.0 || level == 8.0 ||
                                                            level == 10.0 || level == 58.0) {
+                native(("LEVEL " + std::to_string((int)level)).c_str());
                 blk.osdiDevices.push_back(bsimOsdi(m, *c, level == 49.0 || level == 8.0 ? 3 : level == 10.0 || level == 58.0 ? 10 : 4));
                 continue;
             }
@@ -1866,8 +1872,19 @@ void SPICEParser::parseMosfet(const std::vector<std::string>& tok, TensorBlock& 
     // .option scale multiplies the lengths (areas by scale^2), as in ngspice.
     for (size_t i = mi + 1; i < tok.size(); ++i) {
         std::string upper = toUpper(tok[i]);
-        if (upper == "OFF" || upper == "IC") throw std::runtime_error(tok[0] + ": " + upper + " is not supported yet");
+        if (upper == "OFF") { m.off = true; continue; }
         if (upper == "THERMAL") { m.thermal = true; continue; }
+        if (upper == "IC") {  // IC=vds[,vgs[,vbs]]
+            int n = 0;
+            while (n < 3 && i + 1 < tok.size() && isValue(tok[i + 1])) m.ic[n++] = parseValue(tok[++i]);
+            if (n == 0) throw std::runtime_error(tok[0] + ": IC needs a value");
+            continue;
+        }
+        if (upper == "ICVDS" || upper == "ICVGS" || upper == "ICVBS") {
+            if (i + 1 >= tok.size()) throw std::runtime_error(tok[0] + ": parameter " + upper + " has no value");
+            m.ic[upper == "ICVDS" ? 0 : upper == "ICVGS" ? 1 : 2] = parseValue(tok[++i]);
+            continue;
+        }
         if (i + 1 >= tok.size()) throw std::runtime_error(tok[0] + ": parameter " + upper + " has no value");
         const double s = scale_;
         if (upper == "W")        m.w = parseValue(tok[++i]) * s;
