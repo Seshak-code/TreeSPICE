@@ -757,7 +757,9 @@ public:
       osdiAtValid_ = false;
     }
     const int method = integrator ? (int)integrator->getType() : -1;
-    if (osdiAtValid_ && !accept && h == osdiAtH_ && method == osdiAtMethod_ && v == osdiAtV_) return;
+    // Not for the Jacobian at an operating point (limitJunctions_ off): the cached evaluation may hold bypassed
+    // devices, whose G is from an earlier point up to the bypass tolerance away (0.1 % on a VDMOS stage's AC gain)
+    if (osdiAtValid_ && limitJunctions_ && !accept && h == osdiAtH_ && method == osdiAtMethod_ && v == osdiAtV_) return;
     const int n = (int)osdiRefs_.size();
     osdiI_.resize(n);
     osdiJ_.resize(n);
