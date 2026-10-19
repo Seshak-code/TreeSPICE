@@ -359,6 +359,19 @@ int main() {
         ok = r.converged && r.waveformPoints.size() == 1;
         check(ok && near(r.waveformPoints[0].nodeVoltages[2], slope, 1e-6 * std::abs(slope)) && std::abs(slope) > 1.0,
               "MOS LEVEL 6: 10 Hz AC gain equals the DC slope dv(3)/dVG");
+        // XSPICE aswitch in AC is the resistance its control sets (ngspice 47's AC load negates the conductance:
+        // a 1 V source over 1k and the switch read 1.46 V there): the same divider as a resistor of that value
+        {
+            const std::string sw = "* aswitch ac\nVS s 0 DC 1 AC 1\nR1 s x 1k\nVC c 0 DC 0.5\na1 c %gd(x 0) sw\n"
+                                   ".model sw aswitch(cntl_off=0 cntl_on=1 r_off=100k r_on=100)\nR2 s y 1k\nR3 y 0 3162.2776601683795\n"
+                                   ".ac lin 1 1k 1k\n";
+            req.source.payload = sw;
+            const auto ra = engine->createSession()->runAC(req, cb);
+            const bool ok2 = ra.converged && ra.waveformPoints.size() == 1;
+            check(ok2 && near(ra.waveformPoints[0].nodeVoltages[1], ra.waveformPoints[0].nodeVoltages[3], 1e-9) &&
+                      near(ra.waveformPoints[0].nodeVoltages[1], 0.7597469, 1e-6),
+                  "XSPICE aswitch in AC is its resistance (" + (ok2 ? std::to_string(ra.waveformPoints[0].nodeVoltages[1]) : ra.errorDetail) + " V)");
+        }
         req.source.payload = mos6(1.3, ".noise v(3) VG lin 1 10 10\n");
         r = engine->createSession()->runNoise(req, cb);
         check(!r.converged && r.errorDetail.find("no noise model") != std::string::npos, "MOS LEVEL 6 .noise is an error");

@@ -10,6 +10,7 @@
 #include "../osdi/osdi_device.h"
 #include "../physics/physics_constants.h"
 #include "../physics/device_temp.h"
+#include "../physics/xspice_analog.h"
 #include <sstream>
 #include <iomanip>
 #include <fstream>
@@ -2236,6 +2237,27 @@ void SPICEParser::parseModelCard(const std::vector<std::string>& tok) {
         card.type = p ? "VDMOSP" : "VDMOSN";
     } else t = tok;
 
+    // Vector parameters, KEY=[v1 v2 ...] (XSPICE code models): collected and taken out of the key=value pairs
+    {
+        std::vector<std::string> u(t.begin(), t.begin() + std::min<size_t>(3, t.size()));
+        for (size_t i = 3; i < t.size(); ++i) {
+            if (i + 1 >= t.size() || t[i + 1][0] != '[') { u.push_back(t[i]); continue; }
+            const std::string key = toUpper(t[i]);
+            std::vector<double> v;
+            std::string w = t[++i].substr(1);
+            for (;;) {
+                const bool last = !w.empty() && w.back() == ']';
+                if (last) w.pop_back();
+                if (!w.empty()) v.push_back(parseValue(w));
+                if (last) break;
+                if (++i >= t.size()) throw std::runtime_error("model " + card.name + ": " + key + "=[ without ]");
+                w = t[i];
+            }
+            card.vectors[key] = v;
+        }
+        t = u;
+    }
+
     // Parse optional parameters (key=value pairs flattened by tokenizer)
     for (size_t i = 3; i + 1 < t.size(); i += 2) {
         std::string key = toUpper(t[i]);
@@ -2488,7 +2510,13 @@ void SPICEParser::expandInstance(const PendingInstance& pi, const std::vector<in
         return full + "." + u;
     };
     for (const auto& a : subcktA_[pi.subckt]) {  // the body's XSPICE devices, on the flattened nets
-        PendingA x{full + "." + toUpper(a.name), a.model, {}, topLine};
+        PendingA x{full + "." + toUpper(a.name), a.model, {}, topLine, {}};
+        for (const auto& w : a.raw) {
+            if (w.empty() || w[0] == '%' || w == "[" || w == "]") { x.raw.push_back(w); continue; }
+            const bool inv = w[0] == '~';
+            const std::string base = inv ? w.substr(1) : w;
+            x.raw.push_back(toUpper(base) == "NULL" ? base : (inv ? "~" : "") + flat(base));
+        }
         for (const auto& g : a.groups) {
             std::vector<std::string> fg;
             for (const auto& n : g) {
@@ -2522,17 +2550,14 @@ namespace acutesim {
 // %d / %v before a port name its type (the model decides it anyway).
 void SPICEParser::parseXspice(const std::string& line, int lineNum) {
     std::string spaced;
-    for (char c : line) spaced += c == '[' || c == ']' ? std::string(" ") + c + " " : std::string(1, c);
+    for (char c : line) spaced += c == '[' || c == ']' ? std::string(" ") + c + " " : c == '(' || c == ')' ? std::string(" ") : std::string(1, c);
     std::istringstream ss(spaced);
     std::vector<std::string> w;
     for (std::string t; ss >> t;) w.push_back(t);
     if (w.size() < 3) throw std::runtime_error(w[0] + ": expected ports, then a model name");
-    PendingA a{w[0], w.back(), {}, lineNum};
+    PendingA a{w[0], w.back(), {}, lineNum, std::vector<std::string>(w.begin() + 1, w.end() - 1)};
     for (size_t i = 1; i + 1 < w.size(); ++i) {
-        if (w[i][0] == '%') {
-            if (w[i] != "%d" && w[i] != "%v") throw std::runtime_error(a.name + ": port type " + w[i] + " is not supported yet");
-            continue;
-        }
+        if (w[i][0] == '%') continue;  // a port type: the code model checks it (resolveXspice)
         if (w[i] == "]") throw std::runtime_error(a.name + ": ']' without '['");
         if (w[i] != "[") { a.groups.push_back({w[i]}); continue; }
         std::vector<std::string> g;
@@ -2595,8 +2620,13 @@ void SPICEParser::resolveXspice(int& at) {
         const auto mc = modelCards_.find(toUpper(a.model));
         if (mc == modelCards_.end()) throw std::runtime_error(a.name + ": no .model card " + a.model);
         const ModelCard* c = &mc->second;
+        static const std::set<std::string> analogKinds = {"GAIN", "SUMMER", "MULT", "DIVIDE", "LIMIT", "CLIMIT", "PWL", "ASWITCH"};
+        if (analogKinds.count(c->type)) { resolveXspiceAnalog(a, *c, analogNode); continue; }
         const auto k = kinds.find(c->type);
         if (k == kinds.end()) throw std::runtime_error(a.name + ": XSPICE model type " + c->type + " is not supported yet");
+        for (const auto& w : a.raw)
+            if (w[0] == '%' && w != "%d" && w != "%v") throw std::runtime_error(a.name + ": port type " + w + " is not supported yet");
+        if (!c->vectors.empty()) throw std::runtime_error("model " + c->name + ": parameter " + c->vectors.begin()->first + " is not a " + c->type + " parameter");
         xspice::Inst x;
         x.name = a.name;
         x.kind = k->second;
@@ -2695,7 +2725,181 @@ void SPICEParser::resolveXspice(int& at) {
         r.name = "#XSPICE_NET" + std::to_string(idx); r.nodeTerminal1 = idx; r.nodeTerminal2 = 0; r.resistance_ohms = 1.0;
         result_.netlist.globalBlock.resistors.push_back(r);
     }
-    result_.netlist.digital = net;
+    if (!net->insts.empty()) result_.netlist.digital = net;
+}
+
+// An XSPICE analog code model (physics/xspice_analog.h): its ports walked by the model's port table (a
+// differential type takes two nodes, a vector port [ ... ]), each output a behavioural source over the inputs.
+// A current input is a zero-volt source across its port (ngspice MIF), read through its branch current.
+void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
+                                      const std::function<int(const std::string&, const std::string&)>& analogNode) {
+    using xspice::AKind;
+    struct Spec { char dir; const char* def; bool vec; };  // dir: i(nput), o(utput), b(oth: a conductance port)
+    static const std::map<std::string, std::pair<AKind, std::vector<Spec>>> table = {
+        {"GAIN", {AKind::GAIN, {{'i', "v", false}, {'o', "v", false}}}},
+        {"SUMMER", {AKind::SUMMER, {{'i', "v", true}, {'o', "v", false}}}},
+        {"MULT", {AKind::MULT, {{'i', "v", true}, {'o', "v", false}}}},
+        {"DIVIDE", {AKind::DIVIDE, {{'i', "v", false}, {'i', "v", false}, {'o', "v", false}}}},
+        {"LIMIT", {AKind::LIMIT, {{'i', "v", false}, {'o', "v", false}}}},
+        {"CLIMIT", {AKind::CLIMIT, {{'i', "v", false}, {'i', "v", false}, {'i', "v", false}, {'o', "v", false}}}},
+        {"PWL", {AKind::PWL, {{'i', "v", false}, {'o', "v", false}}}},
+        {"ASWITCH", {AKind::ASWITCH, {{'i', "v", false}, {'b', "gd", false}}}}};
+    const auto& [kind, specs] = table.at(c.type);
+    struct Port { std::string type; int n1 = 0, n2 = 0; std::string vname; };
+    std::vector<std::vector<Port>> ports;  // per spec, its elements
+    size_t p = 0;
+    const auto& w = a.raw;
+    auto one = [&](const Spec& sp) {
+        Port pt;
+        pt.type = sp.def;
+        if (p < w.size() && w[p][0] == '%') {
+            pt.type = w[p].substr(1);
+            for (auto& ch : pt.type) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            ++p;
+        }
+        static const std::set<std::string> in = {"v", "vd", "i", "id", "vnam"}, out = {"v", "vd", "i", "id"};
+        if (!(sp.dir == 'b' ? pt.type == "gd" : (sp.dir == 'i' ? in : out).count(pt.type)))
+            throw std::runtime_error(a.name + ": port type %" + pt.type + " is not allowed (or not supported yet) on this " + c.type + " port");
+        const bool diff = pt.type == "vd" || pt.type == "id" || pt.type == "gd";
+        auto node = [&]() {
+            if (p >= w.size() || w[p] == "[" || w[p] == "]" || w[p][0] == '%') throw std::runtime_error(a.name + ": missing a node for " + c.type);
+            const std::string n = w[p++];
+            if (toUpper(n) == "NULL" || n[0] == '~') throw std::runtime_error(a.name + ": " + n + " on an analog port");
+            return n;
+        };
+        if (pt.type == "vnam") { pt.vname = toUpper(node()); return pt; }
+        pt.n1 = analogNode(node(), a.name);
+        if (diff) pt.n2 = analogNode(node(), a.name);
+        return pt;
+    };
+    for (const auto& sp : specs) {
+        std::vector<Port> el;
+        if (sp.vec) {
+            if (p >= w.size() || w[p] != "[") throw std::runtime_error(a.name + ": " + c.type + " takes a [ ... ] vector of inputs");
+            for (++p; p < w.size() && w[p] != "]";) el.push_back(one(sp));
+            if (p >= w.size()) throw std::runtime_error(a.name + ": '[' without ']'");
+            ++p;
+            if (el.empty()) throw std::runtime_error(a.name + ": no inputs");
+        } else el.push_back(one(sp));
+        ports.push_back(el);
+    }
+    if (p != w.size()) throw std::runtime_error(a.name + ": " + c.type + " takes " + std::to_string(specs.size()) + " ports; '" + w[p] + "' is one too many");
+
+    // parameters: the card's, ngspice's defaults (ifspec.ifs)
+    auto m = std::make_shared<xspice::AnalogModel>();
+    m->kind = kind;
+    std::set<std::string> allowed;
+    auto num = [&](const char* k, double def) { allowed.insert(k); return c.get(k, def); };
+    auto flag = [&](const char* k, bool def) { allowed.insert(k); return c.params.count(k) ? c.params.at(k) != 0.0 : def; };
+    auto vec = [&](const char* k, size_t n, double def) {
+        allowed.insert(k);
+        const auto it = c.vectors.find(k);
+        std::vector<double> v = it == c.vectors.end() ? std::vector<double>() : it->second;
+        if (v.empty() && c.params.count(k)) v = {c.params.at(k)};
+        if (v.empty()) v.assign(n, def);
+        if (v.size() != n) throw std::runtime_error("model " + c.name + ": " + k + " has " + std::to_string(v.size()) + " values for " + std::to_string(n) + " inputs");
+        return v;
+    };
+    const size_t nin = ports[0].size();
+    switch (kind) {
+    case AKind::GAIN:
+        m->inOffset = num("IN_OFFSET", 0.0); m->gain = num("GAIN", 1.0); m->outOffset = num("OUT_OFFSET", 0.0);
+        for (const char* k : {"NOISE_VOLTAGE", "NOISE_CURRENT", "NOISE_CORNER", "NOISE_EXPONENT"}) allowed.insert(k);
+        if (c.get("NOISE_VOLTAGE", 0.0) != 0.0 || c.get("NOISE_CURRENT", 0.0) != 0.0)
+            throw std::runtime_error("model " + c.name + ": the gain code model's noise is not supported yet");
+        break;
+    case AKind::SUMMER: case AKind::MULT:
+        m->inOffsets = vec("IN_OFFSET", nin, 0.0); m->inGains = vec("IN_GAIN", nin, 1.0);
+        m->outGain = num("OUT_GAIN", 1.0); m->outOffset = num("OUT_OFFSET", 0.0);
+        break;
+    case AKind::DIVIDE:
+        m->numOffset = num("NUM_OFFSET", 0.0); m->numGain = num("NUM_GAIN", 1.0);
+        m->denOffset = num("DEN_OFFSET", 0.0); m->denGain = num("DEN_GAIN", 1.0);
+        m->denLower = num("DEN_LOWER_LIMIT", 1e-10); m->denDomain = num("DEN_DOMAIN", 1e-16); m->fraction = flag("FRACTION", false);
+        m->outGain = num("OUT_GAIN", 1.0); m->outOffset = num("OUT_OFFSET", 0.0);
+        break;
+    case AKind::LIMIT: case AKind::CLIMIT:
+        m->inOffset = num("IN_OFFSET", 0.0); m->gain = num("GAIN", 1.0);
+        m->range = num("LIMIT_RANGE", 1e-6); m->fraction = flag("FRACTION", false);
+        if (kind == AKind::LIMIT) {
+            allowed.insert("OUT_LOWER_LIMIT"); allowed.insert("OUT_UPPER_LIMIT");
+            if (!c.params.count("OUT_LOWER_LIMIT") || !c.params.count("OUT_UPPER_LIMIT"))
+                throw std::runtime_error("model " + c.name + ": limit needs out_lower_limit and out_upper_limit");
+            m->lo = c.params.at("OUT_LOWER_LIMIT"); m->hi = c.params.at("OUT_UPPER_LIMIT");
+            if (m->fraction) { m->range *= m->hi - m->lo; m->fraction = false; }
+        } else { m->upperDelta = num("UPPER_DELTA", 0.0); m->lowerDelta = num("LOWER_DELTA", 0.0); }
+        break;
+    case AKind::PWL: {
+        allowed.insert("X_ARRAY"); allowed.insert("Y_ARRAY");
+        const auto xi = c.vectors.find("X_ARRAY"), yi = c.vectors.find("Y_ARRAY");
+        if (xi == c.vectors.end() || yi == c.vectors.end() || xi->second.size() != yi->second.size() || xi->second.size() < 2)
+            throw std::runtime_error("model " + c.name + ": pwl needs x_array and y_array of the same size, 2 points at least");
+        const auto& x = xi->second; const auto& y = yi->second;
+        for (size_t i = 1; i < x.size(); ++i)
+            if (!(x[i] > x[i - 1])) throw std::runtime_error("model " + c.name + ": pwl x_array must increase");
+        const size_t n = x.size() + 2;
+        m->x.assign(n, 0.0); m->y.assign(n, 0.0);
+        for (size_t i = 1; i + 1 < n; ++i) { m->x[i] = x[i - 1]; m->y[i] = y[i - 1]; }
+        m->x[0] = 2 * m->x[1] - m->x[2]; m->x[n - 1] = 2 * m->x[n - 2] - m->x[n - 3];
+        if (flag("LIMIT", false)) { m->y[0] = m->y[1]; m->y[n - 1] = m->y[n - 2]; }
+        else { m->y[0] = 2 * m->y[1] - m->y[2]; m->y[n - 1] = 2 * m->y[n - 2] - m->y[n - 3]; }
+        m->domain = num("INPUT_DOMAIN", 0.01); m->fraction = flag("FRACTION", true);
+        break;
+    }
+    case AKind::ASWITCH:
+        m->cntlOff = num("CNTL_OFF", 0.0); m->cntlOn = num("CNTL_ON", 1.0);
+        m->rOff = num("R_OFF", 1e12); m->rOn = num("R_ON", 1.0);
+        m->logR = flag("LOG", true); m->limitR = flag("LIMIT", false);
+        if (std::abs(m->cntlOn - m->cntlOff) < 1e-12) throw std::runtime_error("model " + c.name + ": aswitch needs |cntl_on - cntl_off| >= 1e-12");
+        if (m->logR && !(m->rOff > 0.0)) throw std::runtime_error("model " + c.name + ": aswitch log needs r_off > 0");
+        break;
+    }
+    for (const auto& [k, v] : c.params)
+        if (!allowed.count(k)) throw std::runtime_error("model " + c.name + ": parameter " + k + " is not a " + c.type + " parameter");
+    for (const auto& [k, v] : c.vectors)
+        if (!allowed.count(k)) throw std::runtime_error("model " + c.name + ": parameter " + k + " is not a " + c.type + " parameter");
+
+    // inputs -> references (one per input element, in port order)
+    auto& blk = result_.netlist.globalBlock;
+    std::vector<Behavioural::Ref> refs;
+    int sense = 0;
+    for (size_t s = 0; s < specs.size(); ++s) {
+        if (specs[s].dir != 'i') continue;
+        for (const auto& pt : ports[s]) {
+            Behavioural::Ref r;
+            if (pt.type == "v" || pt.type == "vd") { r.kind = 0; r.a = pt.n1; r.b = pt.n2; }
+            else {
+                r.kind = 1;
+                if (pt.type == "vnam") {
+                    int idx = -1;
+                    for (size_t k = 0; k < blk.voltageSources.size(); ++k) if (toUpper(blk.voltageSources[k].name) == pt.vname) idx = (int)k;
+                    if (idx < 0) throw std::runtime_error(a.name + ": %vnam " + pt.vname + " is no top-level voltage source");
+                    r.a = idx;
+                } else {  // %i / %id: a zero-volt source across the port, + to -
+                    VoltageSource v{};
+                    v.name = toUpper(a.name) + "#IN" + std::to_string(sense++);
+                    v.nodePositive = pt.n1; v.nodeNegative = pt.n2;
+                    r.a = (int)blk.voltageSources.size();
+                    blk.voltageSources.push_back(v);
+                }
+            }
+            refs.push_back(r);
+        }
+    }
+    // outputs: a voltage (v, vd) or current (i, id; gd: the switch's own port current, its voltage the last input)
+    for (size_t s = 0; s < specs.size(); ++s) {
+        if (specs[s].dir == 'i') continue;
+        for (const auto& pt : ports[s]) {
+            Behavioural b;
+            b.name = toUpper(a.name);
+            b.outPos = pt.n1; b.outNeg = pt.n2;
+            b.voltage = pt.type == "v" || pt.type == "vd";
+            b.refs = refs;
+            if (pt.type == "gd") b.refs.push_back({0, pt.n1, pt.n2, ""});
+            b.cm = m;
+            blk.behavioural.push_back(b);
+        }
+    }
 }
 
 }  // namespace acutesim

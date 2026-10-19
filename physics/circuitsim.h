@@ -24,6 +24,7 @@
 
 #include "../autodiff/dual.h"
 #include "device_physics.h"
+#include "xspice_analog.h"
 #include "../osdi/osdi_device.h"
 #include "physics_constants.h"
 #include "../tensors/physics_tensors.h"
@@ -1634,9 +1635,22 @@ public:
       else ca[k] = r.kind == 1 ? sl.vs + r.a : r.kind == 2 ? sl.ind + r.a : sl.bv + r.a;
       rv[k] = X(ca[k]) - X(cb[k]);
     }
+    BehavEval out;
+    if (b.cm) {  // an XSPICE code model (xspice_analog.h): one Dual pass per input
+      std::vector<Dual<double>> in(n);
+      for (size_t k = 0; k < n; ++k) in[k] = Dual<double>(rv[k]);
+      if (!grad || n == 0) { out.f = xspice::analogOut(*b.cm, in).val; return out; }
+      for (size_t k = 0; k < n; ++k) {
+        for (size_t j = 0; j < n; ++j) in[j].grad = j == k ? 1.0 : 0.0;
+        const auto r = xspice::analogOut(*b.cm, in);
+        out.f = r.val;
+        if (ca[k] >= 0) out.d.push_back({ca[k], r.grad});
+        if (cb[k] >= 0) out.d.push_back({cb[k], -r.grad});
+      }
+      return out;
+    }
     BehavEnv env{rv, -1, time};
     const acutesim::numparam::Evaluator<BehavEnv> ev{*b.expr, env};
-    BehavEval out;
     if (!grad || n == 0) { out.f = ev(b.expr->root).val; return out; }
     for (size_t k = 0; k < n; ++k) {
       env.seed = (int)k;

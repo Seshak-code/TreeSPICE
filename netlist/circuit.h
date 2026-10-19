@@ -49,6 +49,7 @@ struct ModelCard {
     std::string type;        // "NMOS", "PMOS", "D", "NPN", "PNP", "NJFET", "PJFET"
     int level = 1;           // Model level (1 = Shichman-Hodges, 4 = BSIM4, etc.)
     std::map<std::string, double> params;  // Key-value: "KP"->200e-6, "VTO"->0.7, etc.
+    std::map<std::string, std::vector<double>> vectors;  // KEY=[v1 v2 ...] (XSPICE code models' vector parameters)
 
     double get(const std::string& key, double defaultVal) const {
         auto it = params.find(key);
@@ -423,6 +424,8 @@ struct CCCS {
  * a branch current, or a current from + through the source to -) is expr over node voltages and branch
  * currents; refs[k] binds expr->refs[k].
  */
+namespace xspice { struct AnalogModel; }  // physics/xspice_analog.h
+
 struct Behavioural {
     struct Ref {
         int kind = 0;      // 0: V(a,b) over block-local nodes; I() of 1: V source a, 2: inductor a,
@@ -434,6 +437,7 @@ struct Behavioural {
     bool voltage = false;
     std::shared_ptr<const acutesim::numparam::Expr> expr;
     std::vector<Ref> refs;
+    std::shared_ptr<const xspice::AnalogModel> cm;  // an XSPICE analog code model's output over refs, in place of expr
 };
 
 // ============================================================================

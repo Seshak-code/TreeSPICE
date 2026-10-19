@@ -181,7 +181,9 @@ private:
     struct PendingInstance { std::string subckt; std::vector<int> nodes; int line; std::string name; std::vector<std::string> portNames; };
     std::vector<PendingInstance> topInstances_;   // nodes are global indices
     struct PendingIC { std::string node; double value; int line; bool nodeset; };
-    struct PendingA { std::string name, model; std::vector<std::vector<std::string>> groups; int line; };
+    struct PendingA { std::string name, model; std::vector<std::vector<std::string>> groups; int line;
+                      std::vector<std::string> raw; };  // raw: the port words as written (%types, [ ], nodes)
+    void resolveXspiceAnalog(const PendingA& a, const ModelCard& c, const std::function<int(const std::string&, const std::string&)>& analogNode);
     std::vector<PendingA> pendingA_;                // XSPICE A lines, resolved after parsing (a body's: per instance)
     std::map<std::string, std::vector<PendingA>> subcktA_;  // A lines of a .subckt body (local names)
     // Nodes an analog element names (not only X ports or .subckt pins): a digital-only net that an X line
