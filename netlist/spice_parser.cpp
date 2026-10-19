@@ -231,9 +231,13 @@ int SPICEParser::nodeIndex(const std::string& name) {
     auto& map  = inSubckt_ ? subcktNodeMap_ : nodeMap_;
     auto& next = inSubckt_ ? nextLocalNode_ : nextNode_;
     auto it = map.find(upper);
-    if (it != map.end()) return it->second;
+    if (it != map.end()) {
+        if (!noAnalogRef_) (inSubckt_ ? analogLocal_[subcktName_] : analogTop_).insert(it->second);
+        return it->second;
+    }
     if (inSubckt_ && globals_.count(upper)) subcktGlobals_[subcktName_][next] = upper;  // see expandInstance
     map[upper] = next;
+    if (!noAnalogRef_) (inSubckt_ ? analogLocal_[subcktName_] : analogTop_).insert(next);
     return next++;
 }
 
@@ -678,10 +682,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 case 'U': parseURC(tok, blk); break;
                 case 'S': case 'W': parseSwitch(tok, blk); break;
                 case 'N': parseOsdiDevice(tok, blk);  break;
-                case 'A':
-                    if (inSubckt_) throw std::runtime_error(tok[0] + ": XSPICE A devices inside a .subckt are not supported yet");
-                    parseXspice(line, lineNum);
-                    break;
+                case 'A': parseXspice(line, lineNum); break;
                 case 'B': parseBehav(line, tok, blk); break;
                 case 'E': nonlinearForm(tok) ? parseBehav(line, tok, blk) : parseVCVS(tok, blk); break;
                 case 'G': nonlinearForm(tok) ? parseBehav(line, tok, blk) : parseVCCS(tok, blk); break;
@@ -693,9 +694,13 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 case 'X': {
                     // X<name> <nodes...> <subcktName>; expanded after parsing
                     requireFields(tok, 3);
-                    PendingInstance pi{toUpper(tok.back()), {}, lineNum, toUpper(tok[0])};
-                    for (size_t i = 1; i + 1 < tok.size(); ++i)
+                    PendingInstance pi{toUpper(tok.back()), {}, lineNum, toUpper(tok[0]), {}};
+                    noAnalogRef_ = true;  // an X port is analog only if the body uses it so (expandInstance)
+                    for (size_t i = 1; i + 1 < tok.size(); ++i) {
                         pi.nodes.push_back(nodeIndex(tok[i]));
+                        pi.portNames.push_back(toUpper(tok[i]));
+                    }
+                    noAnalogRef_ = false;
                     (inSubckt_ ? subcktChildren_[subcktName_] : topInstances_).push_back(pi);
                     break;
                 }
@@ -720,9 +725,6 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     try { resolveControlledSources(result_.netlist.globalBlock); }
     catch (const std::exception& e) { return fail(lines.back().first, e.what()); }
 
-    // XSPICE A devices (their analog ports are top-level nodes, counted below)
-    int aLine = 0;
-    try { resolveXspice(aLine); } catch (const std::exception& e) { return fail(aLine ? aLine : lines.back().first, e.what()); }
 
     // Finalize: compute numGlobalNodes from nodeMap (max index)
     result_.nodeIndex = nodeMap_;
@@ -969,8 +971,14 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
 
     // Expand X cards (recursively) now that every .subckt is defined
     for (const auto& pi : topInstances_) {
-        try { expandInstance(pi, pi.nodes, 0); }
+        try { expandInstance(pi, pi.nodes, 0, "", pi.portNames, pi.line); }
         catch (const std::exception& e) { return fail(pi.line, e.what()); }
+    }
+    // XSPICE A devices, a body's per instance (in netlist order: a node folds its drivers in that order)
+    {
+        std::stable_sort(pendingA_.begin(), pendingA_.end(), [](const PendingA& a, const PendingA& b) { return a.line < b.line; });
+        int aLine = 0;
+        try { resolveXspice(aLine); } catch (const std::exception& e) { return fail(aLine ? aLine : lines.back().first, e.what()); }
     }
 
     // .ic / .nodeset may name a node defined later in the file, or a subcircuit internal (x1.n)
@@ -2264,7 +2272,9 @@ void SPICEParser::parseSubcktBegin(const std::vector<std::string>& tok) {
     for (size_t i = 2; i < tok.size(); ++i) {
         subcktPorts_.push_back(tok[i]);
         subcktBlock_.pinNames.push_back(tok[i]);
+        noAnalogRef_ = true;
         subcktBlock_.portNodeIndices.push_back(nodeIndex(tok[i]));  // local 1..P
+        noAnalogRef_ = false;
     }
 }
 
@@ -2442,7 +2452,7 @@ void SPICEParser::parseSubcktEnd() {
 // One instance of `pi.subckt` with ports on global nodes `portNodes`: fresh
 // global nodes for its internal nodes, then its own X cards, recursively.
 void SPICEParser::expandInstance(const PendingInstance& pi, const std::vector<int>& portNodes,
-                                 int depth, const std::string& path) {
+                                 int depth, const std::string& path, const std::vector<std::string>& portNames, int topLine) {
     if (depth > 64) throw std::runtime_error("subcircuit nesting deeper than 64 (recursive .subckt?)");
     auto it = result_.netlist.blockDefinitions.find(pi.subckt);
     if (it == result_.netlist.blockDefinitions.end())
@@ -2468,10 +2478,34 @@ void SPICEParser::expandInstance(const PendingInstance& pi, const std::vector<in
     for (const auto& ic : subcktICs_[pi.subckt])  // a body's .ic / .nodeset applies to each instance
         (ic.nodeset ? result_.netlist.nodeSets : result_.netlist.nodeICs).push_back({map[subcktNames_[pi.subckt].at(ic.node) - 1], ic.value});
 
+    for (int l : analogLocal_[pi.subckt]) if (l >= 1 && l <= (int)map.size()) analogGlobal_.insert(map[l - 1]);
+    // the flattened name of a body's node: a pin's is the parent's net, ground and .global ones stay, others x1.n
+    auto flat = [&](const std::string& local) {
+        const std::string u = toUpper(local);
+        if (u == "0" || u == "GND" || globals_.count(u)) return u;
+        for (size_t k = 0; k < blk.pinNames.size(); ++k)
+            if (toUpper(blk.pinNames[k]) == u && k < portNames.size()) return portNames[k];
+        return full + "." + u;
+    };
+    for (const auto& a : subcktA_[pi.subckt]) {  // the body's XSPICE devices, on the flattened nets
+        PendingA x{full + "." + toUpper(a.name), a.model, {}, topLine};
+        for (const auto& g : a.groups) {
+            std::vector<std::string> fg;
+            for (const auto& n : g) {
+                const bool inv = !n.empty() && n[0] == '~';
+                const std::string base = inv ? n.substr(1) : n;
+                fg.push_back(toUpper(base) == "NULL" ? base : (inv ? "~" : "") + flat(base));
+            }
+            x.groups.push_back(fg);
+        }
+        pendingA_.push_back(x);
+    }
     for (const auto& child : subcktChildren_[pi.subckt]) {
         std::vector<int> childPorts;
+        std::vector<std::string> childNames;
         for (int l : child.nodes) childPorts.push_back(l == 0 ? 0 : map[l - 1]);
-        expandInstance(child, childPorts, depth + 1, full + ".");
+        for (const auto& n : child.portNames) childNames.push_back(flat(n));
+        expandInstance(child, childPorts, depth + 1, full + ".", childNames, topLine);
     }
 }
 
@@ -2507,7 +2541,7 @@ void SPICEParser::parseXspice(const std::string& line, int lineNum) {
         if (i + 1 >= w.size()) throw std::runtime_error(a.name + ": '[' without ']'");
         a.groups.push_back(g);
     }
-    pendingA_.push_back(a);
+    (inSubckt_ ? subcktA_[subcktName_] : pendingA_).push_back(a);
 }
 
 // The A devices against their .model cards: ngspice 47's d_buffer ... d_dff, adc_bridge and dac_bridge
@@ -2522,6 +2556,20 @@ void SPICEParser::resolveXspice(int& at) {
         {"ADC_BRIDGE", Kind::ADC}, {"DAC_BRIDGE", Kind::DAC}};
     auto net = std::make_shared<xspice::Net>();
     std::map<std::string, int> dnode;  // upper-case name -> digital node
+    std::set<int> orphan;              // node indices X lines gave digital nets
+    auto analogNode = [&](const std::string& n, const std::string& inst) {
+        const std::string key = toUpper(n);
+        if (const auto a = result_.nodeIndex.find(key); a != result_.nodeIndex.end()) {
+            analogTop_.insert(a->second);
+            return a->second;
+        }
+        if (key.find('.') != std::string::npos)
+            throw std::runtime_error(inst + ": analog port " + n + " is on no analog element of its subcircuit");
+        const int idx = nodeIndex(n);  // a top-level node only this bridge names
+        result_.nodeIndex[key] = idx;
+        result_.netlist.numGlobalNodes = std::max(result_.netlist.numGlobalNodes, idx);
+        return idx;
+    };
     auto digital = [&](const std::string& n, const std::string& inst, bool nullOk) -> xspice::Port {
         if (toUpper(n) == "NULL") {
             if (!nullOk) throw std::runtime_error(inst + ": this port cannot be NULL");
@@ -2529,7 +2577,11 @@ void SPICEParser::resolveXspice(int& at) {
         }
         const bool inv = n[0] == '~';  // inverted: an input reads, an output drives, the inverse
         const std::string name = inv ? n.substr(1) : n, key = toUpper(name);
-        if (nodeMap_.count(key)) throw std::runtime_error(inst + ": node " + name + " is analog; a digital port needs an event node");
+        if (const auto a = result_.nodeIndex.find(key); a != result_.nodeIndex.end()) {
+            if (analogTop_.count(a->second) || analogGlobal_.count(a->second))
+                throw std::runtime_error(inst + ": node " + name + " is analog; a digital port needs an event node");
+            orphan.insert(a->second);  // only X ports and pins name it: no analog node
+        }
         auto [it, fresh] = dnode.emplace(key, (int)net->nodes.size());
         if (fresh) {
             std::string low = name;
@@ -2596,7 +2648,7 @@ void SPICEParser::resolveXspice(int& at) {
             if (an.size() != dn.size() || an.empty()) throw std::runtime_error(a.name + ": the analog and digital port vectors differ in size");
             for (size_t i = 0; i < an.size(); ++i) {
                 if (dnode.count(toUpper(an[i]))) throw std::runtime_error(a.name + ": node " + an[i] + " is digital; this port is analog");
-                x.analog.push_back(nodeIndex(an[i]));
+                x.analog.push_back(analogNode(an[i], a.name));
                 (adc ? x.out : x.in).push_back(digital(dn[i], a.name, false));
                 if (!adc) {  // the output: an ideal source to ground, ramped by the simulation (ngspice: a#branch)
                     VoltageSource v{};
@@ -2633,6 +2685,15 @@ void SPICEParser::resolveXspice(int& at) {
         if (x.kind == Kind::DAC && !(x.trise > 0.0 && x.tfall > 0.0 && x.vhi != x.vlo))
             throw std::runtime_error("model " + c->name + ": needs t_rise, t_fall > 0 and out_high != out_low");
         net->insts.push_back(std::move(x));
+    }
+    // A digital net an X line numbered as a node: unnamed (no analog output), held at 0 V (nothing else is on it)
+    for (int idx : orphan) {
+        if (analogTop_.count(idx) || analogGlobal_.count(idx)) continue;  // an adc/dac port made it analog after all
+        for (auto* names : {&nodeMap_, &result_.nodeIndex})
+            for (auto it = names->begin(); it != names->end();) it = it->second == idx ? names->erase(it) : std::next(it);
+        Resistor r{};
+        r.name = "#XSPICE_NET" + std::to_string(idx); r.nodeTerminal1 = idx; r.nodeTerminal2 = 0; r.resistance_ohms = 1.0;
+        result_.netlist.globalBlock.resistors.push_back(r);
     }
     result_.netlist.digital = net;
 }

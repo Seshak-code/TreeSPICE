@@ -464,7 +464,7 @@ int main() {
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 NM W=10u\n.model NM NMOS\n", "expected 4 nodes"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 y inv\n.model inv d_inverter\n", "supported in .tran only"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 j k c NULL NULL q qb jk\n.model jk d_jkff\n", "D_JKFF is not supported yet"},
-            {"V1 1 0 DC 1\nR1 1 0 1k\n.subckt s x\na1 d1 y inv\n.ends\nX1 1 s\n.model inv d_inverter\n", "inside a .subckt are not supported"},
+            {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 d2 d3 tri\n.model tri d_tristate(inertial_delay=true)\n", "inertial_delay on a d_tristate is not supported yet"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 y inv\n.model inv d_inverter(delay=1n)\n", "DELAY is not a D_INVERTER parameter"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 0 NM\n.model NM NMOS\n", "expected 4 nodes (d g s b) for a LEVEL 1"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 SN\n.model SN NMOS LEVEL=57\n", "(B3SOI) is not supported"},
