@@ -1,0 +1,8 @@
+* TLEVC=1 junction capacitance at -40 C (CJO, VJ, CJSW, PHP temperature laws): AC of a reverse-biased diode
+.temp -40
+V1 1 0 DC 2 AC 1
+R1 1 2 10k
+D1 0 2 d2 pj=1
+.model d2 d is=1e-14 cjo=1p vj=0.7 m=0.4 cjsw=0.5p php=0.6 mjsw=0.3 tlevc=1 cta=1e-3 tpb=2e-3 ctp=2e-3 tphp=1e-3
+.ac dec 10 1meg 10g
+.end

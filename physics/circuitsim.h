@@ -688,15 +688,23 @@ public:
   }
 
   // Independent source value: its waveform in transient, else DC, times the
-  // source-stepping factor (1 except while solveDC ramps the sources).
+  // source-stepping factor (1 except while solveDC ramps the sources). A transient's
+  // operating point (tranOpSources_) takes the waveforms at t = 0, as ngspice's TRANOP:
+  // V1 1 0 12 PWL(0 0 ...) starts the transient from 0 V, not 12.
   double srcFact_ = 1.0;
+  bool tranOpSources_ = false;
+  // ngspice's TRANOP value (probed on 47): PULSE, SIN, EXP and PWL at t = 0 whatever the DC value; SFFM and AM 0
+  // (SFFM's t = 0 value is VO: ngspice still starts it from 0)
+  template <class S> static double tranOpValue(const S &s, double dc) {
+    return s.type == "SFFM" || s.type == "AM" ? 0.0 : waveformValue(s, dc, 0.0);
+  }
   // A fatal OSDI model error during the current analysis (the model's own text):
   // it fails the analysis at once instead of retrying ever smaller steps.
   mutable std::string osdiFatal_;
   mutable std::string osdiNonFinite_;
   double ptranGmin_ = 0.0;  // node-to-ground gmin while solveDC runs its transient OP  // the last non-finite OSDI evaluation: reported if the analysis fails
   template <class S> double sourceValue(const S &s, double dc, double h, double time) const {
-    return srcFact_ * (h > 1e-15 ? waveformValue(s, dc, time) : dc);
+    return srcFact_ * (h > 1e-15 ? waveformValue(s, dc, time) : tranOpSources_ ? tranOpValue(s, dc) : dc);
   }
 
   // OSDI devices (compiled Verilog-A: BSIM4, BSIM-CMG, ...). An instance's local
@@ -1021,13 +1029,21 @@ public:
     if (!j.st) return sh;
     auto V = [&](int k) { return j.n[k] > 0 && j.n[k] <= (int)x.size() ? x[j.n[k] - 1] : 0.0; };
     auto *st = j.st;
+    if (offHold_ && (j.d ? j.d->off : j.f ? j.f->off : j.q->off)) {  // ngspice INITFIX: an OFF device's junctions at 0 V
+      const double t = j.q ? (j.q->isNPN ? 1.0 : -1.0) : j.f ? jfetType(*j.f) : 1.0;
+      const double raw[2] = {j.d ? V(2) - V(1) : j.f ? t * (V(1) - V(2)) : t * (V(5) - V(6)),
+                             j.d ? 0.0 : j.f ? t * (V(1) - V(0)) : t * (V(5) - V(4))};
+      for (int k = 0; k < 2; ++k) { st->jv[k] = 0.0; sh.d[k] = -raw[k]; }
+      st->jvState = 1;
+      return sh;
+    }
     if (j.d) {
       const auto m = diodeModel(*j.d, gmin_);
       const double vcrit = compute_vcrit(m.vte, m.is), raw = V(2) - V(1);
       double vl = vcrit;
       if (st->jvState) {
-        vl = (m.breakdown && raw < std::min(0.0, -m.xbv + 10.0 * m.vte))
-                 ? -(pnjlim(-(raw + m.xbv), -(st->jv[0] + m.xbv), m.vte, vcrit) + m.xbv)
+        vl = (m.breakdown && raw < std::min(0.0, -m.xbv + 10.0 * m.vtb))
+                 ? -(pnjlim(-(raw + m.xbv), -(st->jv[0] + m.xbv), m.vtb, vcrit) + m.xbv)
                  : pnjlim(raw, st->jv[0], m.vte, vcrit);
       }
       st->jv[0] = vl; st->jvState = 1;
@@ -1071,6 +1087,7 @@ public:
     forEachJunction(nl, [&](const Junction &j) { if (j.st) j.st->jvState = 0; });
   }
   bool limitJunctions_ = true;  // off for the AC / sensitivity Jacobian at a converged point
+  bool offHold_ = false;        // the first operating-point solve, with OFF devices held at 0 V (solveDC)
 
   // Newton stamp of a junction device: I(x) ~ I(vl) + G (v(x) - vl) at the
   // limited junction voltages vl (ngspice's companion), i.e. stampByDual at the
@@ -1151,13 +1168,38 @@ public:
   // DC sensitivity of v(outNode) - v(refNode), or of i(outSource) when outSource is set, to every element value
   // at the last solveDC() operating point (ngspice .sens), by the adjoint method on the final Jacobian: one
   // solve J^T l = d(out)/dx, then dOut/dp = l . (-dF/dp) per parameter. Names are ngspice's vectors: r1 (d/dR),
-  // r1_m and r1_scale, v1, i1 (d/dI), i1_m. Parameters of other devices are listed in `unsupported`, never as 0.
+  // r1_m and r1_scale, v1, i1 (d/dI), i1_m, and for device parameters m1:kp (model) and m1_w (instance).
+  // A device parameter's dF/dp is a central difference (ngspice's relative step 1e-6) of the KCL residual at the
+  // operating point, on the netlist `reparse` gives with that one parameter overridden: exact for any model, OSDI
+  // ones included. Whatever is not computed is listed in `unsupported`, never reported as 0.
   struct SensResult {
     std::vector<std::string> names, unsupported;
     std::vector<double> values;
     std::string error;
   };
-  SensResult solveSens(TensorNetlist &netlist, int outNode, int refNode, const std::string &outSource);
+  SensResult solveSens(TensorNetlist &netlist, int outNode, int refNode, const std::string &outSource,
+                       const std::vector<SensParam> &params = {}, int zeroParams = 0,
+                       const std::function<bool(const SensParam &, TensorNetlist &)> &reparse = {});
+
+  // ngspice .sens ... ac: the complex sensitivity of the AC output at each frequency, d(out)/dp for R/C/L values
+  // (r1, r1_m, r1_scale, c1..., l1...), V/I DC values and AC magnitudes (v1, v1_acmag, i1, i1_m, i1_acmag) and the
+  // device parameters solveSens covers. Each parameter's whole effect: the operating-point shift dx = J^-1 dF/dp
+  // (from the DC residuals), then the AC matrix built at (p +- dp, x0 +- dp dx) and the excitation, against two
+  // adjoint solves per frequency. values/imag are row-major [name][frequency].
+  struct SensACResult {
+    std::vector<std::string> names, unsupported;
+    std::vector<double> values, imag;
+    std::string error;
+  };
+  SensACResult solveSensAC(TensorNetlist &netlist, int outNode, int refNode, const std::string &outSource,
+                           const std::vector<double> &freqs, const std::vector<SensParam> &params, int zeroParams,
+                           const std::function<bool(const SensParam &, TensorNetlist &)> &reparse);
+
+  // ngspice .tf at the last solveDC() operating point: the small-signal gain from top-level source inSource to
+  // v(outNode) - v(refNode) (or i(outSource)), the impedance the input source sees and the output impedance, each
+  // from one solve of the DC Jacobian. Impedances that are open circuits read 1e20, as in ngspice.
+  struct TFResult { double gain = 0.0, zin = 0.0, zout = 0.0; std::string error; };
+  TFResult solveTF(TensorNetlist &netlist, int outNode, int refNode, const std::string &outSource, const std::string &inSource);
 
   // The grid of ngspice 47's .ac (probed point by point). lin: n points, but n = 2 gives only the first.
   // oct / dec: N = floor(log(f2/f1) * n) steps of 2^(1/n) / 10^(1/n). dec over more than one decade refits the
@@ -2013,11 +2055,10 @@ public:
     return max_err;
   }
 
-  // Phase 2.5: Differentiable Physics
-  enum class ComponentType { RESISTOR, CAPACITOR, INDUCTOR, DIODE, MOSFET, BJT, JFET, VSOURCE, ISOURCE };
+  enum class ComponentType { RESISTOR, VSOURCE, ISOURCE };
 
-  // b = -dF/dp (size nTot) of one instance parameter at the converged point, F the DC residual (node KCL
-  // "current leaving", then the branch equations). Empty if the parameter is not implemented.
+  // b = -dF/dp (size nTot) of a top-level element value at the converged point, F the DC residual (node KCL
+  // "current leaving", then the branch equations); solveSens differentiates device parameters itself.
   std::vector<double> sensRhs(TensorNetlist &netlist, ComponentType type, int index, const std::string& paramName,
                               const std::vector<double>& v_converged, int nTot) {
       std::vector<double> b_sens(nTot, 0.0);
@@ -2053,111 +2094,11 @@ public:
               // b[n1] = -dF/dp = -dI/dp
               if (r.nodeTerminal1 > 0) b_sens[r.nodeTerminal1-1] -= didp;
               if (r.nodeTerminal2 > 0) b_sens[r.nodeTerminal2-1] += didp; // I_leaving_n2 is -I -> d(-I)/dp = -dI/dp -> b = +dI/dp
-          } 
-          else if (type == ComponentType::DIODE || type == ComponentType::BJT) {
-              // dI/dp of the same junctionCurrents() the solve used, by central
-              // difference on the instance's parameter (global-block devices).
-              // ponytail: finite difference (relative step 1e-6); Dual parameters if precision matters.
-              const bool isD = type == ComponentType::DIODE;
-              const size_t count = isD ? netlist.globalBlock.diodes.size() : netlist.globalBlock.bjts.size();
-              if (index < 0 || index >= (int)count) return {};
-              Diode d; BJT q;
-              double *par = nullptr;
-              const void *orig = nullptr;
-              if (isD) {
-                  d = netlist.globalBlock.diodes[index]; orig = &netlist.globalBlock.diodes[index];
-                  par = paramName == "Is" ? &d.saturationCurrent_I_S_A : paramName == "N" ? &d.emissionCoefficient_N
-                      : paramName == "Vt" ? &d.thermalVoltage_V_T_V : nullptr;
-              } else {
-                  q = netlist.globalBlock.bjts[index]; orig = &netlist.globalBlock.bjts[index];
-                  par = paramName == "Is" ? &q.saturationCurrent_I_S_A
-                      : (paramName == "BetaF" || paramName == "Beta") ? &q.betaF
-                      : paramName == "BetaR" ? &q.betaR : paramName == "Vt" ? &q.thermalVoltage_V_T_V : nullptr;
-              }
-              if (!par) return {};
-              Junction jj;
-              forEachJunction(netlist, [&](const Junction &j) { if ((const void *)(isD ? (const void *)j.d : (const void *)j.q) == orig) jj = j; });
-              jj.d = isD ? &d : nullptr; jj.q = isD ? nullptr : &q; jj.st = nullptr;
-              std::array<double, 7> x{};
-              for (int k = 0; k < jj.terms; ++k) x[k] = getV(jj.n[k]);
-              const double p0 = *par, dp = 1e-6 * std::max(std::abs(p0), 1e-30);
-              *par = p0 + dp; const auto Ip = junctionCurrents(jj, x, 0.0);
-              *par = p0 - dp; const auto Im = junctionCurrents(jj, x, 0.0);
-              for (int k = 0; k < jj.terms; ++k)
-                  if (jj.n[k] > 0 && jj.n[k] <= (int)b_sens.size()) b_sens[jj.n[k] - 1] -= (Ip[k] - Im[k]) / (2.0 * dp);
-          }
-          else if (type == ComponentType::MOSFET) {
-              if (index < 0 || index >= (int)netlist.globalBlock.mosfets.size()) return {};
-              const auto& m = netlist.globalBlock.mosfets[index];
-
-              // dI/dp of the same mos1_currents() the solve used: Vth (VTO), W, L
-              const Mos1Params<double> p = mos1Params(m, gmin_);
-              if (p.level != 1) return {};  // ponytail: levels 2/3 have no parameter sensitivity
-              Mos1Params<Dual<double>> pd{p.polarity, p.beta, p.vto, p.lambda, p.gamma, p.phi, p.isat, p.vt};
-              const double leff = m.l - 2.0 * m.card.ld;
-              if (paramName == "Vth") pd.vto.grad = 1.0;
-              if (paramName == "W") pd.beta.grad = p.beta / m.w;
-              if (paramName == "L") pd.beta.grad = -p.beta / leff;
-              const auto c = mos1_currents(Dual<double>(getV(m.drain)), Dual<double>(getV(m.gate)),
-                                           Dual<double>(getV(m.source)), Dual<double>(getV(m.body)), pd);
-              if (m.drain > 0) b_sens[m.drain-1] -= c.d.grad;
-              if (m.source > 0) b_sens[m.source-1] -= c.s.grad;
-              if (m.body > 0) b_sens[m.body-1] -= c.b.grad;
-          }
-          // CAPACITOR SENSITIVITY (DC: dI/dC = 0, AC needs omega)
-          else if (type == ComponentType::CAPACITOR) {
-              if (index < 0 || index >= (int)netlist.globalBlock.capacitors.size()) return {};
-              // DC: Capacitors are open circuit, no current, so dI/dC = 0.
-              // For AC sensitivity, user would need to provide omega. Placeholder for now.
-          }
-          // INDUCTOR SENSITIVITY (DC: dI/dL = 0, AC needs omega)
-          else if (type == ComponentType::INDUCTOR) {
-              if (index < 0 || index >= (int)netlist.globalBlock.inductors.size()) return {};
-              // DC: Inductors are short, no L term in DC model. dI/dL = 0.
           }
       } catch(...) {
           return {};
       }
       return b_sens;
-  }
-
-  /**
-   * calculateSensitivity
-   * Computes the gradient of node voltages with respect to a specific component parameter (dV/dp).
-   * Solves: J * (dV/dp) = - (dF/dp)
-   */
-  std::vector<double> calculateSensitivity(TensorNetlist &netlist, 
-                                           ComponentType type, 
-                                           int index, 
-                                           const std::string& paramName, 
-                                           const std::vector<double>& v_converged) {
-      if (v_converged.empty()) return {};
-
-      // 1. Re-build Jacobian (J) at convergence point
-      // We assume standard stamping (double params) gives us the correct J = dF/dV
-      scheduler.schedule(netlist);
-      matrixBuilder.clear();
-      const int nTot = systemSize(netlist);  // nodes + branch currents
-      matrixBuilder.setDimensions(nTot, nTot);
-      rhsVector.assign(nTot, 0.0);
-      std::vector<double> x_converged = v_converged;
-      if ((int)lastSolution_.size() == nTot) x_converged = lastSolution_;  // with branch currents
-      x_converged.resize(nTot, 0.0);
-      limitJunctions_ = false;  // linearise at the converged point itself
-      stampAllElements(netlist, 0.0, x_converged, 0.0); // h=0, time=0 for DC sensitivity
-      limitJunctions_ = true;
-      // (no node gmin: the Jacobian of the converged OP has only junction GMIN)
-      Csr_matrix J = matrixBuilder.createCsr(); /* Explicitly J */
-      
-      // 2. RHS vector b = - dF/dp
-      std::vector<double> b_sens = sensRhs(netlist, type, index, paramName, v_converged, nTot);
-      if (b_sens.empty()) return {};
-
-      // 3. Solve J * x = b
-      // J is nonsymmetric (PCG assumed symmetry); solve exactly, return node rows
-      SolverResult res = solveLinear(J, b_sens);
-      res.solution.resize(netlist.numGlobalNodes);
-      return res.solution;
   }
 
   // Phase 2: Numerical Integration Strategy
@@ -2274,12 +2215,12 @@ public:
         // SoA Pathway (Flattened). tensorizeNetlist() stores DC values only, so
         // in transient re-evaluate every source at `time`, walking blocks in the
         // same order tensorizeNetlist() flattens them (global, then instances).
-        if (h > 1e-15) {
+        if (h > 1e-15 || tranOpSources_) {
             size_t ki = 0;
             auto refresh = [&](const TensorBlock &blk) {
                 for (const auto &i : blk.currentSources)
                     if (ki < soaBlock.currentSources.currents.size())
-                        soaBlock.currentSources.currents[ki++] = waveformValue(i, i.current_A, time);
+                        soaBlock.currentSources.currents[ki++] = h > 1e-15 ? waveformValue(i, i.current_A, time) : tranOpValue(i, i.current_A);
             };
             refresh(netlist.globalBlock);
             for (const auto &inst : netlist.instances) {

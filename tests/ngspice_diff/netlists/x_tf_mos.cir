@@ -1,0 +1,9 @@
+* .tf: MOS1 common-source stage with body effect and a resistive source
+VDD 5 0 DC 5
+VG 2 0 DC 2
+RD 5 3 10k
+RS 4 0 1k
+M1 3 2 4 0 NM W=20u L=2u
+.model NM NMOS (LEVEL=1 VTO=0.8 KP=60u LAMBDA=0.02 GAMMA=0.5 PHI=0.7)
+.tf v(3) VG
+.end

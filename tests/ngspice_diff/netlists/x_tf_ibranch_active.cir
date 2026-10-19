@@ -1,0 +1,7 @@
+* .tf: i(vsrc) output with a negative-resistance load (the branch current is positive, so ngspice's reading is finite)
+V1 1 0 DC 1
+R1 1 2 1k
+G1 2 0 2 0 -2m
+Vm 2 0 0
+.tf i(Vm) V1
+.end

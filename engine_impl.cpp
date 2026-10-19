@@ -114,13 +114,14 @@ static std::function<void(double)> sweepSetter(TensorNetlist& netlist, const std
 
 // The request's netlist at circuit temperature tempC (NaN: the netlist's), with the values of this .step run applied.
 // Returns an error text, or "".
-static std::string parseRequest(const SimulationRequestDTO& req, double tempC, SPICEParseResult& out) {
+static std::string parseRequest(const SimulationRequestDTO& req, double tempC, SPICEParseResult& out,
+                                const SensParam* sens = nullptr) {
     std::map<std::string, double> params;
     for (const auto& s : req.stepValues) {
         if (s.kind == 'P') params[s.name] = s.value;
         else if (s.kind == 'T') tempC = s.value;
     }
-    out = SPICEParser().parse(req.source.payload, req.source.baseDir, tempC, params);
+    out = SPICEParser().parse(req.source.payload, req.source.baseDir, tempC, params, sens);
     if (!out.success) return "SPICE parse error: " + out.errorMessage;
     for (const auto& s : req.stepValues) {
         if (s.kind != 'E') continue;
@@ -134,10 +135,12 @@ static std::string parseRequest(const SimulationRequestDTO& req, double tempC, S
 // The corner temperature wins over the netlist's .temp (as an explicit .dc request wins over its .dc);
 // every temperature-dependent value is resolved by the parser. A .temp list is for .op/.dc (listOk) only,
 // a .step list for the analyses that run it (stepOk).
+// ponytail: 27 is the DTO's default, so a corner asking for 27 C cannot override a netlist .temp
+static double cornerTempC(const SimulationRequestDTO& req) { return req.corner.temperature != 27.0 ? req.corner.temperature : NAN; }
+
 static bool deserialiseRequest(const SimulationRequestDTO& req, SPICEParseResult& out,
                                SimulationResponseDTO& failure, bool listOk = false, bool stepOk = false, bool digitalOk = false) {
-    // ponytail: 27 is the DTO's default, so a corner asking for 27 C cannot override a netlist .temp
-    if (const std::string e = parseRequest(req, req.corner.temperature != 27.0 ? req.corner.temperature : NAN, out); !e.empty()) {
+    if (const std::string e = parseRequest(req, cornerTempC(req), out); !e.empty()) {
         failure.errorDetail = e;
         return false;
     }
@@ -702,11 +705,63 @@ SimulationResponseDTO SessionImpl::runSens(const SimulationRequestDTO& req,
         else if (SolverStep dc = sim.solveDC(parsed.netlist); !dc.stats.converged)
             r.errorDetail = "DC operating point failed before sensitivity analysis: " + dc.stats.error_detail;
         else {
-            auto sn = sim.solveSens(parsed.netlist, parsed.sensOut, parsed.sensRef, parsed.sensSource);
-            r.errorDetail = sn.error;
-            r.converged   = sn.error.empty();
+            auto reparse = [&](const SensParam& p, TensorNetlist& nl) {
+                SPICEParseResult q;
+                if (!parseRequest(req, cornerTempC(req), q, &p).empty()) return false;
+                nl = std::move(q.netlist);
+                return true;
+            };
+            if (parsed.sensSweep.empty()) {
+                auto sn = sim.solveSens(parsed.netlist, parsed.sensOut, parsed.sensRef, parsed.sensSource,
+                                        parsed.sensParams, parsed.sensZeroParams, reparse);
+                r.errorDetail = sn.error;
+                r.extended.sens = {std::move(sn.names), std::move(sn.values), {}, {}, std::move(sn.unsupported)};
+            } else {
+                auto freqs = CircuitSim::acFrequencies(parsed.sensSweep, parsed.sensPoints, parsed.sensStart, parsed.sensStop);
+                auto sn = sim.solveSensAC(parsed.netlist, parsed.sensOut, parsed.sensRef, parsed.sensSource, freqs,
+                                          parsed.sensParams, parsed.sensZeroParams, reparse);
+                r.errorDetail = sn.error;
+                r.extended.sens = {std::move(sn.names), std::move(sn.values), std::move(freqs), std::move(sn.imag),
+                                   std::move(sn.unsupported)};
+            }
+            r.converged   = r.errorDetail.empty();
             r.extended.hasSens = r.converged;
-            r.extended.sens = {std::move(sn.names), std::move(sn.values), std::move(sn.unsupported)};
+        }
+        r.backend = backendOf(sim, precision_);
+    }
+    r.success = r.converged;
+    status_.store(r.converged ? JobStatus::Completed : JobStatus::Failed);
+    return r;
+}
+
+// ── DC transfer function ──────────────────────────────────────────────────
+SimulationResponseDTO SessionImpl::runTF(const SimulationRequestDTO& req,
+                                          const EngineCallbacks& /*cb*/) {
+    status_.store(JobStatus::Running);
+    SimulationResponseDTO r;
+    r.jobId        = jobId_;
+    r.analysisType = AnalysisTypeDTO::TRANSFER_FUNCTION;
+    SPICEParseResult parsed;
+    if (deserialiseRequest(req, parsed, r)) {
+        CircuitSim sim;
+        sim.execMode = selectExecMode(precision_);
+        if (!parsed.hasTF)
+            r.errorDetail = "Transfer function needs .tf v(out[,ref]) src or .tf i(vsrc) src.";
+        else if (SolverStep dc = sim.solveDC(parsed.netlist); !dc.stats.converged)
+            r.errorDetail = "DC operating point failed before transfer function analysis: " + dc.stats.error_detail;
+        else {
+            auto tf = sim.solveTF(parsed.netlist, parsed.tfOut, parsed.tfRef, parsed.tfOutSource, parsed.tfSource);
+            r.errorDetail = tf.error;
+            r.converged   = tf.error.empty();
+            r.extended.hasDcTF = r.converged;
+            auto lower = [](std::string s) { for (auto& c : s) c = (char)std::tolower((unsigned char)c); return s; };
+            // ngspice's vectors: transfer_function, then the impedances by name
+            std::string in = lower(parsed.tfSource) + "#input_impedance",
+                        out = parsed.tfOutSource.empty() ? "output_impedance_at_" + parsed.tfOutLabel
+                                                         : lower(parsed.tfOutSource) + "#output_impedance";
+            double zin = tf.zin, zout = tf.zout;
+            if (out < in) { std::swap(in, out); std::swap(zin, zout); }
+            r.extended.dcTf = {{"transfer_function", in, out}, {tf.gain, zin, zout}};
         }
         r.backend = backendOf(sim, precision_);
     }

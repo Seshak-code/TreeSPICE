@@ -69,6 +69,8 @@ DIALECT = {
     "CircuitSim90/MOS3/rich3.cir": "Xyce's MOS level 3 at 125 C: the engine follows ngspice to 1 mV (both start at v(51) = 0, the gold does not)",
     "XDM/HSPICE/MODELS/correct_instance_parameters.cir": "default-card level 3 PMOS: the engine follows ngspice to 0.3 mV over the sweep "
                                                          "(v(3) 0.53612 vs 0.53613 at VG = 0.7), the gold reads 0.5394",
+    "MULTIPLICITY_FACTOR/capacitor_ic": "IC= on a capacitor without UIC: Xyce applies it at t = 0, ngspice (and the engine) only with UIC",
+    "MULTIPLICITY_FACTOR/inductor_ic": "IC= on an inductor without UIC (Xyce applies it; ngspice only with UIC), and L= on an inductor, which ngspice rejects",
     "BSIMSOI3/": "Xyce's LEVEL 10 is BSIMSOI 3.x; ngspice's (and the engine's) is B4SOI 4.x: a different model",
     "HOMOTOPY/continuation": "BSIMSOI 3.2 cards at LEVEL 10 (Xyce's BSIMSOI3); ngspice's native B4SOI runs them to 4 kV, the engine (B4SOI 4.6) to 1.733 V vs Xyce 1.726 V",
     "Certification_Tests/BUG_277_SON/ring51": "BSIMSOI 3.2 cards (nmos_3_2.mod) at LEVEL 10: Xyce's BSIMSOI3, not ngspice's B4SOI",
@@ -80,6 +82,9 @@ DIALECT = {
 # Cases Xyce itself leaves out of normal testing
 EXCLUDED = {
     "RLC_LADDER/rc_simple_xyce.cir": "performance test (its README: excluded from normal testing): 3000-stage RC, .tran 0.1u 1 = 1e7 steps",
+    "DIODE/diode_with_sidewall_nbv.cir": "NBV=0.3 (a 7.8 mV breakdown slope) clamped through RS=1: Xyce and ngspice stop Newton within "
+                                         "RELTOL (15 mV at 15 V, a factor e^4 in current) at different points (9.915 / 9.891 A at -25 V); "
+                                         "the engine's point satisfies the diode equation, whose I-V matches native ngspice to 1e-6",
 }
 
 OPEN = {

@@ -1,0 +1,12 @@
+* transient operating point: sources at their t = 0 waveform values, not their DC values (V1's DC 12 V, PWL from 0; I1's DC 5 mA, SIN offset 0; V4's DC 3 V, PULSE from 0.3 V)
+V1 1 0 12 PWL(0 0 1m 12)
+R1 1 2 1k
+C1 2 0 1u
+I1 0 3 5m SIN(0 1m 1k)
+R3 3 0 1k
+C3 3 0 100n
+V4 5 0 DC 3 PULSE(0.3 1 0.5m 0.1m 0.1m 0.5m 2m)
+R4 5 6 1k
+C4 6 0 0.5u
+.tran 10u 2m
+.end

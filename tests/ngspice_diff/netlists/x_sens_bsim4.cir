@@ -1,0 +1,8 @@
+* .sens: BSIM4 (OSDI bsim4va in the engine, native in ngspice) model parameters and instance W/L
+.model nb nmos (level=54 version=4.8 vth0=0.45 toxe=4n u0=0.04 vsat=1e5 k1=0.5 rdsw=150 pclm=1.3)
+V1 1 0 DC 1.8
+VG 2 0 DC 0.9
+M1 3 2 0 0 nb W=2u L=0.5u
+R1 1 3 5k
+.sens v(3)
+.end

@@ -24,6 +24,10 @@ perl -0pe 's/(if \(!BSIM4wk1Given\)\s*BSIM4wk1 = 0\.0;\s*)if \(!BSIM4wk1Given\)\
   "$OPENVAF_DIR/integration_tests/BSIM4/bsim4.va" > "$tmp/bsim4.va"
 "$OPENVAF" "$tmp/bsim4.va" -o "$out/bsim4.osdi"
 "$OPENVAF" "$OPENVAF_DIR/integration_tests/BSIMCMG/bsimcmg.va" -o "$out/bsimcmg.osdi"
+# HICUM/L2 2.4.0, the version of ngspice's native HICUM (BJT LEVEL 8); unpatched, it matches native to 4e-5
+"$OPENVAF" "$OPENVAF_DIR/integration_tests/HICUML2/hicuml2.va" -o "$out/hicum2.osdi"
+# VBIC (BJT LEVEL 4, 9) as ngspice 47 runs it: generated from ngspice's own vbicload.c / vbictemp.c (tests/models/vbic_gen.py)
+"$OPENVAF" "$(dirname "$0")/models/vbic_ng.va" -o "$out/vbic.osdi"
 # BSIM-SOI 4.6 (ngspice's native B4SOI, LEVEL 10/58, is 4.4). bsimsoi.va adds the overlap charges to qgate
 # (for the QG/CGG outputs) and then stamps ddt(qgate) from gate to body, beside its own gate-drain and gate-source
 # overlap branches: the overlap capacitance counted twice and pumped into a floating body (Gemini's finding; native
@@ -37,9 +41,12 @@ perl -0pe 's/`define DEFAULT_TNOM 25\b/`define DEFAULT_TNOM 27/ or die "ekv.va: 
            s/^(\s*)parameter real (L|W|M|NS|AS|AD|PS|PD) =/$1(* type="instance" *) parameter real $2 =/mg == 8 or die "ekv.va: instance patch no longer applies\n"' \
   "$OPENVAF_DIR/integration_tests/EKV/ekv.va" > "$tmp/ekv.va"
 "$OPENVAF" "$tmp/ekv.va" -o "$out/ekv.osdi"
-# IHP SG13G2's own PSP103 (module psp103va), when its PDK files are in datasets/pdk/ihp
-ihp="$out/../pdk/ihp/ihp-sg13g2/libs.tech/verilog-a/psp103/psp103.va"
-[ -f "$ihp" ] && "$OPENVAF" "$ihp" -o "$out/psp103.osdi"
+# IHP SG13G2's own PSP103 (module psp103va), R3_CMC resistors, MOS varactor and MOM capacitors, when its PDK
+# files are in datasets/pdk/ihp (ngspice loads them at start-up there; the harness netlists name them with .osdi)
+ihp="$out/../pdk/ihp/ihp-sg13g2/libs.tech/verilog-a"
+for m in psp103/psp103 r3_cmc/r3_cmc mosvar/mosvar cap_cmomi/cap_cmomi cap_cmomf/cap_cmomf; do
+  [ -f "$ihp/$m.va" ] && "$OPENVAF" "$ihp/$m.va" -o "$out/${m#*/}.osdi"
+done
 # bsim3.va (Cogenda's port of BSIM3v3.3) differs from ngspice's b3*.c in five places; the patched copy matches
 # the native model at 27, -40 and 125 C (DC, AC, noise, PMOS) to 1e-3:
 #  - TNOM defaults to 25 C where ngspice uses 27;

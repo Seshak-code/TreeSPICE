@@ -57,6 +57,20 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
     }
     if (solveDC(held).stats.converged) prevVoltages_ = lastSolution_;
   }
+  // OFF devices (D, Q, J; ngspice INITFIX): a first solve holds their junctions at 0 V, then the circuit is solved
+  // from there with them released from 0 V (INITFLOAT), which decides a latch's state. Only a cold start.
+  // ngspice 47 gets there only when its first Newton converges: on a latch it often fails and its gmin stepping,
+  // which ignores OFF, settles where the circuit's asymmetry leans (or on the metastable point).
+  bool offReleased = false;
+  if (!offHold_ && prevVoltages_.empty()) {
+    bool anyOff = false;
+    forEachJunction(netlist, [&](const Junction &j) { anyOff |= j.d ? j.d->off : j.f ? j.f->off : j.q->off; });
+    if (anyOff) {
+      struct Hold { bool &f; ~Hold() { f = false; } } hold{offHold_};
+      offHold_ = true;
+      if (solveDC(netlist).stats.converged) { prevVoltages_ = lastSolution_; offReleased = true; }
+    }
+  }
 
   struct RestoreSources { double &f; ~RestoreSources() { f = 1.0; } } restoreSources{srcFact_};
   osdiFatal_.clear();
@@ -83,6 +97,10 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
   voltageEstimate = warm ? prevVoltages_ : coldSeed;
   if (warm) syncJunctionLimits(netlist, voltageEstimate);
   else resetJunctionLimits(netlist);  // first iteration: junctions at vcrit (ngspice MODEINITJCT)
+  if (offReleased)  // limiting continues from the held 0 V, not from the node voltages
+    forEachJunction(netlist, [&](const Junction &j) {
+      if (j.st && (j.d ? j.d->off : j.f ? j.f->off : j.q->off)) j.st->jv[0] = j.st->jv[1] = 0.0;
+    });
 
   bool converged = false;
   int total_iterations = 0;
@@ -700,8 +718,13 @@ std::string CircuitSim::runTransient(TensorNetlist &netlist, double step, double
                                      const std::function<bool(const SolverStep &)> &onPoint) {
   if (step == 0.0) step = stop / 50.0;  // .tran 0 tstop: ngspice's default TMAX
   if (!(step > 0.0) || !(stop > 0.0)) return "Transient needs step >= 0 and stop time > 0.";
-  const std::string err = beginTransient(netlist, step, uic, stop);
-  return err.empty() ? advanceTo(netlist, stop, onPoint) : err;
+  if (const std::string err = beginTransient(netlist, step, uic, stop); !err.empty()) return err;
+  // t = 0, ngspice's first point: the transient operating point, or the UIC values
+  const std::vector<double> &x = lastSolution_;
+  const size_t nn = std::min<size_t>(netlist.numGlobalNodes, x.size()), nb = std::min<size_t>(nn + branchCount(netlist), x.size());
+  const SolverStep s0{0.0, {x.begin(), x.begin() + nn}, {0, 0.0, true}, netlist.globalBlock.topologyHash, {x.begin() + nn, x.begin() + nb}};
+  if (onPoint && !onPoint(s0)) return "Cancelled.";
+  return advanceTo(netlist, stop, onPoint);
 }
 
 // Waveform sources whose corners the steps must land on (SPICE breakpoints).
@@ -774,6 +797,8 @@ std::string CircuitSim::beginTransient(TensorNetlist &netlist, double step, bool
     }
     // With A devices the operating point alternates digital settles and analog solves until the
     // adc_bridges agree (ngspice: "operating point analog/event alternations")
+    struct TranOp { bool &f; ~TranOp() { f = false; } } tranOp{tranOpSources_};
+    tranOpSources_ = true;
     for (int pass = 0;; ++pass) {
       SolverStep dc = solveDC(netlist.nodeICs.empty() ? netlist : forced);
       if (!dc.stats.converged)
@@ -1322,7 +1347,9 @@ CircuitSim::PoleZeroResult CircuitSim::solvePoleZero(TensorNetlist &netlist, int
   return r;
 }
 
-CircuitSim::SensResult CircuitSim::solveSens(TensorNetlist &netlist, int outNode, int refNode, const std::string &outSource) {
+CircuitSim::SensResult CircuitSim::solveSens(TensorNetlist &netlist, int outNode, int refNode, const std::string &outSource,
+                                             const std::vector<SensParam> &params, int zeroParams,
+                                             const std::function<bool(const SensParam &, TensorNetlist &)> &reparse) {
   SensResult r;
   ACSystem sys;
   if (!acSystem(netlist, sys)) { r.error = "sensitivity needs a converged DC operating point"; return r; }
@@ -1366,14 +1393,214 @@ CircuitSim::SensResult CircuitSim::solveSens(TensorNetlist &netlist, int outNode
     add(g.currentSources[i].name, dI);
     add(g.currentSources[i].name + "_m", g.currentSources[i].current_A * dI);
   }
-  // ponytail: only top-level R, V and I values; every other device (and any subcircuit instance) is counted, not guessed.
-  auto note = [&](const char *kind, size_t count) { if (count) r.unsupported.push_back(std::to_string(count) + " " + kind); };
+  // Device parameters: dF/dp from the residuals of two re-parsed netlists at this operating point
+  // ponytail: two parses and residuals per parameter (a PDK card has hundreds); an adjoint over Dual parameters
+  // in the device kernels would be one pass.
+  int failed = 0;
+  const std::vector<double> &x0 = lastSolution_;
+  for (const auto &p : params) {
+    const double dp = 1e-6 * std::abs(p.value);
+    std::vector<double> F[2];
+    bool ok = (bool)reparse;
+    for (int s = 0; s < 2 && ok; ++s) {
+      SensParam q = p;
+      q.value = p.value + (s ? -dp : dp);
+      TensorNetlist nl;
+      ok = reparse(q, nl) && systemSize(nl) == n;
+      if (ok) { CircuitSim t; t.execMode = execMode; t.calculatePhysicalResiduals(nl, x0, 0.0, 0.0, &F[s]); }
+    }
+    if (!ok) { ++failed; continue; }
+    double s = 0.0;  // the audit's residual is the current into each node: -F
+    for (int i = 0; i < n; ++i) s += adj.solution[i] * (F[0][i] - F[1][i]) / (2.0 * dp);
+    add(p.instance + (p.model ? ":" : "_") + p.param, s);
+  }
+  // ponytail: element values of top-level R, V and I, and top-level device parameters (instance ones: MOSFET W, L);
+  // every other element (and any subcircuit instance) is counted, not guessed.
+  auto note = [&](const std::string &kind, size_t count) { if (count) r.unsupported.push_back(std::to_string(count) + " " + kind); };
   note("switch(es)", g.switches.size()); note("controlled source(s)", g.voltageControlledVoltageSources.size() +
       g.voltageControlledCurrentSources.size() + g.currentControlledVoltageSources.size() + g.currentControlledCurrentSources.size());
-  note("behavioural source(s)", g.behavioural.size()); note("diode(s)", g.diodes.size());
-  note("MOSFET(s)", g.mosfets.size()); note("BJT(s)", g.bjts.size()); note("JFET(s)", g.jfets.size());
-  note("OSDI device(s)", g.osdiDevices.size()); note("transmission line(s)", g.transmissionLines.size());
+  note("behavioural source(s)", g.behavioural.size()); note("transmission line(s)", g.transmissionLines.size());
   note("subcircuit instance(s)", netlist.instances.size());
+  note("device parameter(s) at 0 (no relative step)", zeroParams);
+  note("device parameter(s) whose perturbed netlist failed to parse", failed);
+  if (!g.diodes.empty() || !g.bjts.empty() || !g.jfets.empty() || !g.osdiDevices.empty() || !g.mosfets.empty())
+    r.unsupported.push_back("device instance parameter(s) other than MOSFET W/L (AREA, AD, AS, PD, PS, NRD, NRS, M, TEMP, ...)");
+  return r;
+}
+
+CircuitSim::SensACResult CircuitSim::solveSensAC(TensorNetlist &netlist, int outNode, int refNode,
+                                                 const std::string &outSource, const std::vector<double> &freqs,
+                                                 const std::vector<SensParam> &params, int zeroParams,
+                                                 const std::function<bool(const SensParam &, TensorNetlist &)> &reparse) {
+  SensACResult r;
+  ACSystem sys;
+  if (!acSystem(netlist, sys)) { r.error = "AC sensitivity needs a converged DC operating point"; return r; }
+  const int n = sys.n, nf = (int)freqs.size();
+  auto &g = netlist.globalBlock;
+  std::vector<double> c(n, 0.0);
+  if (!outSource.empty()) {
+    int total = 0;
+    const int vs = branchSlots(netlist, total)[0].vs;
+    const auto it = std::find_if(g.voltageSources.begin(), g.voltageSources.end(), [&](const VoltageSource &v) { return v.name == outSource; });
+    if (it == g.voltageSources.end()) { r.error = ".sens i(" + outSource + "): no such voltage source at the top level"; return r; }
+    c[vs + (it - g.voltageSources.begin())] = 1.0;
+  } else {
+    if (outNode > 0) c[outNode - 1] += 1.0;
+    if (refNode > 0) c[refNode - 1] -= 1.0;
+  }
+  auto real2 = [&](const std::vector<std::complex<double>> &e) {  // [Re; Im]
+    std::vector<double> v(2 * n);
+    for (int i = 0; i < n; ++i) { v[i] = e[i].real(); v[n + i] = e[i].imag(); }
+    return v;
+  };
+  auto mul = [](const Csr_matrix &A, const std::vector<double> &x) {
+    std::vector<double> y(x.size(), 0.0);
+    for (size_t i = 0; i + 1 < A.row_pointer.size(); ++i)
+      for (int p = A.row_pointer[i]; p < A.row_pointer[i + 1]; ++p) y[i] += A.values[p] * x[A.col_indices[p]];
+    return y;
+  };
+  // The response X and the adjoints of Re(out) and Im(out), per frequency
+  const std::vector<double> e0 = real2(acExcitation(netlist));
+  std::vector<std::vector<double>> X(nf), Lr(nf), Li(nf);
+  for (int k = 0; k < nf; ++k) {
+    const double w = 2.0 * M_PI * freqs[k];
+    std::vector<double> cr(2 * n, 0.0), ci(2 * n, 0.0);
+    for (int i = 0; i < n; ++i) { cr[i] = c[i]; ci[n + i] = c[i]; }
+    X[k] = solveLinear(acMatrix(sys, w, false), e0).solution;
+    const Csr_matrix T = acMatrix(sys, w, true);
+    Lr[k] = solveLinear(T, cr).solution;
+    Li[k] = solveLinear(T, ci).solution;
+    if ((int)X[k].size() != 2 * n || (int)Lr[k].size() != 2 * n || (int)Li[k].size() != 2 * n) {
+      r.error = "AC sensitivity: the AC system is singular at " + std::to_string(freqs[k]) + " Hz"; return r;
+    }
+  }
+  const std::vector<double> x0 = lastSolution_;
+  auto lower = [](std::string s) { for (auto &ch : s) ch = (char)std::tolower((unsigned char)ch); return s; };
+  // d(out)/dp at every frequency from the two netlists p +- dp (nullptr row: the parameter could not be perturbed)
+  auto derive = [&](TensorNetlist &a, TensorNetlist &b, double dp, std::vector<std::complex<double>> &row) {
+    std::vector<double> Fa, Fb;
+    { CircuitSim t; t.execMode = execMode; t.calculatePhysicalResiduals(a, x0, 0.0, 0.0, &Fa); }
+    { CircuitSim t; t.execMode = execMode; t.calculatePhysicalResiduals(b, x0, 0.0, 0.0, &Fb); }
+    std::vector<double> dF(n);  // the audit's residual is -F: J dx = dF
+    for (int i = 0; i < n; ++i) dF[i] = (Fa[i] - Fb[i]) / (2.0 * dp);
+    std::vector<double> dx(n, 0.0);
+    if (std::any_of(dF.begin(), dF.end(), [](double v) { return v != 0.0; })) dx = solveLinear(sys.G, dF).solution;
+    if ((int)dx.size() != n) return false;
+    ACSystem sa, sb;
+    auto linearised = [&](TensorNetlist &nl, double sign, ACSystem &out) {  // the AC system of nl at x0 + sign dp dx
+      CircuitSim t;
+      t.execMode = execMode;
+      t.soaBlock = tensorizeNetlist(nl);  // R, D, M, Q stamp from the SoA tensors (solveDC builds them)
+      t.scheduler.schedule(nl);
+      t.lastSolution_ = x0;
+      for (int i = 0; i < n; ++i) t.lastSolution_[i] += sign * dp * dx[i];
+      return t.acSystem(nl, out);
+    };
+    if (!linearised(a, 1.0, sa) || !linearised(b, -1.0, sb)) return false;
+    const std::vector<double> ea = real2(acExcitation(a)), eb = real2(acExcitation(b));
+    row.assign(nf, 0.0);
+    for (int k = 0; k < nf; ++k) {  // dX = R^-1 (de - dR X): d(out) = L . (de - dR X)
+      const double w = 2.0 * M_PI * freqs[k];
+      const std::vector<double> ya = mul(acMatrix(sa, w, false), X[k]), yb = mul(acMatrix(sb, w, false), X[k]);
+      double re = 0.0, im = 0.0;
+      for (int i = 0; i < 2 * n; ++i) {
+        const double v = ((ea[i] - eb[i]) - (ya[i] - yb[i])) / (2.0 * dp);
+        re += Lr[k][i] * v;
+        im += Li[k][i] * v;
+      }
+      row[k] = {re, im};
+    }
+    return true;
+  };
+  auto add = [&](const std::string &name, const std::vector<std::complex<double>> &row, double scale) {
+    r.names.push_back(lower(name));
+    for (const auto &z : row) { r.values.push_back(scale * z.real()); r.imag.push_back(scale * z.imag()); }
+  };
+  int failed = 0;
+  // An element value: the netlist copied with it changed (relative step, or 1e-6 at 0: AC magnitudes)
+  auto element = [&](double &field, std::vector<std::complex<double>> &row) {
+    const double p0 = field, dp = 1e-6 * (p0 != 0.0 ? std::abs(p0) : 1.0);
+    field = p0 + dp; TensorNetlist a = netlist;
+    field = p0 - dp; TensorNetlist b = netlist;
+    field = p0;
+    if (!derive(a, b, dp, row)) { ++failed; return false; }
+    return true;
+  };
+  std::vector<std::complex<double>> row;
+  for (auto &R : g.resistors)
+    if (element(R.resistance_ohms, row)) { add(R.name, row, 1.0); add(R.name + "_m", row, -R.resistance_ohms); add(R.name + "_scale", row, R.resistance_ohms); }
+  for (auto &C : g.capacitors)
+    if (element(C.capacitance_farads, row)) { add(C.name, row, 1.0); add(C.name + "_m", row, C.capacitance_farads); add(C.name + "_scale", row, C.capacitance_farads); }
+  for (auto &L : g.inductors)
+    if (element(L.inductance_henries, row)) { add(L.name, row, 1.0); add(L.name + "_m", row, -L.inductance_henries); add(L.name + "_scale", row, L.inductance_henries); }
+  for (auto &V : g.voltageSources) {
+    if (element(V.voltage_V, row)) add(V.name, row, 1.0);
+    if (element(V.ac_mag, row)) add(V.name + "_acmag", row, 1.0);
+  }
+  for (auto &I : g.currentSources) {
+    if (element(I.current_A, row)) { add(I.name, row, 1.0); add(I.name + "_m", row, I.current_A); }
+    if (element(I.ac_mag, row)) add(I.name + "_acmag", row, 1.0);
+  }
+  for (const auto &p : params) {
+    const double dp = 1e-6 * std::abs(p.value);
+    SensParam qa = p, qb = p;
+    qa.value += dp; qb.value -= dp;
+    TensorNetlist a, b;
+    if (!reparse || !reparse(qa, a) || !reparse(qb, b) || systemSize(a) != n || systemSize(b) != n || !derive(a, b, dp, row)) { ++failed; continue; }
+    add(p.instance + (p.model ? ":" : "_") + p.param, row, 1.0);
+  }
+  // ponytail: top-level elements and devices only, as solveSens
+  auto note = [&](const std::string &kind, size_t count) { if (count) r.unsupported.push_back(std::to_string(count) + " " + kind); };
+  note("switch(es)", g.switches.size()); note("controlled source(s)", g.voltageControlledVoltageSources.size() +
+      g.voltageControlledCurrentSources.size() + g.currentControlledVoltageSources.size() + g.currentControlledCurrentSources.size());
+  note("behavioural source(s)", g.behavioural.size()); note("transmission line(s)", g.transmissionLines.size());
+  note("mutual inductance(s)", g.mutualInductors.size());
+  note("subcircuit instance(s)", netlist.instances.size());
+  note("device parameter(s) at 0 (no relative step)", zeroParams);
+  note("parameter(s) whose perturbed netlist failed", failed);
+  if (!g.diodes.empty() || !g.bjts.empty() || !g.jfets.empty() || !g.osdiDevices.empty() || !g.mosfets.empty())
+    r.unsupported.push_back("device instance parameter(s) other than MOSFET W/L (AREA, AD, AS, PD, PS, NRD, NRS, M, TEMP, ...)");
+  return r;
+}
+
+CircuitSim::TFResult CircuitSim::solveTF(TensorNetlist &netlist, int outNode, int refNode, const std::string &outSource,
+                                         const std::string &inSource) {
+  TFResult r;
+  ACSystem sys;
+  if (!acSystem(netlist, sys)) { r.error = "transfer function needs a converged DC operating point"; return r; }
+  const int n = sys.n;
+  const auto &g = netlist.globalBlock;
+  int total = 0;
+  const int vs = branchSlots(netlist, total)[0].vs;
+  auto branch = [&](const std::string &name) {
+    for (size_t i = 0; i < g.voltageSources.size(); ++i) if (g.voltageSources[i].name == name) return vs + (int)i;
+    return -1;
+  };
+  const auto cs = std::find_if(g.currentSources.begin(), g.currentSources.end(), [&](const CurrentSource &c) { return c.name == inSource; });
+  const int inBr = branch(inSource), outBr = outSource.empty() ? -1 : branch(outSource);
+  if (inBr < 0 && cs == g.currentSources.end()) { r.error = ".tf: no source " + inSource + " at the top level"; return r; }
+  if (!outSource.empty() && outBr < 0) { r.error = ".tf i(" + outSource + "): no such voltage source at the top level"; return r; }
+  auto at = [](const std::vector<double> &x, int node) { return node > 0 ? x[node - 1] : 0.0; };
+  auto inject = [](std::vector<double> &b, int from, int to) {  // 1 A out of node `from` into node `to`
+    if (from > 0) b[from - 1] -= 1.0;
+    if (to > 0) b[to - 1] += 1.0;
+  };
+  // A V source's branch current i per volt of its own value: the impedance it sees is -1/i (ngspice's input impedance).
+  auto zBranch = [](double i) { return std::fabs(i) < 1e-20 ? 1e20 : -1.0 / i; };
+  std::vector<double> b(n, 0.0);
+  if (inBr >= 0) b[inBr] = 1.0; else inject(b, cs->nodePositive, cs->nodeNegative);  // a unit input
+  std::vector<double> x = solveLinear(sys.G, b).solution;
+  if ((int)x.size() != n) { r.error = ".tf: the small-signal system is singular"; return r; }
+  r.gain = outBr >= 0 ? x[outBr] : at(x, outNode) - at(x, refNode);
+  r.zin = inBr >= 0 ? zBranch(x[inBr]) : at(x, cs->nodeNegative) - at(x, cs->nodePositive);
+  if (outBr >= 0 && outBr == inBr) { r.zout = r.zin; return r; }
+  std::fill(b.begin(), b.end(), 0.0);
+  if (outBr >= 0) b[outBr] = 1.0; else inject(b, outNode, refNode);  // a unit test source at the output
+  x = solveLinear(sys.G, b).solution;
+  if ((int)x.size() != n) { r.error = ".tf: the small-signal system is singular"; return r; }
+  // ngspice reads an i(vsrc) output impedance as 1/max(1e-20, i): 1e20 for every passive load. This is -1/i, the
+  // impedance at the source's terminals, as for the input.
+  r.zout = outBr >= 0 ? zBranch(x[outBr]) : at(x, refNode) - at(x, outNode);
   return r;
 }
 

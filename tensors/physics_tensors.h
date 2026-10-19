@@ -75,8 +75,12 @@ inline DiodeModel<double> diodeModel(const Diode& d, double gmin = PhysicsConsta
     p.isw = c.jsw * d.pj * d.mult; p.vtesw = c.ns * vt;
     p.cjsw = c.cjsw * d.pj * d.mult; p.mjsw = c.mjsw; p.vjsw = c.php;
     p.ikf = c.ikf * d.area; p.ikr = c.ikr * d.area;
+    p.isr = c.isr * d.area; p.vtr = c.nr * vt;
+    p.vtb = (std::isnan(c.nbv) ? d.emissionCoefficient_N : c.nbv) * vt;
     p.breakdown = c.bvGiven;
-    if (p.breakdown) p.xbv = diode_breakdown_xbv(c.bv, c.ibv * d.area, p.is, p.vte);
+    // ngspice (probed): I(-BV) is IBV per parallel device, M scales it and AREA does not; xbv is solved with the
+    // bottom and sidewall saturation currents together, and only the bottom one breaks down
+    if (p.breakdown) p.xbv = diode_breakdown_xbv(c.bv, c.ibv * d.mult, p.is + p.isw, p.vtb);
     return p;
 }
 

@@ -1,0 +1,12 @@
+* IHP SG13G2 HV MOS varicap (sg13_hv_svaricap: mosvar through OSDI, a behavioural well resistor, an OFF substrate diode)
+.osdi mosvar.osdi
+.lib pdk/ihp/ihp-sg13g2/libs.tech/ngspice/models/cornerMOShv.lib mos_tt
+VG 1 0 DC 0.5 AC 1
+R1 1 2 50
+VW w 0 DC 1.5
+XV1 2 w 2 0 sg13_hv_svaricap w=3.74e-6 l=0.3e-6 Nx=2
+VG2 3 0 DC -1 AC 1
+R2 3 4 50
+XV2 4 w 4 0 sg13_hv_svaricap w=5e-6 l=0.6e-6
+.ac dec 10 1meg 100g
+.end

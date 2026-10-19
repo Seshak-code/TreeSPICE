@@ -41,9 +41,6 @@ jobs:
           [ "$RUNNER_OS" = Windows ] && echo "EXE=.exe" >> "$GITHUB_ENV"
           echo "PY=$(command -v python3 || command -v python)" >> "$GITHUB_ENV"
 
-      - name: Engine tests
-        run: ctest --test-dir build -C Release --output-on-failure
-
       - name: Cache ngspice (Linux)
         if: runner.os == 'Linux'
         uses: actions/cache@v4
@@ -92,6 +89,9 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           OPENVAF="$exe" OPENVAF_DIR="$RUNNER_TEMP/openvaf/src" sh tests/build_osdi.sh
           ls -l datasets/osdi
+
+      - name: Engine tests  # after the OSDI models: test_engine_fixes loads hicum2.osdi from datasets/osdi
+        run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Differential test vs ngspice ${{ env.NGSPICE_VERSION }}
         run: |

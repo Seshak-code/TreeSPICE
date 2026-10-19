@@ -1,0 +1,9 @@
+* diode breakdown with AREA and M: I(-BV) is IBV per parallel device (M scales it, AREA does not)
+V1 1 0 0
+D1 0 1 dm area=3
+D2 0 1 dm m=2
+D3 0 1 dm area=2 m=3
+R1 1 0 1meg
+.model dm d is=1e-14 n=1 bv=5 ibv=1e-6
+.dc V1 4 5.6 0.05
+.end

@@ -1,0 +1,8 @@
+* resistor whose value reads node voltages (ngspice: a B source I = V(a,b)/R(expr)), DC sweep and transient
+V1 1 0 DC 0 SIN(0 2 1k)
+R1 1 2 r={1k*(1+0.2*v(1,2)*v(1,2))}
+R2 2 0 2k
+R3 1 3 '500+100*abs(v(3))'
+C3 3 0 100n
+.tran 10u 3m
+.end

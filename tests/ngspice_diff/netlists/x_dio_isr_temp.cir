@@ -1,0 +1,7 @@
+* diode recombination current at 75 C: ISR by the NR law, Kgen at the temperature's VJ
+.temp 75
+V1 1 0 0
+D1 1 0 dm
+.model dm d is=1e-18 n=1.02 isr=1e-12 nr=2.2 eg=1.11 xti=3 m=0.45 vj=0.7 bv=8 ibv=1e-7 nbv=2
+.dc V1 -8.4 0.7 0.05
+.end

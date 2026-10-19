@@ -1,0 +1,12 @@
+* .sens ac: MOS1 stage biased by a current source, inductive load (L values, I DC value, gate caps)
+VDD 5 0 DC 5
+VG 2 0 DC 1.5 AC 1
+RG 2 3 1k
+M1 4 3 0 0 NM W=20u L=1u
+L1 5 6 100u
+RL 6 4 2k
+I1 5 4 DC 0.1m
+CL 4 0 1p
+.model NM NMOS (LEVEL=1 VTO=0.7 KP=100u LAMBDA=0.03 GAMMA=0.4 CGSO=3e-10 CGDO=3e-10 CBD=20f TOX=10n)
+.sens v(4) ac dec 3 100k 1g
+.end

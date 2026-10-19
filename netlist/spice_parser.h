@@ -70,6 +70,16 @@ struct SPICEParseResult {
     bool          hasSens = false;
     std::string   sensSource;        // i(vsrc): the source name, else empty
     int           sensOut = 0, sensRef = 0;
+    std::string   sensSweep;            // .sens ... ac dec|oct|lin n fstart fstop (empty: DC)
+    int           sensPoints = 0;
+    double        sensStart = 0.0, sensStop = 0.0;
+    std::vector<SensParam> sensParams;  // the top-level devices' parameters a .sens differentiates
+    int           sensZeroParams = 0;   // parameters left out at 0 (no relative step)
+    // .tf v(out[,ref]) | i(vsrc) insrc: DC small-signal transfer function
+    bool          hasTF = false;
+    std::string   tfSource, tfOutSource;  // the input source; the i(vsrc) output source, else empty
+    std::string   tfOutLabel;             // ngspice's spelling of the output, lower case: v(2), v(2,3)
+    int           tfOut = 0, tfRef = 0;
     std::string   acSweep;           // .ac dec|oct|lin n fstart fstop
     int           acPoints = 0;
     double        acStart = 0.0, acStop = 0.0;
@@ -84,7 +94,7 @@ public:
     // tempC: the circuit temperature [C] instead of the netlist's .temp (NaN: the netlist's)
     // paramOverrides: upper-case global .param values that win over the netlist's (a .step param run)
     SPICEParseResult parse(const std::string& netlistText, const std::string& baseDir = "", double tempC = NAN,
-                           const std::map<std::string, double>& paramOverrides = {});
+                           const std::map<std::string, double>& paramOverrides = {}, const SensParam* sens = nullptr);
 
 private:
     // ── Value and Token Helpers ────────────────────────────────────────
@@ -93,7 +103,8 @@ private:
     static void requireFields(const std::vector<std::string>& tok, size_t n);
     double takeMultiplier(std::vector<std::string>& tok) const;  // removes M <value> pairs; the last wins
     static void requireLinearForm(const std::vector<std::string>& tok, size_t n);
-    double instanceArea(const std::vector<std::string>& tok, size_t from, InstTemp* t = nullptr) const;  // t: accept TEMP, DTEMP
+    // t: accept TEMP, DTEMP; off: accept OFF
+    double instanceArea(const std::vector<std::string>& tok, size_t from, InstTemp* t = nullptr, bool* off = nullptr) const;
     static std::string toUpper(const std::string& s);
     static std::vector<std::string> tokenize(const std::string& line);
 
@@ -173,6 +184,7 @@ private:
     std::vector<PendingIC> pendingICs_;           // resolved once every node is known
     std::string pzNames_[4];                       // .pz node names, resolved likewise
     std::string sensOut_, sensRef_;                // .sens v() node names, resolved likewise
+    std::string tfOut_, tfRef_;                    // .tf v() node names, resolved likewise
     std::map<std::string, std::vector<PendingIC>> subcktICs_;   // .ic / .nodeset in a body (local names), applied per instance
     std::string noiseOut_, noiseRef_;              // .noise node names, resolved likewise
     std::set<std::string> globals_;                // .global node names
@@ -186,6 +198,8 @@ private:
     std::set<std::string> modelNames_;
     std::map<std::string, int> cardLine_;   // "<subckt>/<CARD NAME>" and ".MODEL/<NAME>" -> line (deferred errors)
     std::string resolveAt_;                 // block being resolved
+    const SensParam* sens_ = nullptr;       // one parameter of one device overridden (a .sens perturbation)
+    ModelCard sensCard_;                    // that device's card with the override
     double scale_ = 1.0;                    // .option scale: MOSFET W, L, PD, PS (and AD, AS squared)                              // every .model name (first pass)
     std::map<std::string, std::shared_ptr<osdi::Model>> osdiModels_; // per card, shared by its N devices
 

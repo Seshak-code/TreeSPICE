@@ -437,7 +437,7 @@ int main() {
             {"V1 1 0 DC 3\nR1 1 2 1k\nM1 2 2 0 0 MM\n.model MM NMOS GAMMA=1 PHI=0\n", "PHI must be > 0"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DM\n.model DM D BV=0\n", "BV must be > 0"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DM\n.model DM D N=0\n", "N must be > 0"},
-            {"V1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DM OFF\n.model DM D\n", "OFF is not supported"},
+            {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 NM OFF\n.model NM NMOS\n", "OFF is not supported"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nQ1 2 2 0 QM IC=0.6,5\n.model QM NPN\n", "IC is not supported"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nQ1 2 2 0 NM\n.model NM NMOS\n", "is NMOS, not a NPN/PNP model"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 NM W=10u\n.model NM NMOS\n", "expected 4 nodes"},
@@ -556,6 +556,54 @@ int main() {
             const auto w = session->runDC(req).waveformPoints;
             check(w.size() == 2 && w[0].nodeVoltages[1] == w[1].nodeVoltages[1] && std::abs(w[0].nodeVoltages[1] - 5.0) > 1e-6,
                   "Monte Carlo variation survives the .dc TEMP re-parse");
+        }
+        {   // HICUM/L2 (BJT LEVEL 8, OSDI): a PNP mirrors the NPN. ngspice 47's native HICUM PNP cannot be the
+            // reference: its temperature limiter gets NaN and the operating point fails (the OSDI model in ngspice agrees).
+            const char* card = "c10=2e-30 qp0=2e-14 ich=1e-2 hfe=100 hfc=10 cjei0=1e-14 vdei=0.9 zei=0.5 rbi0=10 rbx=5 rcx=5 re=2 "
+                               "t0=1e-12 cjci0=5e-15 vdci=0.7 zci=0.4 ibeis=1e-18 mbei=1 ireis=1e-16 mrei=2 rth=200 cth=1e-12 "
+                               "favl=1 qavl=5e-14 cjs0=3e-15 itss=1e-20 rsu=100 csu=1e-15 flsh=1";
+            auto ic = [&](const char* type, double s) {
+                std::string n = std::string("hicum\nVC c 0 ") + std::to_string(2 * s) + "\nVB b 0 " + std::to_string(0.85 * s) +
+                                "\nQ1 c b 0 q\n.model q " + type + " level=8 " + card + "\n.op\n.end\n";
+                const auto r = run(PrecisionMode::Native_F64, n);
+                return r.converged && !r.waveformPoints.empty() && !r.waveformPoints.back().branchCurrents.empty()
+                           ? r.waveformPoints.back().branchCurrents[0] : NAN;
+            };
+            const double n = ic("npn", 1.0), p = ic("pnp", -1.0);
+            check(n < -1e-3 && near(p, -n, 1e-9 * std::abs(n)), "HICUM PNP mirrors the NPN (" + std::to_string(n) + " A)");
+            const auto a = run(PrecisionMode::Native_F64, std::string("hicum\nVC c 0 2\nVB b 0 0.8\nQ1 c b 0 q area=2\n.model q npn level=8 ") + card + "\n.op\n.end\n");
+            check(!a.converged && a.errorDetail.find("AREA/M on a HICUM device") != std::string::npos,
+                  "HICUM AREA is an explicit error (" + a.errorDetail + ")");
+        }
+        {   // m= on a subcircuit multiplies its OSDI devices too: an m=3 cell keeps the m=1 cell's voltages
+            // (ngspice 47 multiplies only the non-OSDI devices, so it cannot be the reference)
+            const auto r = run(PrecisionMode::Native_F64, "m\n.osdi bsimcmg.osdi\n.subckt inv in out vdd\nN1 out in 0 0 nfin\n"
+                               "RL vdd out 20k\n.ends\nVDD 1 0 DC 0.8\nVG 2 0 DC 0.5\nX1 2 3 1 inv m=3\nX2 2 4 1 inv\n"
+                               ".model nfin bsimcmg_va type=1\n.op\n.end\n");
+            check(r.converged && near(V(r, 3), V(r, 4), 1e-6) && V(r, 3) < 0.77,
+                  "m=3 on a cell with an OSDI device keeps the cell's voltages (" + std::to_string(V(r, 3)) + " V)");
+        }
+        {   // OFF picks a symmetric latch's state: the OFF transistor ends off. ngspice 47's Newton fails with the device
+            // held and its gmin stepping ignores OFF, so it lands on the metastable 1.186 V / 1.186 V point either way.
+            auto latch = [&](const char* q1, const char* q2) {
+                const auto r = run(PrecisionMode::Native_F64, std::string("latch\nVCC 1 0 5\nRC1 1 2 1k\nRC2 1 3 1k\nRB1 3 4 10k\n"
+                                   "RB2 2 5 10k\nQ1 2 4 0 qn") + q1 + "\nQ2 3 5 0 qn" + q2 + "\n.model qn npn bf=100\n.op\n.end\n");
+                return std::make_pair(V(r, 2), V(r, 3));
+            };
+            const auto a = latch(" OFF", ""), b = latch("", " OFF");
+            check(a.first > 4.5 && a.second < 0.1 && b.first < 0.1 && b.second > 4.5, "OFF selects a symmetric latch's state");
+        }
+        {   // .tf i(vsrc): the true output impedance (-1/i), where ngspice prints 1/max(1e-20, i) = 1e20 (passive) or +1k (active)
+            auto engine = ISimulationEngine::create();
+            auto session = engine->createSession();
+            SimulationRequestDTO req;
+            auto zout = [&](const std::string& load) {
+                req.source.payload = "tf\nV1 1 0 DC 1\nR1 1 2 1k\n" + load + "Vm 2 0 0\n.tf i(Vm) V1\n.end\n";
+                const auto t = session->runTF(req).extended.dcTf;
+                return t.names.size() == 3 && t.names[2] == "vm#output_impedance" ? t.values[2] : NAN;
+            };
+            check(near(zout(""), 1e3, 1e-6) && near(zout("G1 2 0 2 0 -2m\n"), -1e3, 1e-6),
+                  ".tf i(Vm) output impedance: 1k (passive), -1k (negative-resistance load)");
         }
     }
 

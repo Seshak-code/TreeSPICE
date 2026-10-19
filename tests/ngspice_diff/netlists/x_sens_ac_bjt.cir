@@ -1,0 +1,15 @@
+* .sens ac: BJT common-emitter amplifier; bias resistors and VCC act through the operating point, CJE/CJC/TF through the charges
+VCC 6 0 DC 12
+VIN 1 0 DC 0 AC 1
+RS 1 2 600
+CIN 2 3 10u
+R1 6 3 47k
+R2 3 0 10k
+RC 6 4 4.7k
+RE 5 0 1k
+CE 5 0 47u
+Q1 4 3 5 QN
+CL 4 0 10p
+.model QN NPN (IS=1e-14 BF=150 VAF=100 CJE=20p CJC=8p TF=0.5n RB=50)
+.sens v(4) ac dec 3 1k 100meg
+.end

@@ -36,6 +36,14 @@ namespace osdi { class Model; class Instance; }
 // ============================================================================
 
 // Stores device model parameters parsed from .MODEL directives.
+// A real-valued parameter of one top-level device (.sens): a model-card parameter (ngspice's "inst:param") or an
+// instance parameter ("inst_param"); value is the netlist's, or the perturbed one when it overrides a parse.
+struct SensParam {
+    std::string instance, param;  // upper case
+    bool model = true;
+    double value = 0.0;
+};
+
 struct ModelCard {
     std::string name;        // e.g. "nfet_01v8", "DMOD"
     std::string type;        // "NMOS", "PMOS", "D", "NPN", "PNP", "NJFET", "PJFET"
@@ -123,6 +131,7 @@ struct Capacitor {
     double width_m = 0.0;
     double length_m = 0.0;
     double m = 1.0;               // Multiplier
+    double scale = 1.0;           // SCALE= (ngspice: multiplies the capacitance)
 
     std::string expression;         // Symbolic override for capacitance
 
@@ -570,6 +579,7 @@ struct SimulationEnvironment {
  */
 struct Diode {
     std::string instanceName;         // e.g. "D1"
+    bool off = false;                 // OFF: held at 0 V until the operating point converges without it (ngspice)
     int anode;                        // P-type side (+)
     int cathode;                      // N-type side (-)
     // Defaults match SPICE3 D-model defaults and addDiode(); left uninitialised
@@ -594,6 +604,8 @@ struct Diode {
         double kf = 0.0, af = 1.0;                                                            // flicker noise
         double bv = 0.0, ibv = 1e-3;
         bool bvGiven = false;
+        double isr = 0.0, nr = 2.0;  // recombination current (ISR at the temperature)
+        double nbv = NAN;            // breakdown emission coefficient (NaN: N)
     } card;
     double area = 1.0;
     double pj = 0.0, mult = 1.0;  // PJ= (sidewall perimeter) and M= (the sidewall terms scale by M, not by AREA)
@@ -672,6 +684,8 @@ struct BJT {
     int base = -1;                             // B terminal
     int emitter = -1;                          // E terminal
     int substrate = 0;                         // S terminal (ground when not given, as SPICE)
+    int thermal = -1;                          // T terminal of a HICUM (LEVEL 8) device; -1: not given (internal)
+    bool off = false;                          // OFF, as Diode::off
     std::string modelName = "default";
     bool isNPN = true;                           // true=NPN, false=PNP
     
@@ -734,6 +748,7 @@ struct JFET {
     std::string modelName = "default";
     bool isNChannel = true;               // true=N-ch, false=P-ch
     double m = 1.0;                       // parallel multiplier (scales beta)
+    bool off = false;                     // OFF, as Diode::off
     
     // Model Parameters
     double beta = 1e-4;                   // Transconductance parameter [A/V^2]

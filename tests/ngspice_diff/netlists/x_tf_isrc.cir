@@ -1,0 +1,8 @@
+* .tf: current input into a network with a negative conductance (negative impedances)
+I1 0 1 DC 1m
+R1 1 0 1k
+R2 1 2 500
+G1 2 0 2 0 -1m
+R3 2 0 2k
+.tf v(2) I1
+.end

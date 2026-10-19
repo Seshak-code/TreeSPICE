@@ -1,0 +1,12 @@
+* .sens: BJT and diode model parameters (Gummel-Poon with Early, high injection and series resistances; a diode in the emitter)
+VCC 1 0 DC 10
+VB 2 0 DC 1.9
+RB 2 3 10k
+Q1 4 3 5 QN
+D1 5 6 DM
+RE 6 0 1k
+RC 1 4 4.7k
+.model QN NPN (IS=2e-15 BF=120 BR=2 VAF=80 VAR=20 IKF=20m ISE=1e-14 NE=1.6 RB=150 RE=2 RC=10 NF=1.01)
+.model DM D (IS=5e-14 N=1.05 RS=5)
+.sens v(4)
+.end

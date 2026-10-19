@@ -1,0 +1,9 @@
+* IHP SG13G2 MIM capacitors (cap_cmim, cap_rfcmim with its substrate network): unbraced l=l/sf instance values, c= keyword caps, SCALE
+.lib pdk/ihp/ihp-sg13g2/libs.tech/ngspice/models/cornerCAP.lib cap_typ
+V1 1 0 DC 0 AC 1
+R1 1 2 1k
+XC1 2 0 cap_cmim w=10e-6 l=20e-6
+R2 1 3 1k
+XC2 3 0 0 cap_rfcmim w=10e-6 l=10e-6
+.ac dec 10 1meg 100g
+.end

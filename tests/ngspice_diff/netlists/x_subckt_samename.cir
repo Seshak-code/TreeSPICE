@@ -1,0 +1,10 @@
+* a subcircuit's own model named like its instance (IHP's varicap: dsubw ... dsubw off): the instance keeps its name
+.subckt cell a b
+dsubw a b dsubw off area=2
+.model dsubw d is=1e-14 cjo=1p
+.ends
+V1 1 0 DC 0
+R1 1 2 1k
+X1 2 0 cell
+.dc V1 -1 1 0.05
+.end

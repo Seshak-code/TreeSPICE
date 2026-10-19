@@ -1,0 +1,13 @@
+* IHP SG13G2 resistors (rsil, rhigh, rppd: R3_CMC through OSDI, ngspice loads r3_cmc.osdi at start-up for the PDK)
+.osdi r3_cmc.osdi
+.lib pdk/ihp/ihp-sg13g2/libs.tech/ngspice/models/cornerRES.lib res_typ
+V1 1 0 DC 0
+VB b 0 DC -1
+R1 1 2 500
+XR1 2 0 b rsil w=0.5e-6 l=5e-6
+R2 1 3 5k
+XR2 3 0 b rhigh w=0.5e-6 l=5e-6
+R3 1 4 2k
+XR3 4 0 b rppd w=0.5e-6 l=5e-6
+.dc V1 -3 3 0.1
+.end

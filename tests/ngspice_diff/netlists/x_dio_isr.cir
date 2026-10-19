@@ -1,0 +1,6 @@
+* diode recombination current (ISR, NR), breakdown emission coefficient (NBV), IKF knee: forward, reverse (ISR held below -3 N Vt) and breakdown
+V1 1 0 0
+D1 1 0 dm
+.model dm d is=1e-14 n=1 isr=1e-12 nr=2 ikf=1e-3 bv=5 ibv=1e-6 nbv=3 m=0.4 vj=0.8
+.dc V1 -5.4 0.8 0.05
+.end

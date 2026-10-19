@@ -83,6 +83,11 @@ public:
         const compute::orchestration::SimulationRequestDTO&,
         const EngineCallbacks& = {}) = 0;
 
+    // .tf: DC small-signal transfer function and impedances for the netlist's .tf card (extended.dcTf).
+    virtual compute::orchestration::SimulationResponseDTO runTF(
+        const compute::orchestration::SimulationRequestDTO&,
+        const EngineCallbacks& = {}) = 0;
+
     // Starts a transient at t = 0 (request.transient.stepSizeS = max step, uic) and
     // returns it for lockstep stepping; check error() for a failed start.
     virtual std::unique_ptr<TransientHandle> beginTransient(

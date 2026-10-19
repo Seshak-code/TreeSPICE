@@ -457,6 +457,25 @@ std::string substitute(const std::string &line, Scope &sc) {
                     continue;
                 }
             }
+            // An unbraced expression (C1 1 2 cmim_core l=l/sf, IHP's cells), as ngspice evaluates it: the value up to a
+            // space, or a ')' / ',' outside its own parentheses. Left as it is when it does not evaluate.
+            size_t e = j;
+            for (int depth = 0; e < line.size() && line[e] != ' ' && line[e] != '\t'; ++e) {
+                if (line[e] == '(') ++depth;
+                else if ((line[e] == ')' || line[e] == ',') && depth-- == 0) break;
+            }
+            const std::string val = line.substr(j, e - j);
+            bool expr = val.find_first_of("*/+^(") != std::string::npos;
+            for (size_t m = 1; m < val.size() && !expr; ++m)  // a binary minus, not an exponent's sign (1e-6)
+                expr = val[m] == '-' && !((val[m - 1] == 'e' || val[m - 1] == 'E') && m >= 2 && std::isdigit((unsigned char)val[m - 2]));
+            if (expr && val.find_first_of("{'") == std::string::npos) {
+                try {
+                    const double v = sc.evaluate("{" + val + "}");
+                    out += num(v);
+                    i = e;
+                    continue;
+                } catch (const std::exception &) {}
+            }
             i = j;
             continue;
         }
@@ -476,6 +495,26 @@ bool isBehavioural(const std::vector<std::string> &w) {
         if (k.rfind(kw, 0) == 0 && (k.size() == std::strlen(kw) || k[std::strlen(kw)] == '=' || k[std::strlen(kw)] == '{' || k[std::strlen(kw)] == '\''))
             return true;
     return false;
+}
+
+// R<name> a b [r=]{expr} whose value reads V() or I(): ngspice's behavioural resistor, B<name> a b I={V(a,b)/(expr)}.
+// Any other line comes back unchanged.
+std::string resistorAsSource(const std::string &line) {
+    const auto w = words(line);
+    if (w.size() < 4) return line;
+    size_t p = 0;  // after the third word
+    for (int i = 0; i < 3; ++i) p = line.find_first_of(" \t", line.find_first_not_of(" \t", p));
+    std::string v = trim(line.substr(p));
+    if (v.size() > 1 && std::toupper((unsigned char)v[0]) == 'R' && (v[1] == '=' || v[1] == ' ' || v[1] == '\t')) {
+        const size_t eq = v.find_first_not_of(" \t", 1);
+        if (eq == std::string::npos || v[eq] != '=') return line;
+        v = trim(v.substr(eq + 1));
+    }
+    if (v.size() < 2 || !((v.front() == '\'' && v.back() == '\'') || (v.front() == '{' && v.back() == '}'))) return line;
+    static const std::regex reads(R"((^|[^A-Za-z0-9_])[vViI]\s*\()");
+    const std::string inner = v.substr(1, v.size() - 2);
+    if (inner.find(v.front() == '{' ? '}' : '\'') != std::string::npos || !std::regex_search(inner, reads)) return line;
+    return "B" + w[0] + " " + w[1] + " " + w[2] + " I={V(" + w[1] + "," + w[2] + ")/(" + inner + ")}";
 }
 
 // "B1 n+ n- V=expr", "E1 n+ n- VALUE={expr}", "E1 n+ n- TABLE {expr} = (x,y) ...": the expression becomes
@@ -654,19 +693,25 @@ private:
             if (k == ".PARAM" || k == ".PARAMS" || k == ".FUNC") { if (!prefix.empty()) collectParams(raw, sc); continue; }  // top level: collected
             if (k == ".OSDI" || k == ".INCLUDE" || k == ".INC" || k == ".LIB" || k == ".TITLE") { out.push_back({n, raw}); continue; }
             std::string line = raw;
-            if (localModels)  // names of this subcircuit's own models -> hoisted names
-                for (const auto &[from, to] : *localModels) line = renameWord(line, from, to);
-            line = isBehavioural(w) ? behaviouralLine(line, sc) : substitute(line, sc);
+            if (localModels) {  // names of this subcircuit's own models -> hoisted names; not the instance's own name
+                const size_t a = line.find_first_not_of(" \t"), b = a == std::string::npos ? a : line.find_first_of(" \t", a);
+                const bool element = k[0] != '.' && b != std::string::npos;
+                std::string rest = element ? line.substr(b) : line;
+                for (const auto &[from, to] : *localModels) rest = renameWord(rest, from, to);
+                line = element ? line.substr(0, b) + rest : rest;
+            }
+            if (k[0] == 'R') line = resistorAsSource(line);
+            line = isBehavioural(words(line)) ? behaviouralLine(line, sc) : substitute(line, sc);
             if (k == ".MODEL" && localModels) {
                 defs_.push_back({n, line});
                 continue;
             }
-            if (!mult.empty() && std::strchr("RCLIDQMJGFX", k[0])) {  // the instance's m= replaces any of the device's own (ngspice)
+            if (!mult.empty() && std::strchr("RCLIDQMJGFXN", k[0])) {  // the instance's m= replaces any of the device's own (ngspice)
                 static const std::regex own(R"((^|\s)[mM]\s*=\s*[^\s]+)");
+                // An N device's m is OSDI's multiplier. ngspice 47 multiplies the other devices of the cell but not its
+                // OSDI ones (an m=3 BSIM-CMG cell's output moves from 0.757 V to 0.785 V); the engine multiplies them all.
                 line = std::regex_replace(line, own, "$1") + " m=" + mult;
             }
-            if (k[0] == 'N' && !mult.empty())
-                throw std::runtime_error(w[0] + ": m= on a subcircuit holding an OSDI device is not supported yet");
             if (k[0] == 'X') line = instance(line, sc, n, ctx);
             out.push_back({n, line});
         }

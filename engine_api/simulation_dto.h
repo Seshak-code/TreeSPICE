@@ -202,12 +202,22 @@ struct PoleZeroResultDTO {
 struct SensResultDTO {
     std::vector<std::string> names;     // ngspice's vector names, lower case: "r1", "r1_m", "r1_scale", "v1", "i1", "i1_m"
     std::vector<double> values;         // d(output)/d(parameter), same order
-    std::vector<std::string> unsupported;  // device groups whose parameters were not computed, e.g. "2 BJT(s)" (never reported as 0)
+    std::vector<double> frequencies;    // .sens ... ac: the sweep; values (real parts) and imag are then [name][frequency]
+    std::vector<double> imag;
+    std::vector<std::string> unsupported;  // what was not computed, e.g. "2 switch(es)" (never reported as 0)
+};
+
+// .tf: DC small-signal transfer function and impedances at the operating point, under ngspice's vector names
+struct DcTFResultDTO {
+    std::vector<std::string> names;  // transfer_function, then the two impedances (ngspice's order)
+    std::vector<double> values;
 };
 
 struct ExtendedAnalysisResultsDTO {
     bool hasTF = false;
-    TFResultDTO tf;
+    TFResultDTO tf;          // Bode plot and margins (the app's TRANSFER_FUNCTION handler)
+    bool hasDcTF = false;
+    DcTFResultDTO dcTf;      // the netlist's .tf card
     bool hasNoise = false;
     NoiseResultDTO noise;
     bool hasSens = false;
