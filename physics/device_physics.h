@@ -598,6 +598,8 @@ template <typename P>
 struct BjtModel {
     P gmin = PhysicsConstants::JUNCTION_GMIN;       // GMIN across the junctions
     P type = 1.0;                                  // +1 NPN, -1 PNP
+    P isbe = 1e-16, isbc = 1e-16;  // the BE / BC diodes' saturation currents (IS*AREA, or IBE / IBC*AREA)
+    P rco = 0.0, vo = 10.0, gamma = 1e-11, qco = 0.0, vt = PhysicsConstants::V_THERMAL_NOM;  // quasi-saturation (rco > 0)
     P is = 1e-16, bf = 100.0, br = 1.0, vtf = PhysicsConstants::V_THERMAL_NOM, vtr = PhysicsConstants::V_THERMAL_NOM;  // NF*Vt, NR*Vt
     P invVaf = 0.0, invVar = 0.0, oikf = 0.0, oikr = 0.0;     // 1/VAF, 1/VAR, 1/(IKF*AREA), 1/(IKR*AREA)
     P ise = 0.0, vte = 1.5 * PhysicsConstants::V_THERMAL_NOM; // ISE*AREA, NE*Vt
@@ -612,6 +614,26 @@ struct BjtModel {
     P tf = 0.0, xtf = 0.0, ovtf = 0.0, xjtf = 0.0, tr = 0.0;   // ovtf = 1/(1.44 VTF), xjtf = ITF*AREA
     P td = 0.0;                                                // excess-phase delay PTF*pi/180*TF
 };
+// ngspice bjtload's Kull quasi-saturation: the current from Cx to C' through the intrinsic collector (vrci = Cx - C',
+// vbc = B' - C', vbcx = B' - Cx), and the epi charges Qbci (with the B'-C' charge) and Qbcx (B'-Cx). Both charges are
+// 0 for vrci <= 0, as ngspice's (a step there; `on` says which side).
+template <typename T, typename P>
+inline T bjt_qs_irci(const T &vrci, const T &vbc, const T &vbcx, const BjtModel<P> &p) {
+    using std::exp; using std::log; using std::sqrt; using std::abs;
+    if (vrci > 0.0) {
+        const T kbci = sqrt(1.0 + p.gamma * exp(vbc / p.vt)), kbcx = sqrt(1.0 + p.gamma * exp(vbcx / p.vt));
+        const T vcorr = p.vt * (kbci - kbcx - log((1.0 + kbci) / (1.0 + kbcx)));
+        return (vrci + vcorr) / p.rco / (1.0 + abs(vrci) / p.vo) + p.gmin * vrci;
+    }
+    return vrci / p.rco + p.gmin * vrci;
+}
+template <typename T, typename P>
+inline std::pair<T, T> bjt_qs_charges(bool on, const T &vbc, const T &vbcx, const BjtModel<P> &p) {
+    using std::exp; using std::sqrt;
+    if (!on) return {T(0.0), T(0.0)};
+    return {p.qco * sqrt(1.0 + p.gamma * exp(vbc / p.vt)), p.qco * sqrt(1.0 + p.gamma * exp(vbcx / p.vt))};
+}
+
 
 // DC terminal currents (into C', B'), the substrate junction current cs (S -> C',
 // ISS diode + GMIN, as ngspice 4 bjtload: it exists even with ISS = 0) and the
@@ -642,8 +664,8 @@ inline BjtEval<T> bjt_gp(T vbe, T vbc, T vbx, T vsub, const BjtModel<P>& p, doub
 {
     using std::exp; using std::log; using std::sqrt;
     const P gmin = p.gmin;
-    const T cbe = spice_junction(vbe, p.is, p.vtf);
-    const T cbc = spice_junction(vbc, p.is, p.vtr);
+    const T cbe = spice_junction(vbe, p.isbe, p.vtf);
+    const T cbc = spice_junction(vbc, p.isbc, p.vtr);
     const T cben = (p.ise != P(0.0) ? spice_junction(vbe, p.ise, p.vte) : T(0.0)) + gmin * vbe;
     const T cbcn = (p.isc != P(0.0) ? spice_junction(vbc, p.isc, p.vtc) : T(0.0)) + gmin * vbc;
     const T q1 = 1.0 / (1.0 - p.invVaf * vbc - p.invVar * vbe);

@@ -725,6 +725,11 @@ struct BJT {
         double cje = 0.0, vje = 0.75, mje = 0.33, cjc = 0.0, vjc = 0.75, mjc = 0.33, xcjc = 1.0;
         double cjs = 0.0, vjs = 0.75, mjs = 0.0, fc = 0.5;
         double iss = 0.0, ns = 1.0;                        // substrate junction
+        double ibe = 0.0, ibc = 0.0;  // IBE, IBC (both given): the BE / BC diodes' saturation currents in place of IS
+        // Kull quasi-saturation (RCO given; 0: off): intrinsic collector resistance, epi drift saturation voltage,
+        // epi doping, epi charge, at the instance temperature (not AREA-scaled, as ngspice)
+        double rco = 0.0, vo = 10.0, gamma = 1e-11, qco = 0.0;
+        bool ibeIbc = false;
         bool lateral = false;  // SUBS = -1: substrate junction on the base, not the collector (PNP default)
         double tf = 0.0, xtf = 0.0, vtf = 0.0, itf = 0.0, tr = 0.0;
         double ptf = 0.0;  // excess phase [degrees] at 1/(2 pi TF)
@@ -1226,6 +1231,8 @@ struct BlockState {
         int jvState = 0;
         // BJT excess phase (PTF): the filtered transfer current of the last two accepted steps, the last step
         double xf[2] = {}, hPrev = 0.0;
+        // BJT quasi-saturation: whether its epi charges were on (vrci > 0) at the last accepted point; -1: not yet
+        int qsOn = -1;
     };
 
     std::vector<History> capacitorState;

@@ -107,6 +107,8 @@ inline BjtModel<double> bjtModel(const BJT& q, double gmin = PhysicsConstants::J
     p.gmin = gmin;
     p.type = q.isNPN ? 1.0 : -1.0;
     p.is = is * a; p.bf = q.betaF; p.br = q.betaR;
+    p.isbe = c.ibeIbc ? c.ibe * a : p.is; p.isbc = c.ibeIbc ? c.ibc * a : p.is;
+    p.rco = c.rco; p.vo = c.vo; p.gamma = c.gamma; p.qco = c.qco; p.vt = vt;
     p.vtf = c.nf * vt; p.vtr = c.nr * vt;
     p.invVaf = c.vaf != 0.0 ? 1.0 / c.vaf : 0.0; p.invVar = c.var != 0.0 ? 1.0 / c.var : 0.0;
     p.oikf = c.ikf != 0.0 ? 1.0 / (c.ikf * a) : 0.0; p.oikr = c.ikr != 0.0 ? 1.0 / (c.ikr * a) : 0.0;

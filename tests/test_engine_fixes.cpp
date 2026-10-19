@@ -359,6 +359,23 @@ int main() {
         ok = r.converged && r.waveformPoints.size() == 1;
         check(ok && near(r.waveformPoints[0].nodeVoltages[2], slope, 1e-6 * std::abs(slope)) && std::abs(slope) > 1.0,
               "MOS LEVEL 6: 10 Hz AC gain equals the DC slope dv(3)/dVG");
+        // BJT quasi-saturation in AC: ngspice 47's Irci partial in vbc takes d ln((1+Kbci)/(1+Kbcx)) as
+        // Kbci'(1+Kbcx)/(1+Kbci)^2 (not Kbci'/(1+Kbci)), so its AC gain (-4.141 here) is not its own DC slope
+        // (-4.0175); the oracle is the DC slope: the 10 Hz gain equals the central difference of v(c) over VIN
+        {
+            const auto qs = [](double vin, const char* an) {
+                return "* bjt qs ac\nvin in 0 DC " + std::to_string(vin) + " AC 1\nrb in b 100\nvcc vcc 0 DC 3\nrl vcc c 500\n"
+                       "q1 c b 0 qs\n.model qs npn is=1e-15 bf=150 br=3 vaf=80 rb=20 rc=2 re=0.5 rco=80 vo=1.5 gamma=1e-9 "
+                       "qco=5e-12 cjc=1p cje=2p tf=0.2n tr=2n\n" + std::string(an);
+            };
+            req.source.payload = qs(0.79, ".ac lin 1 10 10\n");
+            const auto ra = engine->createSession()->runAC(req, cb);
+            const double hq = 1e-5, sq = (V(run(mode, qs(0.79 + hq, "")), 4) - V(run(mode, qs(0.79 - hq, "")), 4)) / (2 * hq);
+            const bool okq = ra.converged && ra.waveformPoints.size() == 1;
+            check(okq && near(ra.waveformPoints[0].nodeVoltages[3], sq, 1e-5 * std::abs(sq)) && near(sq, -4.0175, 2e-3),
+                  "BJT quasi-saturation: 10 Hz AC gain equals the DC slope dv(c)/dVIN (" +
+                      (okq ? std::to_string(ra.waveformPoints[0].nodeVoltages[3]) : ra.errorDetail) + " vs " + std::to_string(sq) + ")");
+        }
         // XSPICE aswitch in AC is the resistance its control sets (ngspice 47's AC load negates the conductance:
         // a 1 V source over 1k and the switch read 1.46 V there): the same divider as a resistor of that value
         {
@@ -524,6 +541,17 @@ int main() {
             {".if (1)\nV1 1 0 DC 1\nR1 1 0 1k\n", ".if without .endif"},
             {".subckt rr a b r=1k\nR1 a b {r}\n.ends\nV1 1 0 DC 1\nX1 1 0 rr q=2\n", "has no parameter Q"},
         };
+        {  // Gummel-Poon AREA scales both junctions once: ngspice 47 takes the BC diode's IS times AREA twice (bjttemp:
+           // tSatCur already holds AREA, then *= AREAB, which defaults to AREA; its IBC path and ISC scale once), so
+           // in saturation its AREA = 2 collector current is -50.76 mA where twice AREA = 1's is -52.46 mA
+            const std::string q = "* bjt area\nvb b 0 0.8\nvc c 0 0.1\nq1 c b 0 qm area=2\nq2 c2 b 0 qm\nvc2 c2 0 0.1\n"
+                                  ".model qm npn is=1e-15 bf=100 br=2\n";
+            const auto a = run(mode, q + ".op\n");
+            bool ok = a.converged && !a.waveformPoints.empty() && a.waveformPoints.back().branchCurrents.size() >= 3;
+            const double i1 = ok ? a.waveformPoints.back().branchCurrents[1] : 0.0, i2 = ok ? a.waveformPoints.back().branchCurrents[2] : 0.0;
+            check(ok && near(i1, 2.0 * i2, 1e-9 * std::abs(i2)) && near(i2, -0.0262321676, 1e-6),
+                  "BJT AREA = 2 is twice AREA = 1 in saturation (" + std::to_string(i1) + " vs " + std::to_string(i2) + " A)");
+        }
         {  // ngspice's xfer warns in a transient and gives its DC gain: an error here
             const auto t = run(mode, "* xfer tran\nV1 1 0 DC 1\na1 1 2 xf\n.model xf xfer(table=[0 0 0 1k -3 -45])\nR1 2 0 1k\n", 1e-6, 1e-5);
             check(!t.converged && t.errorDetail.find("xfer code model has no transient") != std::string::npos,

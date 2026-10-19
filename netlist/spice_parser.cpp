@@ -1513,6 +1513,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                           "TNC1", "TNC2", "TNS1", "TNS2", "TITF1", "TITF2", "TTF1", "TTF2", "TTR1", "TTR2", "TMJE1", "TMJE2",
                           "TMJC1", "TMJC2", "TMJS1", "TMJS2", "TBF1", "TBF2", "TBR1", "TBR2", "TIS1", "TIS2", "TISE1", "TISE2",
                           "TISC1", "TISC2", "TISS1", "TISS2",
+                          "IBE", "IBC", "RCO", "VO", "GAMMA", "QCO", "QUASIMOD", "VG", "CN", "D",
                           "VBE_MAX", "VBC_MAX", "VCE_MAX", "IC_MAX", "IB_MAX", "PD_MAX", "TE_MAX"});  // SOA: ngspice's warnings only
             bounded(c, {"IS", "VAF", "VA", "VAR", "VB", "IKF", "IK", "IKR", "ISE", "C2", "ISC", "C4", "CJE", "CJC", "CJS", "CCS", "CSUB",
                         "MJE", "ME", "MJC", "MC", "MJS", "MS", "TF", "XTF", "VTF", "ITF", "TR", "ISS", "RBM", "IRB", "NK", "NKF", "KF"},
@@ -1541,6 +1542,20 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             k.cjs = first(c, {"CJS", "CCS", "CSUB"}, 0.0); k.vjs = first(c, {"VJS", "PS"}, 0.75); k.mjs = first(c, {"MJS", "MS"}, 0.0);
             k.fc = c->get("FC", 0.5);
             k.iss = c->get("ISS", 0.0); k.ns = c->get("NS", 1.0);
+            // IBE / IBC: ngspice takes them only as a pair (one alone it ignores); here one alone is an error
+            if (c->params.count("IBE") != c->params.count("IBC"))
+                throw std::runtime_error("model " + c->name + ": IBE and IBC go together (ngspice ignores one alone)");
+            k.ibeIbc = c->params.count("IBE") > 0;
+            k.ibe = c->get("IBE", 0.0); k.ibc = c->get("IBC", 0.0);
+            if (k.ibeIbc && !(k.ibe > 0.0 && k.ibc > 0.0)) throw std::runtime_error("model " + c->name + ": IBE and IBC must be > 0");
+            // Kull quasi-saturation: on with RCO given (at least 0.01, as ngspice); QUASIMOD 1 adds its temperature laws
+            if (c->params.count("RCO")) {
+                k.rco = std::max(c->get("RCO", 0.01), 0.01);
+                k.vo = c->get("VO", 10.0); k.gamma = c->get("GAMMA", 1e-11); k.qco = c->get("QCO", 0.0);
+                if (!(k.vo > 0.0 && k.gamma >= 0.0 && k.qco >= 0.0)) throw std::runtime_error("model " + c->name + ": VO must be > 0, GAMMA and QCO >= 0");
+                // ngspice takes RCO and QCO per device, AREA aside, times M; AREA and M are one factor here
+                if (q.area != 1.0) throw std::runtime_error(q.instanceName + ": AREA / M with quasi-saturation (RCO) is not supported yet");
+            }
             // SUBS (ngspice): 1 vertical (substrate junction to C), -1 lateral (to B); default by polarity
             const double subs = c->get("SUBS", q.isNPN ? 1.0 : -1.0);
             if (subs != 1.0 && subs != -1.0) throw std::runtime_error("model " + c->name + ": SUBS must be 1 or -1");
@@ -1574,12 +1589,21 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 const double xtb = c->get("XTB", 0.0), bfac = tlev == 0.0 ? std::exp(ratlog * xtb) : tlev == 1.0 ? 1.0 + xtb * dt : 1.0;
                 if (tlev == 3.0) {
                     q.saturationCurrent_I_S_A = std::pow(q.saturationCurrent_I_S_A, tc("TIS1", "TIS2"));
+                    k.ibe = std::pow(k.ibe, tc("TIS1", "TIS2")); k.ibc = std::pow(k.ibc, tc("TIS1", "TIS2"));
                     k.iss = std::pow(k.iss, tc("TISS1", "TISS2"));
                     k.ise = std::pow(k.ise, tc("TISE1", "TISE2")); k.isc = std::pow(k.isc, tc("TISC1", "TISC2"));
                 } else {
-                    const double fac = std::exp(factlog);
-                    q.saturationCurrent_I_S_A *= fac; k.iss *= fac;
+                    // IBE / IBC by their own emission coefficients (the card's NF, NR); ISS then takes IBC's factor
+                    const double fac = std::exp(factlog), fbc = std::exp(factlog / c->get("NR", 1.0));
+                    q.saturationCurrent_I_S_A *= fac; k.iss *= k.ibeIbc ? fbc : fac;
+                    k.ibe *= std::exp(factlog / c->get("NF", 1.0)); k.ibc *= fbc;
                     k.ise *= std::exp(factlog / ne0) / bfac; k.isc *= std::exp(factlog / nc0) / bfac;
+                }
+                if (k.rco > 0.0 && c->get("QUASIMOD", 0.0) == 1.0) {  // bjttemp: RCO, VO by powers of T / Tnom, GAMMA by XTI and VG
+                    const double rT = T / Tn;
+                    k.rco *= std::pow(rT, c->get("CN", q.isNPN ? 2.42 : 2.2));
+                    k.vo *= std::pow(rT, c->get("D", q.isNPN ? 0.87 : 0.52));
+                    k.gamma *= std::pow(rT, c->get("XTI", 3.0)) * std::exp(-c->get("VG", 1.206) * (1.0 - rT) / vt(T));
                 }
                 const bool tbf = c->params.count("TBF1") || c->params.count("TBF2"), tbr = c->params.count("TBR1") || c->params.count("TBR2");
                 q.betaF *= tbf ? tc("TBF1", "TBF2") : bfac;

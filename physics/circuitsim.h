@@ -616,18 +616,20 @@ public:
   static int junctionInternals(const TensorBlock &blk) {
     int k = 0;
     for (const auto &d : blk.diodes) k += d.card.rs > 0.0;
-    for (const auto &q : blk.bjts) k += (q.card.rb > 0.0) + (q.card.rc > 0.0) + (q.card.re > 0.0);
+    for (const auto &q : blk.bjts) k += (q.card.rb > 0.0) + (q.card.rc > 0.0) + (q.card.re > 0.0) + (q.card.rco > 0.0);
     return k;
   }
 
   // A junction device of the flattened netlist. n: its terminal unknowns, 1-based
   // (0 = ground; internal nodes > numGlobalNodes). Diode: A, C, A'. BJT: C, B, E,
   // S, C', B', E'. st: charge history (null when the block state is not sized).
+  // Junction terminals: diode A C A'; BJT C B E S C' B' E' and the quasi-saturation collector Cx (C - RC - Cx - Rci - C')
+  static constexpr int kJT = 8;
   struct Junction {
     const Diode *d = nullptr;
     const BJT *q = nullptr;
     const JFET *f = nullptr;  // terminals D, G, S (RD / RS are series resistors from the parser)
-    std::array<int, 7> n{};
+    std::array<int, kJT> n{};
     int terms = 0;
     int sub = 4;           // BJT: substrate junction's inner terminal, C' (vertical) or B' (lateral)
     double subSign = 1.0;  // BJT SUBS: substrate voltage type*SUBS*(S - that terminal)
@@ -650,10 +652,11 @@ public:
       for (size_t i = 0; i < sl.blk->bjts.size(); ++i) {
         const BJT &q = sl.blk->bjts[i];
         Junction j;
-        j.q = &q; j.terms = 7;
+        j.q = &q; j.terms = 8;
         j.n[0] = sl.map(q.nodeCollector); j.n[1] = sl.map(q.base);
         j.n[2] = sl.map(q.emitter); j.n[3] = sl.map(q.substrate);
-        j.n[4] = q.card.rc > 0.0 ? next++ : j.n[0];
+        j.n[7] = q.card.rc > 0.0 ? next++ : j.n[0];      // Cx, after RC
+        j.n[4] = q.card.rco > 0.0 ? next++ : j.n[7];     // C', after the quasi-saturation Rci
         j.n[5] = q.card.rb > 0.0 ? next++ : j.n[1];
         j.n[6] = q.card.re > 0.0 ? next++ : j.n[2];
         if (q.card.lateral) { j.sub = 5; j.subSign = -1.0; }
@@ -903,7 +906,7 @@ public:
   // Charge branches (terminal pairs, q flows from -> to): diode A'->C; BJT
   // be (B'->E'), bc (B'->C'), bx (B->C'), substrate (S->C'; lateral: S->B', Junction::sub).
   static constexpr int diodeFrom[1] = {2}, diodeTo[1] = {1};
-  static constexpr int bjtFrom[4] = {5, 5, 1, 3}, bjtTo[4] = {6, 4, 4, 4};
+  static constexpr int bjtFrom[5] = {5, 5, 1, 3, 5}, bjtTo[5] = {6, 4, 4, 4, 7};  // + quasi-saturation bcx (B'->Cx)
   static constexpr int jfetFrom[2] = {1, 1}, jfetTo[2] = {2, 0};  // JFET gs (G->S), gd (G->D)
   static double jfetType(const JFET &f) { return f.isNChannel ? 1.0 : -1.0; }
 
@@ -920,7 +923,7 @@ public:
 
   // hist: a MESFET's charges advance from the last accepted step (j.st); false: the operating point itself
   template <typename T>
-  int junctionCharges(const Junction &j, const std::array<T, 7> &x, T *v, T *q,
+  int junctionCharges(const Junction &j, const std::array<T, kJT> &x, T *v, T *q,
                       const JShift *sh = nullptr, bool hist = true) const {
     if (j.d) {
       v[0] = shifted(T(x[2] - x[1]), sh, 0);
@@ -942,22 +945,32 @@ public:
     v[0] = shifted(v[0], sh, 0); v[1] = shifted(v[1], sh, 1);
     const auto e = bjt_gp(v[0], v[1], v[2], v[3], p);
     for (int k = 0; k < 4; ++k) q[k] = e.q[k];
-    return 4;
+    if (!(p.rco > 0.0)) return 4;
+    v[4] = t * (x[5] - x[7]);
+    // ponytail: in a step the charges' side (vrci > 0) is the last accepted point's, re-decided at acceptance: an
+    // iterate a hair across vrci = 0 dropped ~QCO of charge in a femtosecond step and threw Newton to -1 kV. A real
+    // crossing (ngspice: the charge steps in that step) lands one step later; the operating point uses its own vrci.
+    auto val = [](const T &a) { if constexpr (std::is_same_v<T, double>) return a; else return a.val; };
+    const bool on = hist && j.st && j.st->qsOn >= 0 ? j.st->qsOn == 1 : val(T(t * (x[7] - x[4]))) > 0.0;
+    const auto qs = bjt_qs_charges(on, v[1], v[4], p);
+    q[1] = q[1] + qs.first;
+    q[4] = qs.second;
+    return 5;
   }
   static bool junctionHasCharge(const Junction &j) {
     if (j.d) return j.d->card.cjo > 0.0 || j.d->card.cjsw > 0.0 || j.d->card.tt > 0.0;
     if (j.f) return j.f->card.cgs > 0.0 || j.f->card.cgd > 0.0;
     const auto &c = j.q->card;
-    return c.cje > 0.0 || c.cjc > 0.0 || c.cjs > 0.0 || c.tf > 0.0 || c.tr > 0.0;
+    return c.cje > 0.0 || c.cjc > 0.0 || c.cjs > 0.0 || c.tf > 0.0 || c.tr > 0.0 || (c.rco > 0.0 && c.qco > 0.0);
   }
 
   // Terminal currents into j at x: DC plus, in transient, the charge currents
   // integrated from the last accepted step (TRAP, else BE), as mosCurrents().
   // next != null: write the accepted charge state (history update).
   template <typename T>
-  std::array<T, 7> junctionCurrents(const Junction &j, const std::array<T, 7> &x, double h,
+  std::array<T, kJT> junctionCurrents(const Junction &j, const std::array<T, kJT> &x, double h,
                                     BlockState::DeviceCharge *next = nullptr, const JShift *sh = nullptr) const {
-    std::array<T, 7> I{};
+    std::array<T, kJT> I{};
     for (auto &i : I) i = T(0.0);
     double type = 1.0;
     const int *from, *to;
@@ -986,7 +999,11 @@ public:
                                                dv(T(type * (x[1] - x[4]))), dv(T(type * j.subSign * (x[3] - x[j.sub]))), p);
         rbb = bjt_rbb<double, double>(ev.qb, ev.cb, p);
       }
-      res(0, 4, p.rc); res(1, 5, rbb); res(2, 6, p.re);
+      res(0, 7, p.rc); res(1, 5, rbb); res(2, 6, p.re);
+      if (p.rco > 0.0) {  // quasi-saturation: Cx -> C' through the intrinsic collector
+        const T irci = bjt_qs_irci(T(type * (x[7] - x[4])), shifted(T(type * (x[5] - x[4])), sh, 1), T(type * (x[5] - x[7])), p);
+        I[7] += type * irci; I[4] -= type * irci;
+      }
       double arg3 = 1.0, hist = 0.0;  // excess phase: the filter of this step (ngspice bjtload)
       if (p.td > 0.0 && h > 0.0 && j.st) {
         const double a2 = 3.0 * h / p.td, a1 = a2 * h / p.td, denom = 1.0 + a1 + a2, r = j.st->hPrev > 0.0 ? h / j.st->hPrev : 1.0;
@@ -1127,12 +1144,12 @@ public:
   // shifted point plus the G*(vl - v) correction from one seeded pass.
   void stampJunction(const Junction &j, const std::vector<double> &v, double h) {
     const JShift sh = limitJunctions_ ? junctionLimit(j, v) : JShift{};
-    stampByDual(j.n, j.terms, v, [&](const std::array<Dual<double>, 7> &x) { return junctionCurrents(j, x, h, nullptr, &sh); });
+    stampByDual(j.n, j.terms, v, [&](const std::array<Dual<double>, kJT> &x) { return junctionCurrents(j, x, h, nullptr, &sh); });
     if (sh.d[0] == 0.0 && sh.d[1] == 0.0) return;
     JShift seeded = sh;
     seeded.seed = true;
-    std::array<Dual<double>, 7> x;
-    for (int k = 0; k < 7; ++k) x[k] = Dual<double>(j.n[k] > 0 && j.n[k] <= (int)v.size() ? v[j.n[k] - 1] : 0.0, 0.0);
+    std::array<Dual<double>, kJT> x;
+    for (int k = 0; k < kJT; ++k) x[k] = Dual<double>(j.n[k] > 0 && j.n[k] <= (int)v.size() ? v[j.n[k] - 1] : 0.0, 0.0);
     const auto cur = junctionCurrents(j, x, h, nullptr, &seeded);
     for (int t = 0; t < j.terms; ++t)
       if (j.n[t] > 0) rhsVector[j.n[t] - 1] += cur[t].grad;
@@ -1832,15 +1849,15 @@ public:
     // 3.6 Diodes and BJTs, global block and every instance: the stamped
     //     junctionCurrents(), including their internal-node rows
     forEachJunction(netlist, [&](const Junction &j) {
-        std::array<double, 7> x{};
+        std::array<double, kJT> x{};
         for (int k = 0; k < j.terms; ++k) x[k] = getV(j.n[k]);
         auto I = junctionCurrents(j, x, h);
         if (offHold_ && (j.d ? j.d->off : j.f ? j.f->off : j.q->off)) {
           // held (ngspice INITFIX): the companion I(vl) + G (v - vl) at junctions held at 0 V, as stampJunction
           JShift sh = junctionLimit(j, v_candidate);
           sh.seed = true;
-          std::array<Dual<double>, 7> xd;
-          for (int k = 0; k < 7; ++k) xd[k] = Dual<double>(x[k], 0.0);
+          std::array<Dual<double>, kJT> xd;
+          for (int k = 0; k < kJT; ++k) xd[k] = Dual<double>(x[k], 0.0);
           const auto c = junctionCurrents(j, xd, h, nullptr, &sh);
           for (int k = 0; k < j.terms; ++k) I[k] = c[k].val - c[k].grad;
         }
@@ -2102,7 +2119,7 @@ public:
     // 3. Diodes and BJTs (every block): DC junctionCurrents() at the external
     //    nodes (internal-node rows are not node KCL rows here)
     forEachJunction(netlist, [&](const Junction &j) {
-      std::array<double, 7> x{};
+      std::array<double, kJT> x{};
       for (int k = 0; k < j.terms; ++k) x[k] = getV(j.n[k]);
       const auto I = junctionCurrents(j, x, 0.0);
       DeviceAttribution a{j.d ? j.d->instanceName : j.f ? j.f->instanceName : j.q->instanceName, j.d ? "Diode" : j.f ? "JFET" : "BJT", {}};

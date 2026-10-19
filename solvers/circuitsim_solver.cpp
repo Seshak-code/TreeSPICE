@@ -600,9 +600,10 @@ void CircuitSim::updateReactiveHistory(TensorNetlist &netlist, const std::vector
   // Diode / BJT charges, likewise (junctionCurrents with next = st)
   forEachJunction(netlist, [&](const Junction &j) {
     if (!j.st) return;
-    std::array<double, 7> x{};
+    std::array<double, kJT> x{};
     for (int k = 0; k < j.terms; ++k) x[k] = getV(j.n[k]);
     junctionCurrents(j, x, h, j.st);
+    if (j.q && j.q->card.rco > 0.0) j.st->qsOn = (j.q->isNPN ? 1.0 : -1.0) * (x[7] - x[4]) > 0.0;  // quasi-saturation side
   });
   // OSDI charges, likewise (osdiCurrents with accept)
   osdiAll(netlist, v, h, false, true);
@@ -699,7 +700,7 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
   // there at first (ngspice's BJT and JFET do; its diode drops its IC).
   forEachJunction(netlist, [&](const Junction &j) {
     if (!j.st) return;
-    std::array<double, 7> xv{};
+    std::array<double, kJT> xv{};
     for (int k = 0; k < j.terms; ++k) xv[k] = getV(j.n[k]);
     double v[5], q[5];
     const int K = junctionCharges(j, xv, v, q, nullptr, false);
@@ -720,6 +721,7 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
       for (int k = 0; k < 4; ++k) q[k] = e.q[k];
     }
     *j.st = {};
+    if (j.q && j.q->card.rco > 0.0) j.st->qsOn = (j.q->isNPN ? 1.0 : -1.0) * (xv[7] - xv[4]) > 0.0;
     for (auto &vh : j.st->v) std::copy(v, v + K, vh);
     std::copy(q, q + K, j.st->q);
     if (fromIc) { j.st->jv[0] = v[0]; j.st->jv[1] = j.d ? 0.0 : v[1]; j.st->jvState = 1; }  // limiting from there
@@ -1072,7 +1074,7 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
     const double vbc = p.type * (V(5) - V(4));
     const auto e = bjt_gp(Dual<double>(p.type * (V(5) - V(6)), 1.0), Dual<double>(vbc), Dual<double>(p.type * (V(1) - V(4))),
                           Dual<double>(p.type * j.subSign * (V(3) - V(j.sub))), p);
-    const double cbc = spice_junction(vbc, p.is, p.vtr);
+    const double cbc = spice_junction(vbc, p.isbc, p.vtr);
     const double g = e.xf.grad + cbc * e.qb.grad / (e.qb.val * e.qb.val);  // d(cbe/qb)/dvbe - cbc d(1/qb)/dvbe
     const int c = j.n[4] - 1, b = j.n[5] - 1, em = j.n[6] - 1;
     auto move = [&](int r, int col, double v) {
@@ -1159,11 +1161,11 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
       bool seen = false;
       for (int w = 0; w < u; ++w) seen = seen || j.n[w] == j.n[u];
       if (seen) continue;
-      std::array<Dual<double>, 7> x;
-      for (int k = 0; k < 7; ++k) x[k] = Dual<double>(V(k), k < j.terms && j.n[k] == j.n[u] ? 1.0 : 0.0);
+      std::array<Dual<double>, kJT> x;
+      for (int k = 0; k < kJT; ++k) x[k] = Dual<double>(V(k), k < j.terms && j.n[k] == j.n[u] ? 1.0 : 0.0);
       Dual<double> v[5], q[5];
       const int K = junctionCharges(j, x, v, q, nullptr, false);
-      double Q[7] = {};
+      double Q[kJT] = {};
       for (int k = 0; k < K; ++k) {
         const double s = (j.q && k == 3 ? j.subSign : 1.0) * type;  // substrate: to Junction::sub
         Q[from[k]] += s * q[k].grad;
@@ -1324,7 +1326,7 @@ CircuitSim::NoiseResult CircuitSim::solveNoise(TensorNetlist &netlist, const std
       return;
     }
     const auto m = bjtModel(*j.q, gmin_);
-    if (m.rc > 0.0) gens.push_back({j.n[0], j.n[4], kT4 / m.rc});
+    if (m.rc > 0.0) gens.push_back({j.n[0], j.n[7], kT4 / m.rc});  // RC: C to Cx (the intrinsic Rci makes no noise, as ngspice)
     if (m.re > 0.0) gens.push_back({j.n[2], j.n[6], kT4 / m.re});
     const double t = m.type;
     const auto e = bjt_gp(t * (V(j.n[5]) - V(j.n[6])), t * (V(j.n[5]) - V(j.n[4])), t * (V(j.n[1]) - V(j.n[4])),
@@ -1943,7 +1945,7 @@ SolverStep CircuitSim::stepTransient(TensorNetlist &netlist, double timeStep,
             auto getV = [&](int n) { return n > 0 && n <= (int)nrEstimate.size() ? nrEstimate[n - 1] : 0.0; };
             forEachJunction(netlist, [&](const Junction &j) {
               if (!j.st || !junctionHasCharge(j)) return;
-              std::array<double, 7> x{};
+              std::array<double, kJT> x{};
               for (int k = 0; k < j.terms; ++k) x[k] = getV(j.n[k]);
               double v[5], q[5];
               const int K = junctionCharges(j, x, v, q);

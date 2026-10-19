@@ -1,0 +1,12 @@
+* Gummel-Poon quasi-saturation in a switching inverter: driven into saturation and out, the epi charges (QCO) slow
+* the turn-off. No CJC: its displacement current at the input edge turns the collector current (vrci) negative,
+* where the model's epi charges step to 0; ngspice then stops too ("trouble with qs-instance") unless its steps
+* happen to miss it
+vin in 0 pulse(0 2 5n 5n 5n 40n 100n)
+rb in b 2k
+vcc vcc 0 DC 5
+rl vcc c 1k
+q1 c b 0 qs
+.model qs npn is=1e-15 bf=150 br=3 vaf=80 rb=20 rc=2 re=0.5 rco=80 vo=1.5 gamma=1e-9 qco=5e-12 cje=2p tf=0.2n tr=2n
+.tran 0.1n 150n
+.end
