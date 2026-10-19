@@ -2260,7 +2260,7 @@ void SPICEParser::parseModelCard(const std::vector<std::string>& tok) {
     }
 
     // Parse optional parameters (key=value pairs flattened by tokenizer)
-    static const std::set<std::string> stringTypes = {"D_LUT", "D_SOURCE"};  // the code models with string parameters
+    static const std::set<std::string> stringTypes = {"D_LUT", "D_SOURCE", "D_STATE"};  // the code models with string parameters
     for (size_t i = 3; i + 1 < t.size(); i += 2) {
         std::string key = toUpper(t[i]);
         const std::string& raw = t[i + 1];
@@ -2615,6 +2615,72 @@ void SPICEParser::readDigitalSource(::xspice::Inst& x, const std::string& file, 
     }
 }
 
+// ngspice d_state's state table: a state's first row "state out... in... -> next" (12-state outputs, inputs 0 1 x),
+// then rows "in... -> next" for the same state; tokens and comments as d_source. ngspice falls back to row 0 for a
+// state it cannot find and stops at rows of one state split apart; both are errors here, as is a bad file.
+void SPICEParser::readDigitalState(::xspice::Inst& x, const std::string& file, const std::string& model) {
+    std::filesystem::path path(file);
+    if (path.is_relative() && !baseDir_.empty() && std::filesystem::is_regular_file(std::filesystem::path(baseDir_) / path))
+        path = std::filesystem::path(baseDir_) / path;
+    std::ifstream in(path);
+    if (!in) throw std::runtime_error("model " + model + ": cannot open d_state state_file " + file);
+    static const std::string states[12] = {"0s", "1s", "Us", "0r", "1r", "Ur", "0z", "1z", "Uz", "0u", "1u", "Uu"};
+    const size_t ni = x.in.size() - 2, no = x.out.size();
+    auto integer = [&](const std::string& w, const std::string& where) {
+        const double v = parseValue(w);
+        if (v != std::floor(v) || std::abs(v) > 1e9) throw std::runtime_error(where + "state " + w + " is not an integer");
+        return static_cast<int>(v);
+    };
+    std::string line;
+    for (int n = 1; std::getline(in, line); ++n) {
+        if (line.empty() || line[0] == '*') continue;
+        for (char& ch : line) if (ch == '=' || ch == '(' || ch == ')' || ch == ',') ch = ' ';
+        std::istringstream ss(line);
+        std::vector<std::string> tok;
+        for (std::string w; ss >> w;) tok.push_back(w);
+        if (tok.empty()) continue;
+        const std::string where = "model " + model + ": " + file + " line " + std::to_string(n) + ": ";
+        const bool header = tok.size() == ni + no + 3;
+        if (!header && tok.size() != ni + 2)
+            throw std::runtime_error(where + "expected state, " + std::to_string(no) + " outputs, " + std::to_string(ni) +
+                                     " inputs, -> and the next state (or only the inputs, -> and the next state)");
+        if (!header && x.state.empty()) throw std::runtime_error(where + "the first row needs its state and outputs");
+        size_t k = 0;
+        if (header) {
+            x.state.push_back(integer(tok[k++], where));
+            std::vector<::xspice::Val> row;
+            for (size_t o = 0; o < no; ++o, ++k) {
+                const auto* hit = std::find(states, states + 12, tok[k]);
+                if (hit == states + 12) throw std::runtime_error(where + "unknown output state " + tok[k]);
+                const int i = static_cast<int>(hit - states);
+                row.push_back({static_cast<::xspice::Lv>(i % 3), static_cast<::xspice::St>(i / 3)});
+            }
+            x.rows.push_back(std::move(row));
+        } else {
+            x.state.push_back(x.state.back());
+            x.rows.push_back(x.rows.back());
+        }
+        std::vector<::xspice::Lv> m;
+        for (size_t j = 0; j < ni; ++j, ++k) {
+            const std::string& w = tok[k];
+            if (w != "0" && w != "1" && w != "x" && w != "X") throw std::runtime_error(where + "unknown input value " + w);
+            m.push_back(w == "0" ? ::xspice::L0 : w == "1" ? ::xspice::L1 : ::xspice::LU);
+        }
+        x.match.push_back(std::move(m));
+        if (tok[k++] != "->") throw std::runtime_error(where + "expected -> before the next state");
+        x.nextState.push_back(integer(tok[k], where));
+    }
+    if (x.state.empty()) throw std::runtime_error("model " + model + ": d_state state_file " + file + " has no states");
+    // ngspice keeps only a state's contiguous rows and takes its outputs from the first
+    for (size_t r = 1; r < x.state.size(); ++r)
+        if (x.state[r] != x.state[r - 1] && std::find(x.state.begin(), x.state.begin() + r, x.state[r]) != x.state.begin() + r)
+            throw std::runtime_error("model " + model + ": d_state state " + std::to_string(x.state[r]) + "'s rows are not contiguous");
+    auto known = [&](int st) { return std::find(x.state.begin(), x.state.end(), st) != x.state.end(); };
+    if (!known(x.icount)) throw std::runtime_error("model " + model + ": reset_state " + std::to_string(x.icount) + " is not in " + file);
+    for (int st : x.nextState)
+        if (!known(st)) throw std::runtime_error("model " + model + ": next state " + std::to_string(st) + " is not in " + file);
+}
+
 void SPICEParser::resolveXspice(int& at) {
     if (pendingA_.empty()) return;
     using xspice::Kind;
@@ -2624,7 +2690,7 @@ void SPICEParser::resolveXspice(int& at) {
         {"D_TRISTATE", Kind::TRI}, {"D_PULLUP", Kind::PULLUP}, {"D_PULLDOWN", Kind::PULLDOWN}, {"D_DFF", Kind::DFF},
         {"D_JKFF", Kind::JKFF}, {"D_TFF", Kind::TFF}, {"D_SRFF", Kind::SRFF},
         {"D_DLATCH", Kind::DLATCH}, {"D_SRLATCH", Kind::SRLATCH}, {"D_OPEN_C", Kind::OPENC}, {"D_OPEN_E", Kind::OPENE},
-        {"D_FDIV", Kind::FDIV}, {"D_LUT", Kind::LUT}, {"D_SOURCE", Kind::SOURCE}, {"D_OSC", Kind::OSC}, {"D_PWM", Kind::PWM},
+        {"D_FDIV", Kind::FDIV}, {"D_LUT", Kind::LUT}, {"D_SOURCE", Kind::SOURCE}, {"D_OSC", Kind::OSC}, {"D_PWM", Kind::PWM}, {"D_STATE", Kind::STATE}, {"D_RAM", Kind::RAM},
         {"ADC_BRIDGE", Kind::ADC}, {"DAC_BRIDGE", Kind::DAC}};
     auto net = std::make_shared<xspice::Net>();
     std::map<std::string, int> dnode;  // upper-case name -> digital node
@@ -2757,6 +2823,38 @@ void SPICEParser::resolveXspice(int& at) {
             if (!(x.phase >= -180.0 && x.phase <= 360.0)) throw std::runtime_error("model " + c->name + ": init_phase must be in [-180, 360]");
             break;
         }
+        case Kind::RAM: {
+            need(5);  // [data_in] [data_out] [address] write_en [select]
+            for (const auto& n : a.groups[0]) x.in.push_back(digital(n, a.name, false));
+            for (const auto& n : a.groups[1]) x.out.push_back(digital(n, a.name, false));
+            if (x.in.empty() || x.in.size() != x.out.size()) throw std::runtime_error(a.name + ": data_in and data_out need the same width, 1 or more");
+            for (const auto& n : a.groups[2]) x.in.push_back(digital(n, a.name, false));
+            x.addr = static_cast<int>(a.groups[2].size());
+            // ponytail: the RAM is held as one Lv per bit (ngspice packs 4 per byte): 2^20 words is the bound kept
+            if (x.addr < 1 || x.addr > 20) throw std::runtime_error(a.name + ": d_ram takes 1 to 20 address lines");
+            x.in.push_back(digital(single(3), a.name, false));
+            if (a.groups[4].empty() || a.groups[4].size() > 16) throw std::runtime_error(a.name + ": d_ram takes 1 to 16 select lines");
+            for (const auto& n : a.groups[4]) x.in.push_back(digital(n, a.name, false));
+            allowed = {"SELECT_VALUE", "IC", "READ_DELAY", "DATA_LOAD", "ADDRESS_LOAD", "SELECT_LOAD", "ENABLE_LOAD"};
+            const double sv = c->get("SELECT_VALUE", 1.0);
+            if (sv != std::floor(sv) || sv < 0.0 || sv > 65535.0) throw std::runtime_error("model " + c->name + ": select_value must be an integer in [0, 65535]");
+            x.select = static_cast<int>(sv);
+            break;
+        }
+        case Kind::STATE: {
+            need(4);  // [in...] clk reset [out...]
+            for (const auto& n : a.groups[0]) if (toUpper(n) != "NULL") x.in.push_back(digital(n, a.name, false));
+            x.in.push_back(digital(single(1), a.name, false));
+            x.in.push_back(digital(single(2), a.name, true));
+            for (const auto& n : a.groups[3]) x.out.push_back(digital(n, a.name, false));
+            if (x.out.empty()) throw std::runtime_error(a.name + ": no outputs");
+            allowed = {"CLK_DELAY", "RESET_DELAY", "RESET_STATE", "INPUT_LOAD", "CLK_LOAD", "RESET_LOAD"};
+            const double rs = c->get("RESET_STATE", 0.0);
+            if (rs != std::floor(rs) || std::abs(rs) > 1e9) throw std::runtime_error("model " + c->name + ": reset_state must be an integer");
+            x.icount = static_cast<int>(rs);
+            readDigitalState(x, c->strings.count("STATE_FILE") ? c->strings.at("STATE_FILE") : "state.txt", c->name);
+            break;
+        }
         case Kind::SOURCE: {
             need(1);
             for (const auto& n : a.groups[0]) x.out.push_back(digital(n, a.name, false));
@@ -2826,7 +2924,8 @@ void SPICEParser::resolveXspice(int& at) {
         for (const auto& [key, v] : c->params)
             if (!allowed.count(key)) throw std::runtime_error("model " + c->name + ": parameter " + key + " is not a " + c->type + " parameter");
         for (const auto& [key, v] : c->strings)
-            if (!(key == "TABLE_VALUES" && x.kind == Kind::LUT) && !(key == "INPUT_FILE" && x.kind == Kind::SOURCE)) throw std::runtime_error("model " + c->name + ": parameter " + key + " is not a " + c->type + " string parameter");
+            if (!(key == "TABLE_VALUES" && x.kind == Kind::LUT) && !(key == "INPUT_FILE" && x.kind == Kind::SOURCE) &&
+                !(key == "STATE_FILE" && x.kind == Kind::STATE)) throw std::runtime_error("model " + c->name + ": parameter " + key + " is not a " + c->type + " string parameter");
         x.inertial = c->get("INERTIAL_DELAY", 0.0) != 0.0;
         if (x.inertial && x.kind == Kind::TRI)  // d_tristate's runs its state and strength as two inertial channels
             throw std::runtime_error("model " + c->name + ": inertial_delay on a d_tristate is not supported yet");
@@ -2834,9 +2933,9 @@ void SPICEParser::resolveXspice(int& at) {
         x.rise = x.kind == Kind::TRI ? d : c->get(x.kind == Kind::OPENC ? "OPEN_DELAY" : "RISE_DELAY", 1e-9);
         x.fall = x.kind == Kind::TRI ? d : c->get(x.kind == Kind::OPENE ? "OPEN_DELAY" : "FALL_DELAY", 1e-9);
         x.clk = c->get(x.kind == Kind::DLATCH || x.kind == Kind::SRLATCH ? "ENABLE_DELAY" : "CLK_DELAY", 1e-9);
-        x.data = c->get(x.kind == Kind::DLATCH ? "DATA_DELAY" : "SR_DELAY", 1e-9);
+        x.data = x.kind == Kind::RAM ? c->get("READ_DELAY", 100e-9) : c->get(x.kind == Kind::DLATCH ? "DATA_DELAY" : "SR_DELAY", 1e-9);
         x.set = c->get("SET_DELAY", 1e-9); x.reset = c->get("RESET_DELAY", 1e-9);
-        const double ic = c->get("IC", 0.0);
+        const double ic = c->get("IC", x.kind == Kind::RAM ? 2.0 : 0.0);  // d_ram's ic defaults to U
         x.ic = ic == 1.0 ? xspice::L1 : ic == 0.0 ? xspice::L0 : xspice::LU;
         x.lo = c->get("IN_LOW", 0.1); x.hi = c->get("IN_HIGH", 0.9);
         x.vlo = c->get("OUT_LOW", 0.0); x.vhi = c->get("OUT_HIGH", 1.0);

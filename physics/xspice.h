@@ -37,7 +37,7 @@ inline Val resolve(Val a, Val b) {
     return {c[0] == '0' ? L0 : c[0] == '1' ? L1 : LU, c[1] == 's' ? SS : c[1] == 'r' ? SR : c[1] == 'z' ? SZ : SU};
 }
 
-enum class Kind { BUF, INV, AND, NAND, OR, NOR, XOR, XNOR, TRI, PULLUP, PULLDOWN, DFF, JKFF, TFF, SRFF, DLATCH, SRLATCH, OPENC, OPENE, FDIV, LUT, SOURCE, OSC, PWM, ADC, DAC };
+enum class Kind { BUF, INV, AND, NAND, OR, NOR, XOR, XNOR, TRI, PULLUP, PULLDOWN, DFF, JKFF, TFF, SRFF, DLATCH, SRLATCH, OPENC, OPENE, FDIV, LUT, SOURCE, OSC, PWM, STATE, RAM, ADC, DAC };
 struct Port { int node = -1; bool inv = false; };  // a digital node, or -1 (NULL)
 struct Inst {
     std::string name;
@@ -47,11 +47,14 @@ struct Inst {
     std::vector<int> vsrc;      // dac_bridge: its voltage source per output (global block)
     double rise = 1e-9, fall = 1e-9;              // output delays (tristate: its delay, both; open collector / emitter: open_delay is the open edge)
     double clk = 1e-9, set = 1e-9, reset = 1e-9;  // flip-flops (latch: clk is enable_delay): added to rise / fall
-    double data = 1e-9;                           // latches: data_delay / sr_delay
+    double data = 1e-9;                           // latches: data_delay / sr_delay; d_ram: read_delay
+    int addr = 0, select = 1;                     // d_ram: address lines; select_value (in: data, address, write_en, select)
     int div = 2, high = 1, icount = 0;            // d_fdiv: div_factor, high_cycles, i_count
     std::vector<Lv> table;                        // d_lut: the output per input word (in[0] the low bit)
     std::vector<double> times;                    // d_source: each row's time (increasing) and its outputs
-    std::vector<std::vector<Val>> rows;
+    std::vector<std::vector<Val>> rows;           // d_source, d_state: the outputs per row (d_state: its state's)
+    std::vector<int> state, nextState;            // d_state: each row's state and next state, the inputs it matches
+    std::vector<std::vector<Lv>> match;           //   (U: x, don't care); a state's rows are contiguous
     std::vector<double> ctl, freq;                // d_osc / d_pwm: the control table (ctl increasing) to frequency / duty
     double duty = 0.5, phase = 0.0;               // d_osc: duty_cycle; both: init_phase (degrees)
     double period = 1e-6;                         // d_pwm: 1 / frequency
@@ -173,8 +176,10 @@ private:
         std::vector<double> dac;       // dac_bridge: the voltage each output heads for
         std::vector<double> when;      // inertial: the pending change's time per output (<= now: none)
         std::vector<Lv> iprev;         // inertial: the output's value before that change
-        int count = 0;                 // d_fdiv: the edge count; d_source: the next row
+        int count = 0;                 // d_fdiv: the edge count; d_source: the next row; d_state: the state
         Lv osc = L0;                   // d_osc: its output (ngspice state->last), set at oscT; its next call at wake
+        Lv sel = L0;                   // d_ram: selected at the last call; its words, word-major
+        std::vector<Lv> mem;
         double oscT = 0.0, wake = -1.0;
     };
     std::shared_ptr<const Net> net_;
@@ -337,6 +342,66 @@ private:
                 for (size_t p = 0; p < x.out.size(); ++p) changed |= post(i, (int)p, s.count ? x.rows[0][p] : Val{LU, SU}, t, 0.0, true);
             }
             break;
+        case Kind::STATE: {
+            // ngspice d_state: reset rising to 1 enters reset_state (reset_delay); else, reset not at 1, a clock rising
+            // to 1 takes the first of the state's rows whose inputs match (clk_delay). The outputs are the state's.
+            // XSPICE starts clk and reset's previous values at 0, not at their t = 0 values: a clock already at 1 at
+            // t = 0 is an edge on the first transient call.
+            const size_t ni = x.in.size() - 2;
+            const Lv clk = in[ni], rst = in[ni + 1];
+            auto enter = [&](int st, double delay) {
+                s.count = st;
+                const size_t r = std::find(x.state.begin(), x.state.end(), st) - x.state.begin();
+                for (size_t p = 0; p < x.out.size(); ++p) changed |= post(i, (int)p, x.rows[r][p], t, delay, dc);
+            };
+            if (dc) {
+                enter(x.icount, 0.0);
+                in[ni] = in[ni + 1] = L0;
+            } else if (rst != s.prev[ni + 1]) {
+                if (rst == L1) enter(x.icount, x.reset);
+            } else if (rst != L1 && clk != s.prev[ni] && clk == L1) {
+                for (size_t r = 0; r < x.state.size(); ++r) {
+                    if (x.state[r] != s.count) continue;
+                    bool ok = true;
+                    for (size_t k = 0; k < ni && ok; ++k) ok = x.match[r][k] == LU || x.match[r][k] == in[k];
+                    if (ok) { enter(x.nextState[r], x.clk); break; }
+                }
+            }
+            break;
+        }
+        case Kind::RAM: {
+            // ngspice d_ram: selected (select lines equal select_value's bits) with write_en 1 stores data_in at the
+            // address and drives it at high impedance; with write_en 0 / U it reads the address (an address bit at
+            // U reads U; a write there makes the whole RAM U). Deselecting tristates the outputs (Uz). All after read_delay.
+            const size_t w = x.out.size(), na = x.addr, ns = x.in.size() - w - na - 1;
+            const Lv we = in[w + na];
+            Lv sel = L1;
+            for (size_t k = 0; k < ns; ++k) if (in[w + na + 1 + k] != ((x.select >> k) & 1 ? L1 : L0)) sel = L0;
+            bool unknown = false;
+            size_t word = 0;
+            for (size_t k = 0; k < na; ++k) { unknown |= in[w + k] == LU; word |= size_t{in[w + k] == L1} << k; }
+            auto drive = [&](auto value, St strength) {
+                for (size_t b = 0; b < w; ++b) changed |= post(i, (int)b, {value(b), strength}, t, dc ? 0.0 : x.data, dc);
+            };
+            auto read = [&] { drive([&](size_t b) { return unknown ? LU : s.mem[word * w + b]; }, SS); };
+            auto write = [&] {
+                if (unknown) std::fill(s.mem.begin(), s.mem.end(), LU);
+                else for (size_t b = 0; b < w; ++b) s.mem[word * w + b] = in[b];
+                drive([&](size_t b) { return unknown ? LU : in[b]; }, SZ);
+            };
+            if (dc) {
+                s.mem.assign((size_t{1} << na) * w, x.ic);
+                if (sel == L1 && we == L0) drive([&](size_t) { return x.ic; }, SS);
+                else drive([](size_t) { return LU; }, SZ);
+            } else if (sel != s.sel) {
+                if (sel == L1) { if (we == L0) read(); else write(); }
+                else if (we == L0) drive([](size_t) { return LU; }, SZ);
+            } else if (sel == L1) {
+                if (we == L1) write(); else read();
+            }
+            s.sel = sel;
+            break;
+        }
         case Kind::LUT: {
             size_t idx = 0;
             for (size_t k = 0; k < in.size(); ++k) idx |= size_t{in[k] == L1} << k;

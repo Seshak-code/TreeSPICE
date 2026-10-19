@@ -139,6 +139,7 @@ private:
     void parseXspice     (const std::string& line, int lineNum);  // A<name> ports... model: resolved once the models are known
     void resolveXspice   (int& line);  // line: the A card an error refers to
     void readDigitalSource(::xspice::Inst& x, const std::string& file, const std::string& model);  // d_source's vector file
+    void readDigitalState(::xspice::Inst& x, const std::string& file, const std::string& model);   // d_state's state table
     void parseVCVS       (const std::vector<std::string>& tok, TensorBlock& blk);
     void parseVCCS       (const std::vector<std::string>& tok, TensorBlock& blk);
     void parseCCVS       (const std::vector<std::string>& tok, TensorBlock& blk);
