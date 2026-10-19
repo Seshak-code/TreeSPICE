@@ -547,7 +547,7 @@ void CircuitSim::loadSoAFromNetlist(const TensorNetlist &netlist) {
 // current (previously inductor history was never written back at all, so any
 // transient with an inductor failed to converge).
 void CircuitSim::updateReactiveHistory(TensorNetlist &netlist, const std::vector<double> &v,
-                                        double h) {
+                                        double h, double t) {
   const IntegrationType type = integrator->getType();
   auto getV = [&](int n) { return (n > 0 && n <= (int)v.size()) ? v[n - 1] : 0.0; };
   int total = 0;
@@ -605,6 +605,7 @@ void CircuitSim::updateReactiveHistory(TensorNetlist &netlist, const std::vector
   });
   // OSDI charges, likewise (osdiCurrents with accept)
   osdiAll(netlist, v, h, false, true);
+  acceptBehav(netlist, v, h, t);  // XSPICE int, d_dt, s_xfer, slew, hyst, oscillators
   for (size_t k = 0; k < netlist.instances.size() && k < netlist.instanceStates.size(); ++k) {
     const auto &inst = netlist.instances[k];
     auto it = netlist.blockDefinitions.find(inst.blockName);
@@ -726,6 +727,7 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
       if (p.td > 0.0) j.st->xf[0] = j.st->xf[1] = bjt_gp(v[0], v[1], v[2], v[3], p).xf;
     }
   });
+  acceptBehav(netlist, x, 0.0);  // XSPICE int starts at out_ic, d_dt from its input
   // OSDI charges at x, zero current
   forEachOsdi(netlist, [&](const OsdiRef &r) {
     osdiCurrents(r, x, 0.0, nullptr, true);
@@ -779,6 +781,15 @@ void CircuitSim::tranCorners(const TensorNetlist &netlist) {
   addLines(netlist.globalState);
   for (const auto &st : netlist.instanceStates) addLines(st);
   if (xsim_) corners.push_back([this](double x) { return xsim_->next(x); });  // digital events
+  // XSPICE oscillators: the breakpoints their last accepted step set (cm_analog_set_temp_bkpt)
+  forEachBehav(netlist, [&](const Behavioural &b, const BranchSlot &, int) {
+    if (!b.cm || !xspice::oscillator(b.cm->kind) || !b.cmState) return;
+    corners.push_back([st = b.cmState](double x) {
+      double best = std::numeric_limits<double>::infinity();
+      for (size_t k = 5; k < st->v.size(); ++k) if (st->v[k] > x && st->v[k] < best) best = st->v[k];
+      return best;
+    });
+  });
 }
 
 bool CircuitSim::settleDigital(TensorNetlist &netlist, const std::vector<double> &x) {
@@ -1051,6 +1062,23 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
     };
     move(c, b, g); move(c, em, -g); move(em, b, -g); move(em, em, g);
   });
+  // XSPICE int / d_dt: their small-signal gain gain/jw, gain jw from each input (as stampBehav places a gain)
+  forEachBehav(netlist, [&](const Behavioural &b, const BranchSlot &sl, int row) {
+    if (!b.cm || !xspice::acFunction(b.cm->kind)) return;
+    const auto cm = b.cm;
+    const int np = sl.map(b.outPos) - 1, nn = sl.map(b.outNeg) - 1;
+    for (const auto &r : b.refs) {
+      const int ca = r.kind == 0 ? sl.map(r.a) - 1 : r.kind == 1 ? sl.vs + r.a : r.kind == 2 ? sl.ind + r.a : sl.bv + r.a;
+      const int cb = r.kind == 0 ? sl.map(r.b) - 1 : -1;
+      auto put = [&](int rr, int cc, double sign) {
+        if (rr < 0 || cc < 0) return;
+        sys.fr.push_back(rr); sys.fc.push_back(cc);
+        sys.fv.push_back([cm, sign](double w) { return sign * xspice::analogAcGain(*cm, w); });
+      };
+      if (b.voltage) { put(row, ca, -1.0); put(row, cb, 1.0); }
+      else { put(np, ca, 1.0); put(np, cb, -1.0); put(nn, ca, -1.0); put(nn, cb, 1.0); }
+    }
+  });
   sys.G = matrixBuilder.createCsr();
   auto addC = [&](int r, int c, double v) {
     if (r >= 0 && c >= 0) { sys.cr.push_back(r); sys.cc.push_back(c); sys.cv.push_back(v); }
@@ -1145,6 +1173,13 @@ Csr_matrix CircuitSim::acMatrix(const ACSystem &s, double w, bool transpose) {
   for (size_t t = 0; t < s.cv.size(); ++t) {
     put(s.cr[t], s.cc[t] + n, -w * s.cv[t]);
     put(s.cr[t] + n, s.cc[t], w * s.cv[t]);
+  }
+  for (size_t t = 0; t < s.fv.size(); ++t) {  // f(w): a code model's frequency-dependent gain
+    const std::complex<double> v = s.fv[t](w);
+    put(s.fr[t], s.fc[t], v.real());
+    put(s.fr[t] + n, s.fc[t] + n, v.real());
+    put(s.fr[t], s.fc[t] + n, -v.imag());
+    put(s.fr[t] + n, s.fc[t], v.imag());
   }
   for (size_t t = 0; t < s.dv.size(); ++t) {  // dv * (cos(w td) - j sin(w td))
     const double re = s.dv[t] * std::cos(w * s.dtd[t]), im = -s.dv[t] * std::sin(w * s.dtd[t]);
@@ -1353,6 +1388,7 @@ CircuitSim::PoleZeroResult CircuitSim::solvePoleZero(TensorNetlist &netlist, int
   PoleZeroResult r;
   ACSystem sys;
   if (!acSystem(netlist, sys)) { r.error = "pole-zero needs a converged DC operating point"; return r; }
+  if (!sys.fv.empty()) { r.error = "pole-zero with an XSPICE int / d_dt / s_xfer is not supported yet"; return r; }
   const int n = sys.n, N = n + 1;
   // (G + sC) x = 0 bordered: column `in` (the input source's injection), row `row` (shorted input / nulled output)
   auto roots = [&](const std::vector<std::pair<int, double>> &col, const std::vector<std::pair<int, double>> &row,
@@ -1712,7 +1748,7 @@ bool CircuitSim::coldStartSweep(TensorNetlist &netlist, double totalTime,
       return false;
     }
 
-    updateReactiveHistory(netlist, nrEstimate, dt_sub);
+    updateReactiveHistory(netlist, nrEstimate, dt_sub, dt_sub * (k + 1));
     lteController_.recordStep(dt_sub);
     // Note: Inductor history write-back is not performed here, consistent with
     // stepTransient which also does not write back inductorState in its main
@@ -1950,7 +1986,7 @@ SolverStep CircuitSim::stepTransient(TensorNetlist &netlist, double timeStep,
   // updated inside the sweep loop.  Skip the history-update block to avoid
   // double-updating the companion-model state.
   if (simulationConverged && !isFirstTransientStepHandled) {
-    updateReactiveHistory(netlist, finalVoltages, actualTimeStep);
+    updateReactiveHistory(netlist, finalVoltages, actualTimeStep, currentTime + actualTimeStep);
 
     lteController_.recordStep(actualTimeStep);
 

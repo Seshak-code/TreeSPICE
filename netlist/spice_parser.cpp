@@ -2620,7 +2620,7 @@ void SPICEParser::resolveXspice(int& at) {
         const auto mc = modelCards_.find(toUpper(a.model));
         if (mc == modelCards_.end()) throw std::runtime_error(a.name + ": no .model card " + a.model);
         const ModelCard* c = &mc->second;
-        static const std::set<std::string> analogKinds = {"GAIN", "SUMMER", "MULT", "DIVIDE", "LIMIT", "CLIMIT", "PWL", "ASWITCH"};
+        static const std::set<std::string> analogKinds = {"GAIN", "SUMMER", "MULT", "DIVIDE", "LIMIT", "CLIMIT", "PWL", "ASWITCH", "INT", "D_DT", "S_XFER", "SLEW", "HYST", "SINE", "TRIANGLE", "SQUARE"};
         if (analogKinds.count(c->type)) { resolveXspiceAnalog(a, *c, analogNode); continue; }
         const auto k = kinds.find(c->type);
         if (k == kinds.end()) throw std::runtime_error(a.name + ": XSPICE model type " + c->type + " is not supported yet");
@@ -2743,7 +2743,15 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         {"LIMIT", {AKind::LIMIT, {{'i', "v", false}, {'o', "v", false}}}},
         {"CLIMIT", {AKind::CLIMIT, {{'i', "v", false}, {'i', "v", false}, {'i', "v", false}, {'o', "v", false}}}},
         {"PWL", {AKind::PWL, {{'i', "v", false}, {'o', "v", false}}}},
-        {"ASWITCH", {AKind::ASWITCH, {{'i', "v", false}, {'b', "gd", false}}}}};
+        {"ASWITCH", {AKind::ASWITCH, {{'i', "v", false}, {'b', "gd", false}}}},
+        {"INT", {AKind::INT, {{'i', "v", false}, {'o', "v", false}}}},
+        {"D_DT", {AKind::D_DT, {{'i', "v", false}, {'o', "v", false}}}},
+        {"S_XFER", {AKind::S_XFER, {{'i', "v", false}, {'o', "v", false}}}},
+        {"SLEW", {AKind::SLEW, {{'i', "v", false}, {'o', "v", false}}}},
+        {"HYST", {AKind::HYST, {{'i', "v", false}, {'o', "v", false}}}},
+        {"SINE", {AKind::SINE, {{'i', "v", false}, {'o', "v", false}}}},
+        {"TRIANGLE", {AKind::TRIANGLE, {{'i', "v", false}, {'o', "v", false}}}},
+        {"SQUARE", {AKind::SQUARE, {{'i', "v", false}, {'o', "v", false}}}}};
     const auto& [kind, specs] = table.at(c.type);
     struct Port { std::string type; int n1 = 0, n2 = 0; std::string vname; };
     std::vector<std::vector<Port>> ports;  // per spec, its elements
@@ -2846,6 +2854,69 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         m->domain = num("INPUT_DOMAIN", 0.01); m->fraction = flag("FRACTION", true);
         break;
     }
+    case AKind::INT: case AKind::D_DT:
+        m->gain = num("GAIN", 1.0);
+        if (kind == AKind::INT) { m->inOffset = num("IN_OFFSET", 0.0); m->outIc = num("OUT_IC", 0.0); }
+        else m->outOffset = num("OUT_OFFSET", 0.0);
+        m->range = num("LIMIT_RANGE", 1e-6);
+        allowed.insert("OUT_LOWER_LIMIT"); allowed.insert("OUT_UPPER_LIMIT");
+        if (!c.params.count("OUT_LOWER_LIMIT") || !c.params.count("OUT_UPPER_LIMIT"))  // ngspice: no defaults
+            throw std::runtime_error("model " + c.name + ": " + c.type + " needs out_lower_limit and out_upper_limit");
+        m->lo = c.params.at("OUT_LOWER_LIMIT"); m->hi = c.params.at("OUT_UPPER_LIMIT");
+        break;
+    case AKind::S_XFER: {
+        m->inOffset = num("IN_OFFSET", 0.0);
+        allowed.insert("NUM_COEFF"); allowed.insert("DEN_COEFF"); allowed.insert("INT_IC");
+        auto coeffs = [&](const char* k) {
+            const auto it = c.vectors.find(k);
+            if (it != c.vectors.end()) return it->second;
+            if (c.params.count(k)) return std::vector<double>{c.params.at(k)};
+            throw std::runtime_error("model " + c.name + ": s_xfer needs " + std::string(k));
+        };
+        const auto nc = coeffs("NUM_COEFF"), dc = coeffs("DEN_COEFF");  // highest power first
+        if (nc.size() > dc.size() || dc.size() < 2)
+            throw std::runtime_error("model " + c.name + ": s_xfer needs a denominator of order 1 at least, not below the numerator's");
+        const double f = num("DENORMALIZED_FREQ", 1.0);
+        for (size_t i = 0; i < nc.size(); ++i) m->num.push_back(nc[nc.size() - 1 - i] / std::pow(f, (double)i));
+        for (size_t i = 0; i < dc.size(); ++i) m->den.push_back(dc[dc.size() - 1 - i] / std::pow(f, (double)i));
+        const double top = m->den.back();
+        if (top == 0.0) throw std::runtime_error("model " + c.name + ": s_xfer's highest denominator coefficient is 0");
+        for (auto& d : m->den) d /= top;
+        m->gain = num("GAIN", 1.0) / top;
+        m->intIc.assign(dc.size(), 0.0);
+        if (const auto it = c.vectors.find("INT_IC"); it != c.vectors.end() || c.params.count("INT_IC")) {
+            const std::vector<double> ic = it != c.vectors.end() ? it->second : std::vector<double>{c.params.at("INT_IC")};
+            if (ic.size() != dc.size() - 1)
+                throw std::runtime_error("model " + c.name + ": s_xfer int_ic needs " + std::to_string(dc.size() - 1) + " values");
+            for (size_t i = 0; i + 1 < dc.size(); ++i) m->intIc[i] = ic[dc.size() - 2 - i];
+        }
+        break;
+    }
+    case AKind::SLEW:
+        m->riseSlope = num("RISE_SLOPE", 1e9); m->fallSlope = num("FALL_SLOPE", 1e9);
+        if (!(m->riseSlope > 0.0 && m->fallSlope > 0.0)) throw std::runtime_error("model " + c.name + ": slew slopes must be > 0");
+        break;
+    case AKind::SINE: case AKind::TRIANGLE: case AKind::SQUARE: {
+        auto arr = [&](const char* k, std::vector<double> def) {
+            allowed.insert(k);
+            const auto it = c.vectors.find(k);
+            return it != c.vectors.end() ? it->second : def;
+        };
+        m->cntl = arr("CNTL_ARRAY", {0.0, 1.0}); m->freq = arr("FREQ_ARRAY", {1e3, 2e3});
+        if (m->cntl.size() != m->freq.size() || m->cntl.size() < 2)
+            throw std::runtime_error("model " + c.name + ": cntl_array and freq_array need the same size, 2 at least");
+        m->outLow = num("OUT_LOW", -1.0); m->outHigh = num("OUT_HIGH", 1.0);
+        if (kind != AKind::SINE) m->duty = num("DUTY_CYCLE", 0.5);
+        if (kind == AKind::SQUARE) { m->tRise = num("RISE_TIME", 1e-9); m->tFall = num("FALL_TIME", 1e-9); }
+        if (!(m->duty > 0.0 && m->duty < 1.0)) throw std::runtime_error("model " + c.name + ": duty_cycle must be in (0, 1)");
+        break;
+    }
+    case AKind::HYST:
+        m->inLow = num("IN_LOW", 0.0); m->inHigh = num("IN_HIGH", 1.0); m->hyst = num("HYST", 0.1);
+        m->lo = num("OUT_LOWER_LIMIT", 0.0); m->hi = num("OUT_UPPER_LIMIT", 1.0);
+        m->domain = num("INPUT_DOMAIN", 0.01); m->fraction = flag("FRACTION", true);
+        if (!(m->inHigh > m->inLow)) throw std::runtime_error("model " + c.name + ": hyst needs in_high > in_low");
+        break;
     case AKind::ASWITCH:
         m->cntlOff = num("CNTL_OFF", 0.0); m->cntlOn = num("CNTL_ON", 1.0);
         m->rOff = num("R_OFF", 1e12); m->rOn = num("R_ON", 1.0);
@@ -2897,6 +2968,10 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
             b.refs = refs;
             if (pt.type == "gd") b.refs.push_back({0, pt.n1, pt.n2, ""});
             b.cm = m;
+            if (xspice::stateful(kind)) {
+                b.cmState = std::make_shared<xspice::AnalogState>();
+                b.cmState->v = m->intIc;  // s_xfer: the operating point reads its initial states
+            }
             blk.behavioural.push_back(b);
         }
     }

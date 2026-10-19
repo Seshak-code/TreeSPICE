@@ -424,7 +424,7 @@ struct CCCS {
  * a branch current, or a current from + through the source to -) is expr over node voltages and branch
  * currents; refs[k] binds expr->refs[k].
  */
-namespace xspice { struct AnalogModel; }  // physics/xspice_analog.h
+namespace xspice { struct AnalogModel; struct AnalogState; }  // physics/xspice_analog.h
 
 struct Behavioural {
     struct Ref {
@@ -438,6 +438,7 @@ struct Behavioural {
     std::shared_ptr<const acutesim::numparam::Expr> expr;
     std::vector<Ref> refs;
     std::shared_ptr<const xspice::AnalogModel> cm;  // an XSPICE analog code model's output over refs, in place of expr
+    std::shared_ptr<xspice::AnalogState> cmState;   // its state at the last accepted time point (int, d_dt)
 };
 
 // ============================================================================

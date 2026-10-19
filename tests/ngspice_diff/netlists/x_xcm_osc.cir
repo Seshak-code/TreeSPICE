@@ -1,0 +1,15 @@
+* XSPICE controlled oscillators: sine, triangle (duty cycle) and square (duty, edges) with a control that steps
+* their frequency (cntl_array / freq_array), landing on their corner breakpoints. The phase sums f h with f at
+* the step's end, so a slow control ramp would compare the simulators' step choices: the step is 1 ns
+VC c 0 PWL(0 0.2 20u 0.2 20.001u 0.8)
+a1 c o1 vs
+.model vs sine(cntl_array=[0 1] freq_array=[100k 300k] out_low=-0.5 out_high=1.5)
+a2 c o2 vt
+.model vt triangle(cntl_array=[0 1] freq_array=[100k 300k] out_low=0 out_high=2 duty_cycle=0.3)
+a3 c o3 vq
+.model vq square(cntl_array=[0 0.5 1] freq_array=[50k 100k 400k] out_low=0 out_high=3 duty_cycle=0.4 rise_time=100n fall_time=50n)
+R1 o1 0 1k
+R2 o2 0 1k
+R3 o3 0 1k
+.tran 20n 40u
+.end

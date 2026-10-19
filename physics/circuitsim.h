@@ -1317,7 +1317,7 @@ private:
 
   /** Capacitor + inductor history after an accepted step (global + instances),
    *  using the same companion formulas as the stamps and the KCL audit. */
-  void updateReactiveHistory(TensorNetlist& netlist, const std::vector<double>& v, double h);
+  void updateReactiveHistory(TensorNetlist& netlist, const std::vector<double>& v, double h, double t);
   void seedReactiveHistory(TensorNetlist& netlist, const std::vector<double>& x, bool uic);
 
   /** Last full solution x (node voltages + branch currents). */
@@ -1441,7 +1441,9 @@ public:
   // Small-signal system at the last DC operating point: G (Newton Jacobian
   // without node gmin), reactive triplets C. Shared by solveAC and solveNoise.
   // dr/dc/dv/dtd: entries dv * e^(-jw dtd) (transmission lines), beside the jw*cv ones
-  struct ACSystem { Csr_matrix G; std::vector<int> cr, cc; std::vector<double> cv; std::vector<int> dr, dc; std::vector<double> dv, dtd; int n = 0; };
+  struct ACSystem { Csr_matrix G; std::vector<int> cr, cc; std::vector<double> cv; std::vector<int> dr, dc; std::vector<double> dv, dtd;
+                    std::vector<int> fr, fc; std::vector<std::function<std::complex<double>(double)>> fv;  // entries f(w)
+                    int n = 0; };
   bool acSystem(TensorNetlist &netlist, ACSystem &sys);
   // R(Y) = [[G, -wC], [wC, G]] for Y = G + jwC (transpose: R(Y)^T = R(Y^H)).
   static Csr_matrix acMatrix(const ACSystem &s, double w, bool transpose);
@@ -1624,7 +1626,8 @@ public:
     Dual<double> ref(int k) const { return Dual<double>(rv[k], k == seed ? 1.0 : 0.0); }
   };
   struct BehavEval { double f = 0.0; std::vector<std::pair<int, double>> d; };
-  BehavEval behavEval(const Behavioural &b, const BranchSlot &sl, const std::vector<double> &x, double time, bool grad) const {
+  BehavEval behavEval(const Behavioural &b, const BranchSlot &sl, const std::vector<double> &x, double time, bool grad,
+                      double h = 0.0) const {
     const size_t n = b.refs.size();
     auto X = [&](int c) { return c >= 0 && c < (int)x.size() ? x[c] : 0.0; };
     std::vector<int> ca(n, -1), cb(n, -1);
@@ -1639,10 +1642,11 @@ public:
     if (b.cm) {  // an XSPICE code model (xspice_analog.h): one Dual pass per input
       std::vector<Dual<double>> in(n);
       for (size_t k = 0; k < n; ++k) in[k] = Dual<double>(rv[k]);
-      if (!grad || n == 0) { out.f = xspice::analogOut(*b.cm, in).val; return out; }
+      const xspice::AnalogState *st = b.cmState.get();
+      if (!grad || n == 0) { out.f = xspice::analogOut(*b.cm, in, st, h, time).val; return out; }
       for (size_t k = 0; k < n; ++k) {
         for (size_t j = 0; j < n; ++j) in[j].grad = j == k ? 1.0 : 0.0;
-        const auto r = xspice::analogOut(*b.cm, in);
+        const auto r = xspice::analogOut(*b.cm, in, st, h, time);
         out.f = r.val;
         if (ca[k] >= 0) out.d.push_back({ca[k], r.grad});
         if (cb[k] >= 0) out.d.push_back({cb[k], -r.grad});
@@ -1669,10 +1673,40 @@ public:
       for (const auto &b : sl.blk->behavioural) f(b, sl, b.voltage ? row++ : -1);
     }
   }
+  // The stateful code models (int, d_dt) take their state at an accepted point x (h: the step that reached it;
+  // 0: the t = 0 operating point, where int starts at out_ic and d_dt from its input)
+  void acceptBehav(const TensorNetlist &nl, const std::vector<double> &x, double h, double t = 0.0) const {
+    forEachBehav(nl, [&](const Behavioural &b, const BranchSlot &sl, int) {
+      if (!b.cm || !b.cmState) return;
+      auto X = [&](int c) { return c >= 0 && c < (int)x.size() ? x[c] : 0.0; };
+      std::vector<double> in;
+      for (const auto &r : b.refs)
+        in.push_back(r.kind == 0 ? X(sl.map(r.a) - 1) - X(sl.map(r.b) - 1)
+                                 : X(r.kind == 1 ? sl.vs + r.a : r.kind == 2 ? sl.ind + r.a : sl.bv + r.a));
+      if (xspice::oscillator(b.cm->kind)) {
+        b.cmState->v = xspice::oscStep(*b.cm, in.empty() ? 0.0 : in[0], *b.cmState, t, h).st;
+        return;
+      }
+      if (b.cm->kind == xspice::AKind::HYST) {
+        const double v = in.empty() ? 0.0 : in[0];
+        b.cmState->leg = xspice::hystOut(*b.cm, v, xspice::hystLeg(*b.cm, v, *b.cmState)).second;
+        return;
+      }
+      if (b.cm->kind == xspice::AKind::S_XFER) {
+        if (h <= 0.0) b.cmState->v = b.cm->intIc;  // t = 0: the integrators' initial values (the top one: the input's)
+        const auto s = xspice::sxferChain(*b.cm, in.empty() ? 0.0 : in[0], *b.cmState, h);
+        b.cmState->v.assign(s.begin(), s.end());
+        return;
+      }
+      const double out = xspice::analogOut(*b.cm, in, b.cmState.get(), h);
+      b.cmState->out = out;
+      b.cmState->in = in.empty() ? 0.0 : in[0];
+    });
+  }
   // Newton stamp at x: f ~ f0 + g.(x' - x). A voltage source's row reads v+ - v- - g.x' = f0 - g.x; a
   // current source leaves + (enters -) with g.x' + f0 - g.x.
-  void stampBehav(const Behavioural &b, const BranchSlot &sl, int row, const std::vector<double> &x, double time) {
-    auto ev = behavEval(b, sl, x, time, true);
+  void stampBehav(const Behavioural &b, const BranchSlot &sl, int row, const std::vector<double> &x, double time, double h = 0.0) {
+    auto ev = behavEval(b, sl, x, time, true, h);
     // ponytail: outside a function's domain (ln(0) at the cold start, V = 0) the Newton step sees 0 here;
     // the audit (calculatePhysicalResiduals) keeps the exact value, so a real domain error cannot converge
     if (!std::isfinite(ev.f)) ev.f = 0.0;
@@ -1917,7 +1951,7 @@ public:
 
     // Behavioural sources: the exact f(x), not the linearisation just stamped
     forEachBehav(netlist, [&](const Behavioural &b, const BranchSlot &sl, int row) {
-      const double f = behavEval(b, sl, v_candidate, time, false).f;
+      const double f = behavEval(b, sl, v_candidate, time, false, h).f;
       if (b.voltage) { node_residuals[row] += f; return; }
       addRes(sl.map(b.outPos), -f);
       addRes(sl.map(b.outNeg), f);
@@ -2304,7 +2338,7 @@ public:
 
     // Branch-current elements (V, L+K, E, F, H), MOSFETs, diodes and BJTs: one implementation for both paths
     stampBranchSystem(netlist, h, time);
-    forEachBehav(netlist, [&](const Behavioural &b, const BranchSlot &sl, int row) { stampBehav(b, sl, row, v_guess, time); });
+    forEachBehav(netlist, [&](const Behavioural &b, const BranchSlot &sl, int row) { stampBehav(b, sl, row, v_guess, time, h); });
     forEachMosfet(netlist, [&](const Mosfet &m, const std::array<int, 4> &n,
                                const BlockState::DeviceCharge *st) { stampMos1(n, mos1Params(m, gmin_), st, h, v_guess, offHold_ && m.off); });
     forEachJunction(netlist, [&](const Junction &j) { stampJunction(j, v_guess, h); });
