@@ -1395,8 +1395,9 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                           "IBV", "IB", "EG", "XTI", "TNOM", "TM1", "TM2", "TCV", "TBV1", "TTT1", "TTT2", "TRS", "TRS1", "TRS2",
                           "JSW", "ISW", "NS", "CJSW", "MJSW", "PHP", "VJSW", "IKF", "IK", "IKR", "IKP", "KF", "AF", "ISR", "NR",
                           "NBV", "NZ", "CTA", "CTC", "CTP", "TPB", "TVJ", "TPHP", "TLEVC", "TLEV", "CJP", "FCS", "GAP1", "GAP2",
-                          "JTUN", "JTUNSW", "NTUN", "XTITUN", "KEG", "AREA", "PJ", "TREF",
-                          "FV_MAX", "BV_MAX", "ID_MAX", "TE_MAX", "PD_MAX"});  // SOA: ngspice's warnings only
+                          "JTUN", "JTUNSW", "NTUN", "XTITUN", "KEG", "AREA", "PJ", "TREF", "VP",
+                          "FV_MAX", "BV_MAX", "ID_MAX", "TE_MAX", "PD_MAX",  // SOA: ngspice's warnings only
+                          "RTH0", "CTH0"});  // self-heating: only a THERMAL instance (D a k tj, not supported yet) uses them
             // Temperature selectors (probed on ngspice 47): TLEV 1 scales BV by (1 - TCV dT) where 0 subtracts TCV dT
             // (IS follows the same law under both); TLEV 2 also takes the band gap EG - GAP1 T^2 / (T + GAP2) for the
             // saturation currents (exp(EG(Tn)/(N Vt(Tn)) - EG(T)/(N Vt) + XTI/N ln(T/Tn))) and the junction potentials;
@@ -1425,6 +1426,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             k.bv = first(c, {"BV", "VB", "VRB", "VAR"}, 0.0); k.ibv = first(c, {"IBV", "IB"}, 1e-3);
             k.isr = c->get("ISR", 0.0); k.nr = c->get("NR", 2.0); k.nbv = first(c, {"NBV", "NZ"}, NAN);
             k.jtun = c->get("JTUN", 0.0); k.jtunsw = c->get("JTUNSW", 0.0); k.ntun = c->get("NTUN", 30.0);
+            k.vp = c->get("VP", 0.0);
             if (!(k.m < 1.0 && k.mjsw < 1.0 && k.vj > 0.0 && k.fc < 1.0 && k.fcs < 1.0 && k.rs >= 0.0 && k.ibv > 0.0))
                 throw std::runtime_error("model " + c->name + ": needs M, MJSW < 1, VJ > 0, FC, FCS < 1, RS >= 0, IBV > 0");
             using namespace devtemp;
@@ -1532,7 +1534,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                           "TMJC1", "TMJC2", "TMJS1", "TMJS2", "TBF1", "TBF2", "TBR1", "TBR2", "TIS1", "TIS2", "TISE1", "TISE2",
                           "TISC1", "TISC2", "TISS1", "TISS2",
                           "IBE", "IBC", "RCO", "VO", "GAMMA", "QCO", "QUASIMOD", "VG", "CN", "D",
-                          "VBE_MAX", "VBC_MAX", "VCE_MAX", "IC_MAX", "IB_MAX", "PD_MAX", "TE_MAX"});  // SOA: ngspice's warnings only
+                          "VBE_MAX", "VBC_MAX", "VCE_MAX", "IC_MAX", "IB_MAX", "PD_MAX", "TE_MAX", "RTH0"});  // SOA (RTH0 derates PD_MAX): ngspice's warnings only
             bounded(c, {"IS", "VAF", "VA", "VAR", "VB", "IKF", "IK", "IKR", "ISE", "C2", "ISC", "C4", "CJE", "CJC", "CJS", "CCS", "CSUB",
                         "MJE", "ME", "MJC", "MC", "MJS", "MS", "TF", "XTF", "VTF", "ITF", "TR", "ISS", "RBM", "IRB", "NK", "NKF", "KF"},
                     {"NE", "NC", "NS"});

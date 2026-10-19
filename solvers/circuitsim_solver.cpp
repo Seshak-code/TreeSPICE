@@ -732,7 +732,7 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
     auto given = [](const double *ic, int n) { for (int k = 0; k < n; ++k) if (!std::isnan(ic[k])) return true; return false; };
     auto or_ = [](double ic, double node) { return std::isnan(ic) ? node : ic; };
     const bool fromIc = uic && (j.d ? given(j.d->ic, 1) : j.f ? given(j.f->ic, 2) : given(j.q->ic, 2));
-    if (uic && j.d && given(j.d->ic, 1)) { v[0] = j.d->ic[0]; q[0] = diode_iq(v[0], diodeModel(*j.d, gmin_)).second; }
+    if (uic && j.d && given(j.d->ic, 1)) { auto xi = xv; xi[2] = xi[1] + j.d->ic[0]; junctionCharges(j, xi, v, q, nullptr, false); }
     else if (uic && j.f && given(j.f->ic, 2)) {  // node vds, vgs: D - S, G - S
       const double t = jfetType(*j.f), vgs = or_(j.f->ic[1], xv[1] - xv[2]), vds = or_(j.f->ic[0], xv[0] - xv[2]);
       v[0] = t * vgs; v[1] = t * (vgs - vds);
@@ -1224,6 +1224,7 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
         const double s = (j.q && k == 3 ? j.subSign : 1.0) * type;  // substrate: to Junction::sub
         Q[from[k]] += s * q[k].grad;
         Q[j.q && k == 3 ? j.sub : to[k]] -= s * q[k].grad;
+        if (j.d && k == 1) { const double g = (1.0 - j.d->card.vp) / j.d->card.tt * q[k].grad; Q[2] += g; Q[1] -= g; }  // soft recovery
       }
       for (int t = 0; t < j.terms; ++t) if (Q[t] != 0.0) addC(j.n[t] - 1, j.n[u] - 1, Q[t]);
     }

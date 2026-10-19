@@ -615,7 +615,7 @@ public:
   // without the resistance the internal terminal is the external one.
   static int junctionInternals(const TensorBlock &blk) {
     int k = 0;
-    for (const auto &d : blk.diodes) k += d.card.rs > 0.0;
+    for (const auto &d : blk.diodes) k += (d.card.rs > 0.0) + d.card.qp();
     for (const auto &q : blk.bjts) k += (q.card.rb > 0.0) + (q.card.rc > 0.0) + (q.card.re > 0.0) + (q.card.rco > 0.0);
     return k;
   }
@@ -646,6 +646,7 @@ public:
         j.d = &d; j.terms = 3;
         j.n[0] = sl.map(d.anode); j.n[1] = sl.map(d.cathode);
         j.n[2] = d.card.rs > 0.0 ? next++ : j.n[0];
+        if (d.card.qp()) { j.n[3] = next++; j.terms = 4; }  // soft recovery's qp node
         j.st = i < st->diodeState.size() ? &st->diodeState[i] : nullptr;
         f(j);
       }
@@ -916,7 +917,7 @@ public:
 
   // Charge branches (terminal pairs, q flows from -> to): diode A'->C; BJT
   // be (B'->E'), bc (B'->C'), bx (B->C'), substrate (S->C'; lateral: S->B', Junction::sub).
-  static constexpr int diodeFrom[1] = {2}, diodeTo[1] = {1};
+  static constexpr int diodeFrom[2] = {2, 3}, diodeTo[2] = {1, 4};  // + soft recovery's qp -> ground (4: past terms)
   static constexpr int bjtFrom[5] = {5, 5, 1, 3, 5}, bjtTo[5] = {6, 4, 4, 4, 7};  // + quasi-saturation bcx (B'->Cx)
   static constexpr int jfetFrom[2] = {1, 1}, jfetTo[2] = {2, 0};  // JFET gs (G->S), gd (G->D)
   static double jfetType(const JFET &f) { return f.isNChannel ? 1.0 : -1.0; }
@@ -937,9 +938,14 @@ public:
   int junctionCharges(const Junction &j, const std::array<T, kJT> &x, T *v, T *q,
                       const JShift *sh = nullptr, bool hist = true) const {
     if (j.d) {
+      auto p = diodeModel(*j.d, gmin_);
       v[0] = shifted(T(x[2] - x[1]), sh, 0);
-      q[0] = diode_iq(v[0], diodeModel(*j.d, gmin_)).second;
-      return 1;
+      if (!j.d->card.qp()) { q[0] = diode_iq(v[0], p).second; return 1; }
+      // soft recovery (ngspice dioload): the junction keeps its depletion charge, TT vqp is the qp node's
+      v[1] = x[3]; q[1] = p.tt * x[3];
+      p.tt = 0.0;
+      q[0] = diode_iq(v[0], p).second;
+      return 2;
     }
     if (j.f) {
       const double t = jfetType(*j.f);
@@ -990,6 +996,7 @@ public:
       if (p.rs > 0.0) { const T ir = (x[0] - x[2]) / p.rs; I[0] += ir; I[2] -= ir; }
       const T id = diode_iq(shifted(T(x[2] - x[1]), sh, 0), p).first;
       I[2] += id; I[1] -= id;
+      if (j.d->card.qp()) I[3] += (x[3] - p.tt * id) / j.d->card.vp;  // qp row: vqp/VP + ddt(TT vqp) = TT/VP id
       from = diodeFrom; to = diodeTo;
     } else if (j.f) {
       const auto p = jfetModel(*j.f, gmin_);
@@ -1046,6 +1053,7 @@ public:
       const bool sub = j.q && k == 3;  // substrate branch: to Junction::sub, SUBS sign
       I[from[k]] += (sub ? j.subSign : 1.0) * type * i;
       I[sub ? j.sub : to[k]] -= (sub ? j.subSign : 1.0) * type * i;
+      if (j.d && k == 1) { const T g = (1.0 - j.d->card.vp) / j.d->card.tt * i; I[2] += g; I[1] -= g; }  // (1-VP)/TT ddt(Qp)
       if constexpr (std::is_same_v<T, double>)
         if (next) { next->v[0][k] = v[k]; next->q[k] = q[k]; next->i[k] = i; }
     }

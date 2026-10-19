@@ -1,0 +1,10 @@
+* Diode soft reverse recovery (VP with TT: the qp node, ngspice dioload): D1 with RS, D2 without, VP 0.5 / 0.2
+VIN 1 0 PULSE(5 -5 20n 1n 1n 100n 200n)
+R1 1 2 1k
+D1 2 0 DVP
+R2 1 3 1k
+D2 3 0 DVP2
+.model DVP D(IS=1e-14 N=1 TT=20n CJO=5p VJ=0.7 M=0.45 RS=2 VP=0.5)
+.model DVP2 D(IS=1e-14 TT=10n CJO=2p VP=0.2)
+.tran 0.2n 300n
+.end
