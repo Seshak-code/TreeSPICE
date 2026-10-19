@@ -1,0 +1,7 @@
+* VDMOS body diode soft reverse recovery (VP with TT): the diode is forward-biased, then snapped into reverse
+VS in 0 PULSE(-2 20 2u 20n 20n 3u 10u)
+R1 in d 2
+M1 d 0 0 rr
+.model rr VDMOS(Vto=3 Kp=10 Is=1p N=1 TT=200n VP=0.4 Cjo=500p Rb=5m)
+.tran 2n 6u
+.end

@@ -1,0 +1,8 @@
+* JFET noise with M=3 and AF=1.5: flicker M KF (Id/M)^AF / f (ngspice jfetnoi), channel and RD / RS thermal scale with M
+VDD vdd 0 DC 12
+VIN in 0 DC 0 AC 1
+RL vdd d 2k
+J1 d in 0 jn M=3
+.model jn NJF(VTO=-2 BETA=1e-3 LAMBDA=0.02 RD=50 RS=20 KF=1e-15 AF=1.5)
+.noise v(d) VIN dec 5 1 1meg
+.end

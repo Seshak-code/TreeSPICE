@@ -65,6 +65,7 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
   if (!offHold_ && prevVoltages_.empty()) {
     bool anyOff = false;
     forEachJunction(netlist, [&](const Junction &j) { anyOff |= j.d ? j.d->off : j.f ? j.f->off : j.q->off; });
+    forEachMosfet(netlist, [&](const Mosfet &m, const std::array<int, 4> &, const BlockState::DeviceCharge *) { anyOff |= m.off; });
     if (anyOff) {
       struct Hold { bool &f; ~Hold() { f = false; } } hold{offHold_};
       offHold_ = true;
@@ -676,27 +677,54 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
     }
   };
   seed(netlist.globalBlock, netlist.globalState, [](int n) { return n; });
-  // MOSFET charges at x, zero current (Meyer charges count from here: only their change matters)
+  // MOSFET charges at x, zero current (Meyer charges count from here: only their change matters). Under UIC an
+  // IC=vds,vgs,vbs device starts there (ngspice MODEINITJCT with TRANOP|UIC); a value not given from the nodes.
   forEachMosfet(netlist, [&](const Mosfet &m, const std::array<int, 4> &n, const BlockState::DeviceCharge *st) {
     if (!st) return;
     const double zero[5] = {};
-    const auto c = mos1_charges(getV(n[0]), getV(n[1]), getV(n[2]), getV(n[3]), mos1Params(m, gmin_), zero, zero, zero);
+    const double vs = getV(n[2]);
+    auto at = [&](int k, int node) { return uic && !std::isnan(m.ic[k]) ? vs + m.ic[k] : getV(node); };
+    const auto c = mos1_charges(at(0, n[0]), at(1, n[1]), vs, at(2, n[3]), mos1Params(m, gmin_), zero, zero, zero);
     auto *s = const_cast<BlockState::DeviceCharge *>(st);  // netlist is non-const here
     *s = {};
     for (auto &vh : s->v) std::copy(c.v, c.v + 5, vh);
     std::copy(c.q, c.q + 5, s->q);
     std::copy(c.half, c.half + 3, s->half);
   });
-  // Diode / BJT charges at x, zero current
+  // Diode / BJT charges at x, zero current. Under UIC a junction starts from its device IC= instead (ngspice
+  // MODEINITJCT with TRANOP|UIC): diode vd; BJT vbe, vbc = vbe - vce = vbx, vsub 0; JFET vgs, vgd = vgs - vds; a value
+  // not given comes from the node voltages, as ngspice's getic takes it from .ic. The charges then hold the nodes
+  // there at first (ngspice's BJT and JFET do; its diode drops its IC).
   forEachJunction(netlist, [&](const Junction &j) {
     if (!j.st) return;
     std::array<double, 7> xv{};
     for (int k = 0; k < j.terms; ++k) xv[k] = getV(j.n[k]);
     double v[5], q[5];
-    const int K = junctionCharges(j, xv, v, q);
+    const int K = junctionCharges(j, xv, v, q, nullptr, false);
+    auto given = [](const double *ic, int n) { for (int k = 0; k < n; ++k) if (!std::isnan(ic[k])) return true; return false; };
+    auto or_ = [](double ic, double node) { return std::isnan(ic) ? node : ic; };
+    const bool fromIc = uic && (j.d ? given(j.d->ic, 1) : j.f ? given(j.f->ic, 2) : given(j.q->ic, 2));
+    if (uic && j.d && given(j.d->ic, 1)) { v[0] = j.d->ic[0]; q[0] = diode_iq(v[0], diodeModel(*j.d, gmin_)).second; }
+    else if (uic && j.f && given(j.f->ic, 2)) {  // node vds, vgs: D - S, G - S
+      const double t = jfetType(*j.f), vgs = or_(j.f->ic[1], xv[1] - xv[2]), vds = or_(j.f->ic[0], xv[0] - xv[2]);
+      v[0] = t * vgs; v[1] = t * (vgs - vds);
+      const auto c = jfet_charges(v[0], v[1], jfetModel(*j.f, gmin_));
+      q[0] = c[0]; q[1] = c[1];
+    } else if (uic && j.q && given(j.q->ic, 2)) {  // node vbe, vce: B - E, C - E (external)
+      const auto p = bjtModel(*j.q, gmin_);
+      const double vbe = or_(j.q->ic[0], xv[1] - xv[2]), vce = or_(j.q->ic[1], xv[0] - xv[2]);
+      v[0] = p.type * vbe; v[1] = v[2] = p.type * (vbe - vce); v[3] = 0.0;
+      const auto e = bjt_gp(v[0], v[1], v[2], v[3], p);
+      for (int k = 0; k < 4; ++k) q[k] = e.q[k];
+    }
     *j.st = {};
     for (auto &vh : j.st->v) std::copy(v, v + K, vh);
     std::copy(q, q + K, j.st->q);
+    if (fromIc) { j.st->jv[0] = v[0]; j.st->jv[1] = j.d ? 0.0 : v[1]; j.st->jvState = 1; }  // limiting from there
+    if (j.q) {  // excess phase starts from the operating point's transfer current (ngspice MODEINITTRAN)
+      const auto p = bjtModel(*j.q, gmin_);
+      if (p.td > 0.0) j.st->xf[0] = j.st->xf[1] = bjt_gp(v[0], v[1], v[2], v[3], p).xf;
+    }
   });
   // OSDI charges at x, zero current
   forEachOsdi(netlist, [&](const OsdiRef &r) {
@@ -1003,6 +1031,26 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
       if (b > 0) matrixBuilder.add(b - 1, b - 1, dg);
       if (a > 0 && b > 0) { matrixBuilder.add(a - 1, b - 1, -dg); matrixBuilder.add(b - 1, a - 1, -dg); }
     }
+  // BJT excess phase (ngspice bjtacld): the forward transfer conductance g = d((cbe - cbc)/qb)/dvbe' turns by
+  // exp(-jw TD); it moves from G to a delayed entry
+  forEachJunction(netlist, [&](const Junction &j) {
+    if (!j.q) return;
+    const auto p = bjtModel(*j.q, gmin_);
+    if (!(p.td > 0.0)) return;
+    auto V = [&](int k) { return j.n[k] > 0 ? lastSolution_[j.n[k] - 1] : 0.0; };
+    const double vbc = p.type * (V(5) - V(4));
+    const auto e = bjt_gp(Dual<double>(p.type * (V(5) - V(6)), 1.0), Dual<double>(vbc), Dual<double>(p.type * (V(1) - V(4))),
+                          Dual<double>(p.type * j.subSign * (V(3) - V(j.sub))), p);
+    const double cbc = spice_junction(vbc, p.is, p.vtr);
+    const double g = e.xf.grad + cbc * e.qb.grad / (e.qb.val * e.qb.val);  // d(cbe/qb)/dvbe - cbc d(1/qb)/dvbe
+    const int c = j.n[4] - 1, b = j.n[5] - 1, em = j.n[6] - 1;
+    auto move = [&](int r, int col, double v) {
+      if (r < 0 || col < 0) return;
+      matrixBuilder.add(r, col, -v);
+      sys.dr.push_back(r); sys.dc.push_back(col); sys.dv.push_back(v); sys.dtd.push_back(p.td);
+    };
+    move(c, b, g); move(c, em, -g); move(em, b, -g); move(em, em, g);
+  });
   sys.G = matrixBuilder.createCsr();
   auto addC = [&](int r, int c, double v) {
     if (r >= 0 && c >= 0) { sys.cr.push_back(r); sys.cc.push_back(c); sys.cv.push_back(v); }
@@ -1064,7 +1112,7 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
       std::array<Dual<double>, 7> x;
       for (int k = 0; k < 7; ++k) x[k] = Dual<double>(V(k), k < j.terms && j.n[k] == j.n[u] ? 1.0 : 0.0);
       Dual<double> v[5], q[5];
-      const int K = junctionCharges(j, x, v, q);
+      const int K = junctionCharges(j, x, v, q, nullptr, false);
       double Q[7] = {};
       for (int k = 0; k < K; ++k) {
         const double s = (j.q && k == 3 ? j.subSign : 1.0) * type;  // substrate: to Junction::sub
@@ -1178,6 +1226,8 @@ CircuitSim::NoiseResult CircuitSim::solveNoise(TensorNetlist &netlist, const std
     for (const auto &sw : blk.switches)  // thermal noise of the conductance the small-signal matrix holds (ROFF)
       gens.push_back({sl.map(sw.nodePos), sl.map(sw.nodeNeg), kT4 / sw.roff});
     for (const auto &m : blk.mosfets) {
+      // ngspice's mos6 has no noise routine: a LEVEL 6 MOSFET would be silently noiseless there, so it fails here
+      if (m.card.level == 6) { r.error = m.instanceName + ": MOS LEVEL 6 has no noise model"; return r; }
       const int d = sl.map(m.drain), g = sl.map(m.gate), s = sl.map(m.source), b = sl.map(m.body);
       // channel gm = dI_drain/dV_gate (the bulk junctions do not see the gate)
       const double gm = mos1_currents(Dual<double>(V(d)), Dual<double>(V(g), 1.0), Dual<double>(V(s)),
@@ -1198,9 +1248,9 @@ CircuitSim::NoiseResult CircuitSim::solveNoise(TensorNetlist &netlist, const std
       if (m.rs > 0.0) gens.push_back({j.n[0], j.n[2], kT4 / m.rs});
       const double id = diode_iq(V(j.n[2]) - V(j.n[1]), m).first;
       gens.push_back({j.n[2], j.n[1], q2 * std::abs(id)});
-      if (j.d->card.kf != 0.0)  // flicker: KF |Id|^AF / f
-        gens.push_back({j.n[2], j.n[1], 0.0, [kf = j.d->card.kf, af = j.d->card.af, id = std::abs(id)](double f) {
-                          return kf * std::pow(std::max(id, 1e-38), af) / f; }});
+      if (j.d->card.kf != 0.0)  // flicker: M KF (|Id|/M)^AF / f
+        gens.push_back({j.n[2], j.n[1], 0.0, [kf = j.d->card.kf, af = j.d->card.af, M = j.d->mult, id = std::abs(id)](double f) {
+                          return M * kf * std::pow(std::max(id / M, 1e-38), af) / f; }});
       return;
     }
     if (j.f) {  // ngspice jfetnoi: channel 8kT gm/3 and flicker KF |Id|^AF / f between D and S (RD, RS are resistors)
@@ -1212,8 +1262,8 @@ CircuitSim::NoiseResult CircuitSim::solveNoise(TensorNetlist &netlist, const std
       const auto e = eval(0.0);
       gens.push_back({j.n[0], j.n[2], kT4 * (2.0 / 3.0) * std::abs(eval(1.0).id.grad)});
       if (j.f->card.kf != 0.0)
-        gens.push_back({j.n[0], j.n[2], 0.0, [kf = j.f->card.kf, af = j.f->card.af, id = std::abs(e.id.val)](double f) {
-                          return kf * std::pow(std::max(id, 1e-38), af) / f; }});
+        gens.push_back({j.n[0], j.n[2], 0.0, [kf = j.f->card.kf, af = j.f->card.af, M = j.f->m, id = std::abs(e.id.val)](double f) {
+                          return M * kf * std::pow(std::max(id / M, 1e-38), af) / f; }});
       return;
     }
     const auto m = bjtModel(*j.q, gmin_);
@@ -1223,9 +1273,9 @@ CircuitSim::NoiseResult CircuitSim::solveNoise(TensorNetlist &netlist, const std
     const auto e = bjt_gp(t * (V(j.n[5]) - V(j.n[6])), t * (V(j.n[5]) - V(j.n[4])), t * (V(j.n[1]) - V(j.n[4])),
                           t * j.subSign * (V(j.n[3]) - V(j.n[j.sub])), m);
     if (m.rb > 0.0) gens.push_back({j.n[1], j.n[5], kT4 / (m.varRb ? bjt_rbb(e.qb, e.cb, m) : m.rb)});
-    if (j.q->card.kf != 0.0)  // flicker: KF |Ib|^AF / f between B' and E'
-      gens.push_back({j.n[5], j.n[6], 0.0, [kf = j.q->card.kf, af = j.q->card.af, ib = std::abs(e.cb)](double f) {
-                        return kf * std::pow(std::max(ib, 1e-38), af) / f; }});
+    if (j.q->card.kf != 0.0)  // flicker: M KF (|Ib|/M)^AF / f between B' and E'
+      gens.push_back({j.n[5], j.n[6], 0.0, [kf = j.q->card.kf, af = j.q->card.af, M = j.q->m, ib = std::abs(e.cb)](double f) {
+                        return M * kf * std::pow(std::max(ib / M, 1e-38), af) / f; }});
     gens.push_back({j.n[4], j.n[6], q2 * std::abs(e.cc)});
     gens.push_back({j.n[5], j.n[6], q2 * std::abs(e.cb)});
   });

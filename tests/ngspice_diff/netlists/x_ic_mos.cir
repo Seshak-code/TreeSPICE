@@ -1,0 +1,11 @@
+* MOSFET IC=vds,vgs,vbs under UIC: the Meyer and junction charges start there; ICVGS alone, the rest from the nodes
+VDD d0 0 DC 5
+RD d0 d 5k
+RG 0 g 1meg
+M1 d g 0 0 nm L=2u W=20u AD=40p AS=40p IC=4,2,0
+.model nm nmos level=1 vto=0.8 kp=50u tox=40n cgso=3e-10 cgdo=3e-10 cj=3e-4
+RD2 d0 d2 5k
+RG2 0 g2 1meg
+M2 d2 g2 0 0 nm L=2u W=20u ICVGS=1.5
+.tran 1n 2u uic
+.end

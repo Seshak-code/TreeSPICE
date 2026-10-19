@@ -1,0 +1,8 @@
+* VDMOS temperature (-40, 125 C) with TNOM 30: TCVTH, MU, TEXP0 on RD, TRS1/TRG1, TKSUBTHRES1, body diode IS (EG, XTI), VJ, CJO
+VD d 0 DC 5
+VG g 0 DC 4
+M1 d g 0 t1
+.model t1 VDMOS(Vto=3.2 Kp=12 tcvth=-4m mu=-1.8 Rd=40m texp0=2 Rs=10m trs1=3m Rg=1 trg1=1m ksubthres=0.1 tksubthres1=2m Is=2p eg=1.2 xti=2 n=1.05 Cjo=1n tnom=30 Rb=20m trb1=5m)
+.temp -40 125
+.dc VD -1 5 0.1 VG 3 6 1
+.end

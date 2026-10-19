@@ -1,0 +1,12 @@
+* VDMOS self-heating (M d g s tj tc THERMAL): junction and case temperatures in deg C through RTHJC, RTHCA to the ambient,
+* a heatsink from the case, MU, TCVTH and TEXP0 at the junction temperature, M=2
+VD d 0 DC 12
+VG g 0 DC 4
+M1 d g 0 tj tc hot thermal M=2
+RSINK tc amb 3
+VAMB amb 0 DC 27
+.model hot VDMOS(Vto=3 Kp=1.5 tcvth=-5m mu=-1.5 Rd=50m texp0=1.5 lambda=0.005 rthjc=0.8 rthca=5 cthj=5m Is=1p Rb=10m)
+* ngspice's self-heating Jacobian is partial: at its default tolerances one sweep point stops 0.1 % short
+.options reltol=1e-7 abstol=1e-15 vntol=1e-12
+.dc VD 0.5 12 0.5 VG 3.5 4.5 0.5
+.end

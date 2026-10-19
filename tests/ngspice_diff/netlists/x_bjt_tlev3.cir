@@ -1,0 +1,11 @@
+* BJT TLEV 3: IS, ISE, ISC, ISS to the power 1 + TIS1 dT + TIS2 dT^2 (TISE, TISC, TISS), PNP, at 0 and 100 C
+VEE e0 0 DC 5
+VB b0 0 DC 4.3
+RB b0 b 1k
+RE e0 e 100
+Q1 0 b e 0 qp
+.model qp PNP(TLEV=3 IS=1e-15 BF=80 VAF=40 ISE=1e-13 NE=1.7 ISC=1e-13 NC=2 ISS=1e-16 TIS1=-1.2e-3 TIS2=2e-7 TISE1=-1e-3 TISC1=-1.1e-3
++ TISS1=-1e-3 TBF1=3e-3 RB=20 RC=3)
+.temp 0 100
+.dc VB 3.8 4.6 0.01
+.end

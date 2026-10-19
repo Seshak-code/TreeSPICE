@@ -1,0 +1,9 @@
+* MESFET inverter (depletion load) transient: Statz charge splitting between CGS and CGD, gate diode forward conduction
+VDD vdd 0 DC 3
+VIN in 0 PULSE(-1.6 0.7 1n 0.2n 0.2n 3n 8n)
+Z1 out in 0 msw
+Z2 vdd out out msw area=0.4
+CL out 0 0.2p
+.model msw NMF(VTO=-1 BETA=4e-3 B=0.3 ALPHA=2.5 LAMBDA=0.05 RD=5 RS=5 CGS=0.3p CGD=0.08p PB=0.8 IS=1e-14)
+.tran 0.01n 16n
+.end

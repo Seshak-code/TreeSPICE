@@ -1,0 +1,7 @@
+* MESFET p-channel (PMF): transfer curves, M=2, VT0 alias
+VD d 0 DC -3
+VG g 0 DC 0
+Z1 d g 0 mp M=2
+.model mp PMF(VT0=1.2 BETA=8e-4 B=0.2 ALPHA=3 LAMBDA=0.03 IS=1e-14)
+.dc VG 1.5 -0.6 -0.05 VD -0.5 -3 -1.25
+.end

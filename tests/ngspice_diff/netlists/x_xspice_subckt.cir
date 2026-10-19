@@ -1,0 +1,40 @@
+* XSPICE in subcircuits: a half adder cell (d_xor, d_and) used twice as a 2-bit ripple adder, digital nets through the
+* X ports, a nested cell; bridges outside (top level) and inside a cell (its adc / dac on the cell's analog pins)
+.subckt half a b s c
+a_x [a b] s xor1
+a_a [a b] c and1
+.model xor1 d_xor(rise_delay=0.3n fall_delay=0.2n)
+.model and1 d_and(rise_delay=0.4n fall_delay=0.3n)
+.ends
+.subckt full a b ci s co
+x1 a b s1 c1 half
+x2 s1 ci s c2 half
+a_o [c1 c2] co or1
+.model or1 d_or(rise_delay=0.2n fall_delay=0.2n)
+.ends
+.subckt bridge vin dout
+a_adc [vin] [dout] adcm
+.model adcm adc_bridge(in_low=1 in_high=2)
+.ends
+.subckt drive din vout
+a_dac [din] [vout] dacm
+.model dacm dac_bridge(out_low=0 out_high=3.3 t_rise=0.2n t_fall=0.2n)
+R1 vout 0 1k
+.ends
+va a0 0 pulse(0 3 1n 0.1n 0.1n 4n 8n)
+vb b0 0 pulse(0 3 2n 0.1n 0.1n 4n 8n)
+vc c0 0 pulse(0 3 3n 0.1n 0.1n 8n 16n)
+xa a0 da bridge
+xb b0 db bridge
+a_adc [c0] [dc] adcm
+.model adcm adc_bridge(in_low=1 in_high=2)
+x0 da db dc s0 co full
+xs0 s0 vs0 drive
+xco co vco drive
+.tran 0.05n 20n
+.control
+run
+print v(vs0) v(vco)
+eprint s0 co x0.s1 x0.x1.c
+.endc
+.end

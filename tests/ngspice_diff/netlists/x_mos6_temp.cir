@@ -1,0 +1,9 @@
+* MOS level 6 temperature (-40 and 125 C): KC / T^1.5, PHI, VTO, junction saturation current with a forward body
+VDD d 0 DC 3
+VG g 0 DC 0
+VB b 0 DC 0
+M1 d g 0 b n6 W=20u L=2u AD=40p AS=40p PD=24u PS=24u
+.model n6 nmos level=6 vto=0.8 kv=2 nv=0.6 kc=3e-5 nc=1.2 gamma=0.5 phi=0.65 lambda=0.02 js=1e-5 cj=2e-4 tnom=30
+.temp -40 125
+.dc VG 0 3 0.25 VB 0 0.5 0.25
+.end

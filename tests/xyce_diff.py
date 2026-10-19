@@ -127,6 +127,8 @@ def case(path, opts):
     if rel in EXCLUDED: return rel, "SKIPPED", EXCLUDED[rel]
     text = open(path, errors="ignore").read()
     full = expand(text, os.path.dirname(path))
+    if re.search(r"^\s*\.model\s+\S+\s+[np]mos\b[^\n]*\blevel\s*=\s*9\b", full, re.I | re.M):
+        return rel, "XYCE-DIALECT", "Xyce's MOSFET LEVEL 9 is BSIM3; ngspice's (and the engine's) is mos9, a level 3 variant"
     g = os.path.join(XYCE, "OutputData", rel + ".prn")
     if SKIP_CARDS.search(text): return rel, "SKIPPED", SKIP_WHY[SKIP_CARDS.search(text).group(1).lower()]
     gd = gold(g)

@@ -1,0 +1,15 @@
+* XSPICE aswitch (log and linear resistance), a current-sensing (%id) gain, transient and AC
+VC c 0 PULSE(0 1 1u 2u 2u 3u 10u) AC 1
+VS s 0 DC 2
+R1 s x 1k
+a1 c %gd(x 0) sw1
+.model sw1 aswitch(cntl_off=0.1 cntl_on=0.9 r_off=1meg r_on=10 log=true)
+R2 s y 1k
+a2 c %gd(y 0) sw2
+.model sw2 aswitch(cntl_off=0.2 cntl_on=0.8 r_off=10k r_on=100 log=false limit=true)
+R3 s z 2k
+a3 %id(z 0) o3 gi
+.model gi gain(gain=1k)
+R4 o3 0 1k
+.tran 20n 12u
+.end
