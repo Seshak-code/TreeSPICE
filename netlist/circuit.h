@@ -721,6 +721,7 @@ struct BJT {
         bool lateral = false;  // SUBS = -1: substrate junction on the base, not the collector (PNP default)
         double tf = 0.0, xtf = 0.0, vtf = 0.0, itf = 0.0, tr = 0.0;
         double ptf = 0.0;  // excess phase [degrees] at 1/(2 pi TF)
+        double td = 0.0;   // its delay PTF pi/180 TF, from the TNOM TF (ngspice bjttemp; TTF1/2 do not move it)
     } card;
     double area = 1.0;
     InstTemp inst;  // card, IS and betas are held at the instance temperature (resolved by the parser)

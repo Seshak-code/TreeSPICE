@@ -120,7 +120,7 @@ inline BjtModel<double> bjtModel(const BJT& q, double gmin = PhysicsConstants::J
     p.iss = c.iss * a; p.vts = c.ns * vt;
     p.tf = c.tf; p.xtf = c.xtf; p.ovtf = c.vtf != 0.0 ? 1.0 / (1.44 * c.vtf) : 0.0;
     p.xjtf = c.itf * a; p.tr = c.tr;
-    p.td = c.ptf * M_PI / 180.0 * c.tf;  // ngspice bjttemp: the excess-phase delay
+    p.td = c.td;
     return p;
 }
 

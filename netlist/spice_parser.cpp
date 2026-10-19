@@ -1428,25 +1428,40 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             supported(c, {"IS", "BF", "BR", "NF", "NR", "VAF", "VA", "VAR", "VB", "IKF", "IK", "IKR",
                           "ISE", "NE", "ISC", "NC", "RB", "RC", "RE", "CJE", "VJE", "PE", "MJE", "ME",
                           "CJC", "VJC", "PC", "MJC", "MC", "XCJC", "CJS", "CCS", "VJS", "PS", "MJS", "MS",
-                          "FC", "TF", "XTF", "VTF", "ITF", "TR", "EG", "XTI", "XTB", "TNOM", "RBM", "IRB", "NK", "KF", "AF", "ISS", "NS", "SUBS", "PTF"});
-            bounded(c, {"IS", "VAF", "VA", "VAR", "VB", "IKF", "IK", "IKR", "ISE", "ISC", "CJE", "CJC", "CJS", "CCS",
-                        "MJE", "ME", "MJC", "MC", "MJS", "MS", "TF", "XTF", "VTF", "ITF", "TR", "ISS", "RBM", "IRB", "NK", "KF"},
+                          "FC", "TF", "XTF", "VTF", "ITF", "TR", "EG", "XTI", "XTB", "TNOM", "TREF", "RBM", "IRB", "NK", "NKF", "KF", "AF",
+                          "ISS", "NS", "SUBS", "PTF", "C2", "C4", "CSUB", "TLEV", "TLEVC", "CTE", "CTC", "CTS", "TVJE", "TVJC", "TVJS",
+                          "TRB", "TRC", "TRE",
+                          "TVAF1", "TVAF2", "TVAR1", "TVAR2", "TIKF1", "TIKF2", "TIKR1", "TIKR2", "TRB1", "TRB2", "TRC1", "TRC2",
+                          "TRE1", "TRE2", "TRM1", "TRM2", "TIRB1", "TIRB2", "TNF1", "TNF2", "TNR1", "TNR2", "TNE1", "TNE2",
+                          "TNC1", "TNC2", "TNS1", "TNS2", "TITF1", "TITF2", "TTF1", "TTF2", "TTR1", "TTR2", "TMJE1", "TMJE2",
+                          "TMJC1", "TMJC2", "TMJS1", "TMJS2", "TBF1", "TBF2", "TBR1", "TBR2", "TIS1", "TIS2", "TISE1", "TISE2",
+                          "TISC1", "TISC2", "TISS1", "TISS2",
+                          "VBE_MAX", "VBC_MAX", "VCE_MAX", "IC_MAX", "IB_MAX", "PD_MAX", "TE_MAX"});  // SOA: ngspice's warnings only
+            bounded(c, {"IS", "VAF", "VA", "VAR", "VB", "IKF", "IK", "IKR", "ISE", "C2", "ISC", "C4", "CJE", "CJC", "CJS", "CCS", "CSUB",
+                        "MJE", "ME", "MJC", "MC", "MJS", "MS", "TF", "XTF", "VTF", "ITF", "TR", "ISS", "RBM", "IRB", "NK", "NKF", "KF"},
                     {"NE", "NC", "NS"});
+            // Temperature selectors (ngspice bjttemp): TLEV 0 betas (T/Tn)^XTB, 1: 1 + XTB dT; TLEV 3 takes the saturation
+            // currents to the power 1 + TIS1 dT + TIS2 dT^2 (TISE, TISC, TISS likewise). TLEVC 1: CJx (1 + CTx dT), VJx - TVJx dT.
+            // ngspice 47's TLEV 2 leaves IS unset (bjttemp has no branch for it), so it stays an error.
+            const double tlev = c->get("TLEV", 0.0), tlevc = c->get("TLEVC", 0.0);
+            if ((tlev != 0.0 && tlev != 1.0 && tlev != 3.0) || (tlevc != 0.0 && tlevc != 1.0))
+                throw std::runtime_error("model " + c->name + ": BJT TLEV other than 0, 1, 3 / TLEVC other than 0, 1 is not supported");
             q.isNPN = (c->type != "PNP");
             q.saturationCurrent_I_S_A = c->get("IS", 1e-16);
+            // the IS / ISE / ISC / ISS this card gives, before the temperature laws (TLEV 3 raises them to a power)
             q.betaF = c->get("BF", 100.0);
             q.betaR = c->get("BR", 1.0);
             auto& k = q.card;
             k.nf = c->get("NF", 1.0); k.nr = c->get("NR", 1.0);
             k.vaf = first(c, {"VAF", "VA"}, 0.0); k.var = first(c, {"VAR", "VB"}, 0.0);
             k.ikf = first(c, {"IKF", "IK"}, 0.0); k.ikr = c->get("IKR", 0.0);
-            k.ise = c->get("ISE", 0.0); k.ne = c->get("NE", 1.5);
-            k.isc = c->get("ISC", 0.0); k.nc = c->get("NC", 2.0);
+            k.ise = first(c, {"ISE", "C2"}, 0.0); k.ne = c->get("NE", 1.5);
+            k.isc = first(c, {"ISC", "C4"}, 0.0); k.nc = c->get("NC", 2.0);
             k.rb = c->get("RB", 0.0); k.rc = c->get("RC", 0.0); k.re = c->get("RE", 0.0);
             k.cje = c->get("CJE", 0.0); k.vje = first(c, {"VJE", "PE"}, 0.75); k.mje = first(c, {"MJE", "ME"}, 0.33);
             k.cjc = c->get("CJC", 0.0); k.vjc = first(c, {"VJC", "PC"}, 0.75); k.mjc = first(c, {"MJC", "MC"}, 0.33);
             k.xcjc = c->get("XCJC", 1.0);
-            k.cjs = first(c, {"CJS", "CCS"}, 0.0); k.vjs = first(c, {"VJS", "PS"}, 0.75); k.mjs = first(c, {"MJS", "MS"}, 0.0);
+            k.cjs = first(c, {"CJS", "CCS", "CSUB"}, 0.0); k.vjs = first(c, {"VJS", "PS"}, 0.75); k.mjs = first(c, {"MJS", "MS"}, 0.0);
             k.fc = c->get("FC", 0.5);
             k.iss = c->get("ISS", 0.0); k.ns = c->get("NS", 1.0);
             // SUBS (ngspice): 1 vertical (substrate junction to C), -1 lateral (to B); default by polarity
@@ -1455,20 +1470,52 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             k.lateral = subs == -1.0;
             k.tf = c->get("TF", 0.0); k.xtf = c->get("XTF", 0.0); k.vtf = c->get("VTF", 0.0);
             k.itf = c->get("ITF", 0.0); k.tr = c->get("TR", 0.0); k.ptf = c->get("PTF", 0.0);
-            k.rbm = c->get("RBM", k.rb); k.irb = c->get("IRB", 0.0); k.nk = c->get("NK", 0.5);
+            k.rbm = c->get("RBM", k.rb); k.irb = c->get("IRB", 0.0); k.nk = std::min(first(c, {"NKF", "NK"}, 0.5), 1.0);
             k.kf = c->get("KF", 0.0); k.af = c->get("AF", 1.0);
-            const double Tn = c->get("TNOM", tnomC_) + 273.15, T = instK(q.inst);
+            k.td = k.ptf * M_PI / 180.0 * k.tf;
+            const double Tn = first(c, {"TNOM", "TREF"}, tnomC_) + 273.15, T = instK(q.inst), dt = T - Tn;
             q.thermalVoltage_V_T_V = devtemp::vt(T);
-            if (T != Tn) {
+            {
                 using namespace devtemp;
+                auto tc = [&](const char* a, const char* b) { return poly(c->get(a, 0.0), c->get(b, 0.0), dt); };
+                // bjttemp: VAF, VAR, IKF, IKR, RB, RC, RE (TRB / TRC / TRE: the linear terms), RBM, IRB, the emission
+                // coefficients, ITF, TF, TR and the gradings (held below 0.999) by 1 + T*1 dT + T*2 dT^2
+                k.vaf *= tc("TVAF1", "TVAF2"); k.var *= tc("TVAR1", "TVAR2");
+                k.ikf *= tc("TIKF1", "TIKF2"); k.ikr *= tc("TIKR1", "TIKR2");
+                k.rb *= poly(first(c, {"TRB1", "TRB"}, 0.0), c->get("TRB2", 0.0), dt);
+                k.rc *= poly(first(c, {"TRC1", "TRC"}, 0.0), c->get("TRC2", 0.0), dt);
+                k.re *= poly(first(c, {"TRE1", "TRE"}, 0.0), c->get("TRE2", 0.0), dt);
+                k.rbm *= tc("TRM1", "TRM2"); k.irb *= tc("TIRB1", "TIRB2");
+                const double ne0 = k.ne, nc0 = k.nc;  // the leakage laws take the card's NE, NC
+                k.nf *= tc("TNF1", "TNF2"); k.nr *= tc("TNR1", "TNR2"); k.ne *= tc("TNE1", "TNE2"); k.nc *= tc("TNC1", "TNC2");
+                k.ns *= tc("TNS1", "TNS2");
+                k.itf *= tc("TITF1", "TITF2"); k.tf *= tc("TTF1", "TTF2"); k.tr *= tc("TTR1", "TTR2");
+                k.mje = std::min(k.mje * tc("TMJE1", "TMJE2"), 0.999);
+                k.mjc = std::min(k.mjc * tc("TMJC1", "TMJC2"), 0.999);
+                k.mjs = std::min(k.mjs * tc("TMJS1", "TMJS2"), 0.999);
                 const double ratlog = std::log(T / Tn), factlog = (T / Tn - 1) * c->get("EG", 1.11) / vt(T) + c->get("XTI", 3.0) * ratlog;
-                const double fac = std::exp(factlog), bf = std::exp(ratlog * c->get("XTB", 0.0));
-                q.saturationCurrent_I_S_A *= fac; k.iss *= fac;
-                q.betaF *= bf; q.betaR *= bf;
-                k.ise *= std::exp(factlog / k.ne) / bf; k.isc *= std::exp(factlog / k.nc) / bf;
-                k.cje *= junctionAt(k.vje, k.mje, Tn, T);
-                k.cjc *= junctionAt(k.vjc, k.mjc, Tn, T);
-                k.cjs *= junctionAt(k.vjs, k.mjs, Tn, T);
+                const double xtb = c->get("XTB", 0.0), bfac = tlev == 0.0 ? std::exp(ratlog * xtb) : tlev == 1.0 ? 1.0 + xtb * dt : 1.0;
+                if (tlev == 3.0) {
+                    q.saturationCurrent_I_S_A = std::pow(q.saturationCurrent_I_S_A, tc("TIS1", "TIS2"));
+                    k.iss = std::pow(k.iss, tc("TISS1", "TISS2"));
+                    k.ise = std::pow(k.ise, tc("TISE1", "TISE2")); k.isc = std::pow(k.isc, tc("TISC1", "TISC2"));
+                } else {
+                    const double fac = std::exp(factlog);
+                    q.saturationCurrent_I_S_A *= fac; k.iss *= fac;
+                    k.ise *= std::exp(factlog / ne0) / bfac; k.isc *= std::exp(factlog / nc0) / bfac;
+                }
+                const bool tbf = c->params.count("TBF1") || c->params.count("TBF2"), tbr = c->params.count("TBR1") || c->params.count("TBR2");
+                q.betaF *= tbf ? tc("TBF1", "TBF2") : bfac;
+                q.betaR *= tbr ? tc("TBR1", "TBR2") : bfac;
+                if (tlevc == 1.0) {
+                    k.cje *= 1.0 + c->get("CTE", 0.0) * dt; k.vje -= c->get("TVJE", 0.0) * dt;
+                    k.cjc *= 1.0 + c->get("CTC", 0.0) * dt; k.vjc -= c->get("TVJC", 0.0) * dt;
+                    k.cjs *= 1.0 + c->get("CTS", 0.0) * dt; k.vjs -= c->get("TVJS", 0.0) * dt;
+                } else {
+                    k.cje *= junctionAt(k.vje, k.mje, Tn, T);
+                    k.cjc *= junctionAt(k.vjc, k.mjc, Tn, T);
+                    k.cjs *= junctionAt(k.vjs, k.mjs, Tn, T);
+                }
             }
             if (!(k.mje < 1.0 && k.mjc < 1.0 && k.mjs < 1.0 && k.vje > 0.0 && k.vjc > 0.0 && k.vjs > 0.0 &&
                   k.fc < 1.0 && k.xcjc >= 0.0 && k.xcjc <= 1.0 && k.nf > 0.0 && k.nr > 0.0 &&
