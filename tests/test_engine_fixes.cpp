@@ -372,6 +372,27 @@ int main() {
                       near(ra.waveformPoints[0].nodeVoltages[1], 0.7597469, 1e-6),
                   "XSPICE aswitch in AC is its resistance (" + (ok2 ? std::to_string(ra.waveformPoints[0].nodeVoltages[1]) : ra.errorDetail) + " V)");
         }
+        // XSPICE pswitch in AC is its resistance too (ngspice 47 stamps -1/r, as aswitch, and leaves out the control
+        // port's own): log, mid-way between cntl_off and cntl_on, r = sqrt(r_on r_off), the aswitch case's divider
+        {
+            req.source.payload = "* pswitch ac\nVS s 0 DC 1 AC 1\nR1 s x 1k\nVC c 0 DC 0.5\na1 %g c %gd(x 0) sw\n"
+                                 ".model sw pswitch(cntl_off=0 cntl_on=1 r_off=100k r_on=100)\n.ac lin 1 1k 1k\n";
+            const auto ra = engine->createSession()->runAC(req, cb);
+            const bool ok2 = ra.converged && ra.waveformPoints.size() == 1;
+            check(ok2 && near(ra.waveformPoints[0].nodeVoltages[1], 0.7597469, 1e-6),
+                  "XSPICE pswitch in AC is its resistance (" + (ok2 ? std::to_string(ra.waveformPoints[0].nodeVoltages[1]) : ra.errorDetail) + " V)");
+        }
+        // XSPICE inductoric in AC is an inductor's admittance 1/(jwl) (ngspice 47 gives jwl: a shunt one read as the
+        // series divider, 0.8467 V here): the same as an L element, re jwl/(1+jwl) = 0.283043 at 100 kHz over 1 ohm
+        {
+            req.source.payload = "* inductoric ac\nVS s 0 DC 0 AC 1\nR1 s x 1\na1 x 0 ind1\n.model ind1 inductoric(l=1u)\n"
+                                 "R2 s y 1\nL2 y 0 1u\n.ac lin 1 100k 100k\n";
+            const auto ra = engine->createSession()->runAC(req, cb);
+            const bool ok2 = ra.converged && ra.waveformPoints.size() == 1;
+            check(ok2 && near(ra.waveformPoints[0].nodeVoltages[1], ra.waveformPoints[0].nodeVoltages[2], 1e-9) &&
+                      near(ra.waveformPoints[0].nodeVoltages[1], 0.283043, 1e-5),
+                  "XSPICE inductoric in AC is an inductor (" + (ok2 ? std::to_string(ra.waveformPoints[0].nodeVoltages[1]) : ra.errorDetail) + " V)");
+        }
         req.source.payload = mos6(1.3, ".noise v(3) VG lin 1 10 10\n");
         r = engine->createSession()->runNoise(req, cb);
         check(!r.converged && r.errorDetail.find("no noise model") != std::string::npos, "MOS LEVEL 6 .noise is an error");
@@ -476,7 +497,7 @@ int main() {
             {"V1 1 0 DC 1\nR1 1 2 1k\nQ1 2 2 0 NM\n.model NM NMOS\n", "is NMOS, not a NPN/PNP model"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 NM W=10u\n.model NM NMOS\n", "expected 4 nodes"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 y inv\n.model inv d_inverter\n", "supported in .tran only"},
-            {"V1 1 0 DC 1\nR1 1 0 1k\na1 1 0 1 2 os\n.model os oneshot\n", "ONESHOT is not supported yet"},
+            {"V1 1 0 DC 1\nR1 1 0 1k\na1 1 2 sg\n.model sg seegen\n", "SEEGEN is not supported yet"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 [q] src\n.model src d_source(input_file=\"no_such_dsource.txt\")\n", "cannot open d_source input_file"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 [i] c NULL [q] sm\n.model sm d_state(state_file=\"no_such_state.txt\")\n", "cannot open d_state state_file"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 d2 d3 tri\n.model tri d_tristate(inertial_delay=true)\n", "inertial_delay on a d_tristate is not supported yet"},

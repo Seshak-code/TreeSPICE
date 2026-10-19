@@ -1,0 +1,16 @@
+* XSPICE potentiometer: a linear one as a divider, a log one (position 0.7, log_multiplier 2) in a bridge, and one at
+* position 1 (ngspice keeps it just inside), in a DC sweep
+v1 a 0 DC 1
+r1 a t 1k
+a1 t w 0 pot1
+.model pot1 potentiometer(r=10k position=0.3)
+rw w 0 20k
+a2 t w2 b pot2
+.model pot2 potentiometer(r=5k position=0.7 log=true log_multiplier=2)
+rb b 0 2k
+rw2 w2 0 50k
+a3 a w3 0 pot3
+.model pot3 potentiometer(r=1k position=1)
+rw3 w3 0 1meg
+.dc v1 -2 2 0.1
+.end

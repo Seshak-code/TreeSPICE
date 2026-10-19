@@ -1,0 +1,11 @@
+* XSPICE memristor driven by a sine: its resistance integrates f1(v) between rmin and rmax (the pinched hysteresis),
+* with a threshold (vt, alpha) on the second one
+v1 a 0 sin(0 1.5 1meg)
+a1 a 0 mem1
+.model mem1 memristor(rmin=100 rmax=10k rinit=5k beta=2e9)
+r2 a b 100
+a2 b 0 mem2
+.model mem2 memristor(rmin=200 rmax=5k rinit=1k alpha=1e8 beta=4e9 vt=0.8)
+.tran 2n 3u
+.print tran i(v1) v(b)
+.end

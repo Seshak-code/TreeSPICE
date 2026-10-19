@@ -2260,12 +2260,14 @@ void SPICEParser::parseModelCard(const std::vector<std::string>& tok) {
     }
 
     // Parse optional parameters (key=value pairs flattened by tokenizer)
-    static const std::set<std::string> stringTypes = {"D_LUT", "D_SOURCE", "D_STATE"};  // the code models with string parameters
+    // the code models' string parameters (quotes optional, as ngspice)
+    static const std::map<std::string, std::string> stringKeys = {
+        {"D_LUT", "TABLE_VALUES"}, {"D_SOURCE", "INPUT_FILE"}, {"D_STATE", "STATE_FILE"}, {"MULTI_INPUT_PWL", "MODEL"}};
     for (size_t i = 3; i + 1 < t.size(); i += 2) {
         std::string key = toUpper(t[i]);
         const std::string& raw = t[i + 1];
-        if (stringTypes.count(card.type) && raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
-            card.strings[key] = raw.substr(1, raw.size() - 2);
+        if (const auto sk = stringKeys.find(card.type); sk != stringKeys.end() && sk->second == key) {
+            card.strings[key] = raw.size() >= 2 && raw.front() == '"' && raw.back() == '"' ? raw.substr(1, raw.size() - 2) : raw;
             continue;
         }
         const std::string word = toUpper(t[i + 1]);  // XSPICE booleans (inertial_delay=false)
@@ -2733,7 +2735,7 @@ void SPICEParser::resolveXspice(int& at) {
         const auto mc = modelCards_.find(toUpper(a.model));
         if (mc == modelCards_.end()) throw std::runtime_error(a.name + ": no .model card " + a.model);
         const ModelCard* c = &mc->second;
-        static const std::set<std::string> analogKinds = {"GAIN", "SUMMER", "MULT", "DIVIDE", "LIMIT", "CLIMIT", "PWL", "ASWITCH", "INT", "D_DT", "S_XFER", "SLEW", "HYST", "SINE", "TRIANGLE", "SQUARE", "ZENER"};
+        static const std::set<std::string> analogKinds = {"GAIN", "SUMMER", "MULT", "DIVIDE", "LIMIT", "CLIMIT", "PWL", "ASWITCH", "INT", "D_DT", "S_XFER", "SLEW", "HYST", "SINE", "TRIANGLE", "SQUARE", "ZENER", "MULTI_INPUT_PWL", "OTA", "ILIMIT", "ONESHOT", "POTENTIOMETER", "CAPACITORIC", "INDUCTORIC", "SIDIODE", "PSWITCH", "MEMRISTOR"};
         if (analogKinds.count(c->type)) { resolveXspiceAnalog(a, *c, analogNode); continue; }
         const auto k = kinds.find(c->type);
         if (k == kinds.end()) throw std::runtime_error(a.name + ": XSPICE model type " + c->type + " is not supported yet");
@@ -2923,9 +2925,6 @@ void SPICEParser::resolveXspice(int& at) {
         }
         for (const auto& [key, v] : c->params)
             if (!allowed.count(key)) throw std::runtime_error("model " + c->name + ": parameter " + key + " is not a " + c->type + " parameter");
-        for (const auto& [key, v] : c->strings)
-            if (!(key == "TABLE_VALUES" && x.kind == Kind::LUT) && !(key == "INPUT_FILE" && x.kind == Kind::SOURCE) &&
-                !(key == "STATE_FILE" && x.kind == Kind::STATE)) throw std::runtime_error("model " + c->name + ": parameter " + key + " is not a " + c->type + " string parameter");
         x.inertial = c->get("INERTIAL_DELAY", 0.0) != 0.0;
         if (x.inertial && x.kind == Kind::TRI)  // d_tristate's runs its state and strength as two inertial channels
             throw std::runtime_error("model " + c->name + ": inertial_delay on a d_tristate is not supported yet");
@@ -2966,7 +2965,9 @@ void SPICEParser::resolveXspice(int& at) {
 void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
                                       const std::function<int(const std::string&, const std::string&)>& analogNode) {
     using xspice::AKind;
-    struct Spec { char dir; const char* def; bool vec; };  // dir: i(nput), o(utput), b(oth: a conductance port)
+    // dir: i(nput), o(utput), b(oth: a conductance port, g or gd), h (an hd port: a voltage output reading its own
+    // current); allow: a b port's types if more than def; nullOk: NULL allowed
+    struct Spec { char dir; const char* def; bool vec; const char* allow = nullptr; bool nullOk = false; };
     static const std::map<std::string, std::pair<AKind, std::vector<Spec>>> table = {
         {"GAIN", {AKind::GAIN, {{'i', "v", false}, {'o', "v", false}}}},
         {"SUMMER", {AKind::SUMMER, {{'i', "v", true}, {'o', "v", false}}}},
@@ -2984,7 +2985,17 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         {"SINE", {AKind::SINE, {{'i', "v", false}, {'o', "v", false}}}},
         {"TRIANGLE", {AKind::TRIANGLE, {{'i', "v", false}, {'o', "v", false}}}},
         {"SQUARE", {AKind::SQUARE, {{'i', "v", false}, {'o', "v", false}}}},
-        {"ZENER", {AKind::ZENER, {{'b', "gd", false}}}}};
+        {"ZENER", {AKind::ZENER, {{'b', "gd", false}}}},
+        {"MULTI_INPUT_PWL", {AKind::MIPWL, {{'i', "vd", true}, {'o', "vd", false}}}},
+        {"OTA", {AKind::OTA, {{'b', "gd", false}, {'b', "g", false}}}},
+        {"MEMRISTOR", {AKind::MEMRISTOR, {{'b', "gd", false}}}},
+        {"PSWITCH", {AKind::PSWITCH, {{'b', "gd", false, "g gd"}, {'b', "gd", false}}}},
+        {"SIDIODE", {AKind::SIDIODE, {{'b', "gd", false}}}},
+        {"CAPACITORIC", {AKind::CAPIC, {{'h', "hd", false}}}},
+        {"INDUCTORIC", {AKind::INDIC, {{'b', "gd", false}}}},
+        {"POTENTIOMETER", {AKind::POT, {{'b', "g", false}, {'b', "g", false}, {'b', "g", false}}}},
+        {"ONESHOT", {AKind::ONESHOT, {{'i', "v", false}, {'i', "v", false, nullptr, true}, {'i', "v", false, nullptr, true}, {'o', "v", false}}}},
+        {"ILIMIT", {AKind::ILIMIT, {{'i', "v", false}, {'b', "g", false, "g gd", true}, {'b', "g", false, "g gd", true}, {'b', "g", false, "g gd"}}}}};
     const auto& [kind, specs] = table.at(c.type);
     struct Port { std::string type; int n1 = 0, n2 = 0; std::string vname; };
     std::vector<std::vector<Port>> ports;  // per spec, its elements
@@ -2999,9 +3010,11 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
             ++p;
         }
         static const std::set<std::string> in = {"v", "vd", "i", "id", "vnam"}, out = {"v", "vd", "i", "id"};
-        if (!(sp.dir == 'b' ? pt.type == "gd" : (sp.dir == 'i' ? in : out).count(pt.type)))
+        if (sp.nullOk && p < w.size() && toUpper(w[p]) == "NULL") { ++p; pt.type = "null"; return pt; }
+        if (!(sp.dir == 'h' ? pt.type == "hd" : sp.dir == 'b' ? (sp.allow ? (" " + std::string(sp.allow) + " ").find(" " + pt.type + " ") != std::string::npos : pt.type == sp.def)
+                            : (sp.dir == 'i' ? in : out).count(pt.type)))
             throw std::runtime_error(a.name + ": port type %" + pt.type + " is not allowed (or not supported yet) on this " + c.type + " port");
-        const bool diff = pt.type == "vd" || pt.type == "id" || pt.type == "gd";
+        const bool diff = pt.type == "vd" || pt.type == "id" || pt.type == "gd" || pt.type == "hd";
         auto node = [&]() {
             if (p >= w.size() || w[p] == "[" || w[p] == "]" || w[p][0] == '%') throw std::runtime_error(a.name + ": missing a node for " + c.type);
             const std::string n = w[p++];
@@ -3160,6 +3173,100 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         m->domain = num("INPUT_DOMAIN", 0.01); m->fraction = flag("FRACTION", true);
         if (!(m->inHigh > m->inLow)) throw std::runtime_error("model " + c.name + ": hyst needs in_high > in_low");
         break;
+    case AKind::MIPWL: {
+        allowed.insert("X"); allowed.insert("Y");
+        const auto xi = c.vectors.find("X"), yi = c.vectors.find("Y");
+        if (xi == c.vectors.end() || yi == c.vectors.end() || xi->second.size() != yi->second.size() || xi->second.size() < 2)
+            throw std::runtime_error("model " + c.name + ": multi_input_pwl needs x and y of the same size, 2 at least");
+        m->x = xi->second; m->y = yi->second;
+        for (size_t i = 1; i < m->x.size(); ++i)
+            if (!(m->x[i] > m->x[i - 1])) throw std::runtime_error("model " + c.name + ": multi_input_pwl x must increase");
+        const std::string g = c.strings.count("MODEL") ? c.strings.at("MODEL") : "and";
+        static const std::vector<std::string> gates = {"and", "nand", "or", "nor"};
+        const auto gi = std::find(gates.begin(), gates.end(), g);
+        if (gi == gates.end()) throw std::runtime_error("model " + c.name + ": multi_input_pwl model " + g + " is not and, nand, or, nor");
+        m->gate = static_cast<int>(gi - gates.begin());
+        break;
+    }
+    case AKind::MEMRISTOR:
+        m->rMin = num("RMIN", 10.0); m->rMax = num("RMAX", 1e4); m->outIc = num("RINIT", 7000.0);
+        m->mAlpha = num("ALPHA", 0.0); m->mBeta = num("BETA", 1.0); m->mVt = num("VT", 0.0);
+        if (!(m->rMin > 0.0 && m->rMax > m->rMin && m->outIc > 0.0)) throw std::runtime_error("model " + c.name + ": memristor needs 0 < rmin < rmax and rinit > 0");
+        break;
+    case AKind::PSWITCH:
+        m->cntlOff = num("CNTL_OFF", 0.0); m->cntlOn = num("CNTL_ON", 1.0); m->logR = flag("LOG", true);
+        m->rOff = num("R_OFF", 1e12); m->rOn = num("R_ON", 1.0); m->rCntl = num("R_CNTL_IN", 1e12);
+        if (!(m->rOn > 0.0 && m->rOff > 0.0 && m->rCntl > 0.0)) throw std::runtime_error("model " + c.name + ": pswitch needs r_on, r_off, r_cntl_in > 0");
+        break;
+    case AKind::SIDIODE:
+        m->sRon = num("RON", 1.0); m->sRoff = num("ROFF", 1.0); m->sRrev = num("RREV", 0.0);
+        m->vFwd = num("VFWD", 0.0); m->vRev = num("VREV", 1e30); m->iLim = num("ILIMIT", 1e30); m->revILim = num("REVILIMIT", 1e30);
+        m->eps = num("EPSILON", 0.0); m->revEps = num("REVEPSILON", 0.0);
+        if (!(m->sRon > 0.0 && m->sRoff > 0.0 && m->sRrev >= 0.0 && m->iLim > 0.0 && m->revILim > 0.0 && m->eps >= 0.0 && m->revEps >= 0.0))
+            throw std::runtime_error("model " + c.name + ": sidiode needs ron, roff, ilimit, revilimit > 0 and rrev, epsilon, revepsilon >= 0");
+        break;
+    case AKind::CAPIC: case AKind::INDIC: {
+        const char* k = kind == AKind::CAPIC ? "C" : "L";
+        allowed.insert(k);
+        if (!c.params.count(k)) throw std::runtime_error("model " + c.name + ": " + c.type + " needs " + (kind == AKind::CAPIC ? "c" : "l"));
+        m->gain = c.params.at(k);
+        if (!(m->gain > 0.0)) throw std::runtime_error("model " + c.name + ": " + c.type + " needs " + (kind == AKind::CAPIC ? "c" : "l") + " > 0");
+        m->outIc = num("IC", 0.0);
+        break;
+    }
+    case AKind::POT: {
+        // ngspice: position kept inside (0, 1) (its [0, 1] limit is not checked); log: r0-wiper is r / 10^(position log_multiplier)
+        double pos = num("POSITION", 0.5);
+        pos = pos <= 0.0 ? 1e-9 : pos >= 1.0 ? 0.999999999 : pos;
+        const double r = num("R", 1e5), mult = num("LOG_MULTIPLIER", 1.0);
+        m->rOn = flag("LOG", false) ? r / std::pow(10.0, pos * mult) : pos * r;
+        m->rOff = r - m->rOn;
+        if (!(m->rOn > 0.0 && m->rOff > 0.0)) throw std::runtime_error("model " + c.name + ": potentiometer needs r > 0 and both sections > 0");
+        break;
+    }
+    case AKind::ONESHOT: {
+        auto arr = [&](const char* k, std::vector<double> def) {
+            allowed.insert(k);
+            const auto it = c.vectors.find(k);
+            return it != c.vectors.end() ? it->second : def;
+        };
+        m->x = arr("CNTL_ARRAY", {0.0, 1.0}); m->y = arr("PW_ARRAY", {1e-6, 0.9999999});
+        if (m->x.size() != m->y.size() || m->x.size() < 2)
+            throw std::runtime_error("model " + c.name + ": cntl_array and pw_array need the same size, 2 at least");
+        for (size_t i = 0; i < m->y.size(); ++i) {
+            if (i && !(m->x[i] > m->x[i - 1])) throw std::runtime_error("model " + c.name + ": cntl_array must increase");
+            if (!(m->y[i] >= 0.0)) throw std::runtime_error("model " + c.name + ": pw_array values must be >= 0");
+        }
+        m->trig = num("CLK_TRIG", 0.5); m->posEdge = flag("POS_EDGE_TRIG", true);
+        m->outLow = num("OUT_LOW", 0.0); m->outHigh = num("OUT_HIGH", 1.0);
+        m->tRise = num("RISE_TIME", 1e-9); m->tFall = num("FALL_TIME", 1e-9);
+        m->rDelay = num("RISE_DELAY", 1e-9); m->fDelay = num("FALL_DELAY", 1e-9); m->retrig = flag("RETRIG", false);
+        m->cntlNull = ports[1][0].type == "null"; m->clearNull = ports[2][0].type == "null";
+        m->intIc = {-1.0, -1.0, -1.0, -1.0, 0.0, 0.0, 0.0, m->outLow, 0.0};
+        break;
+    }
+    case AKind::ILIMIT: {
+        m->inOffset = num("IN_OFFSET", 0.0); m->gain = num("GAIN", 1.0);
+        m->rSource = num("R_OUT_SOURCE", 1.0); m->rSink = num("R_OUT_SINK", 1.0);
+        m->iSource = num("I_LIMIT_SOURCE", 10e-3); m->iSink = num("I_LIMIT_SINK", 10e-3);
+        m->range = num("V_PWR_RANGE", 1e-6); m->iSourceRange = num("I_SOURCE_RANGE", 1e-9);
+        m->iSinkRange = num("I_SINK_RANGE", 1e-9); m->rDomain = num("R_OUT_DOMAIN", 1e-9);
+        if (!(m->rSource >= 1e-9 && m->rSource <= 1e9 && m->rSink >= 1e-9 && m->rSink <= 1e9))
+            throw std::runtime_error("model " + c.name + ": ilimit r_out_source and r_out_sink must be in [1e-9, 1e9]");
+        if (!(m->iSource >= 1e-12 && m->iSink >= 1e-12 && m->range >= 1e-15 && m->iSourceRange >= 1e-15 && m->iSinkRange >= 1e-15 && m->rDomain >= 1e-15))
+            throw std::runtime_error("model " + c.name + ": ilimit limits must be >= 1e-12 and ranges >= 1e-15");
+        m->posNull = ports[1][0].type == "null"; m->negNull = ports[2][0].type == "null";
+        break;
+    }
+    case AKind::OTA: {
+        m->gain = num("GM", 1e-3); m->rOff = num("ROUT", 1e12); m->rOn = num("RIN", 1e12);
+        double noise = 0.0;
+        for (const char* k : {"EN", "IN_NOISE", "ENK", "INK", "INCM", "INCMK"}) noise += std::abs(num(k, 0.0));
+        flag("NOISE_PROGRAMMATIC", true);
+        if (noise != 0.0) throw std::runtime_error("model " + c.name + ": the ota code model's noise is not supported yet");
+        if (!(m->gain >= 1e-15 && m->rOff > 0.0 && m->rOn > 0.0)) throw std::runtime_error("model " + c.name + ": ota needs gm >= 1e-15, rout > 0, rin > 0");
+        break;
+    }
     case AKind::ASWITCH:
         m->cntlOff = num("CNTL_OFF", 0.0); m->cntlOn = num("CNTL_ON", 1.0);
         m->rOff = num("R_OFF", 1e12); m->rOn = num("R_ON", 1.0);
@@ -3181,7 +3288,7 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         if (specs[s].dir != 'i') continue;
         for (const auto& pt : ports[s]) {
             Behavioural::Ref r;
-            if (pt.type == "v" || pt.type == "vd") { r.kind = 0; r.a = pt.n1; r.b = pt.n2; }
+            if (pt.type == "v" || pt.type == "vd" || pt.type == "null") { r.kind = 0; r.a = pt.n1; r.b = pt.n2; }  // NULL: 0 - 0
             else {
                 r.kind = 1;
                 if (pt.type == "vnam") {
@@ -3200,19 +3307,36 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
             refs.push_back(r);
         }
     }
-    // outputs: a voltage (v, vd) or current (i, id; gd: the switch's own port current, its voltage the last input)
+    // conductance ports (g, gd): their voltages follow the inputs, in port order, for every output
+    for (size_t s = 0; s < specs.size(); ++s)
+        if (specs[s].dir == 'b') for (const auto& pt : ports[s]) refs.push_back({0, pt.n1, pt.n2, ""});  // NULL: 0 - 0
+    // outputs: a voltage (v, vd) or current (i, id; g, gd: the port's own current), each its own model copy
+    // knowing which output it is (AnalogModel::out)
+    int outIndex = 0;
     for (size_t s = 0; s < specs.size(); ++s) {
         if (specs[s].dir == 'i') continue;
         for (const auto& pt : ports[s]) {
+            if (pt.type == "null") { ++outIndex; continue; }
             Behavioural b;
             b.name = toUpper(a.name);
             b.outPos = pt.n1; b.outNeg = pt.n2;
-            b.voltage = pt.type == "v" || pt.type == "vd";
+            b.voltage = pt.type == "v" || pt.type == "vd" || pt.type == "hd";
             b.refs = refs;
-            if (pt.type == "gd") b.refs.push_back({0, pt.n1, pt.n2, ""});
+            if (pt.type == "hd") {  // its own branch current, counted among the block's voltage behavioural sources
+                int bv = 0;
+                for (const auto& o : blk.behavioural) bv += o.voltage;
+                b.refs.push_back({3, bv, 0, ""});
+            }
             b.cm = m;
+            if (outIndex > 0) {
+                auto copy = std::make_shared<xspice::AnalogModel>(*m);
+                copy->out = outIndex;
+                b.cm = copy;
+            }
+            ++outIndex;
             if (xspice::stateful(kind)) {
                 b.cmState = std::make_shared<xspice::AnalogState>();
+                b.cmState->out = m->outIc;
                 b.cmState->v = m->intIc;  // s_xfer: the operating point reads its initial states
             }
             blk.behavioural.push_back(b);

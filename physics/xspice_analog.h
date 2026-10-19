@@ -3,6 +3,7 @@
 // icm/xtradev). Each output is a behavioural source (Behavioural::cm) over the instance's inputs; its
 // Jacobian comes from Dual, the exact derivative of the value ngspice computes (ngspice's own partials
 // only steer its Newton iteration).
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <string>
@@ -11,19 +12,23 @@
 
 namespace xspice {
 
-enum class AKind { GAIN, SUMMER, MULT, DIVIDE, LIMIT, CLIMIT, PWL, ASWITCH, INT, D_DT, S_XFER, SLEW, HYST, SINE, TRIANGLE, SQUARE, ZENER };
+enum class AKind { GAIN, SUMMER, MULT, DIVIDE, LIMIT, CLIMIT, PWL, ASWITCH, INT, D_DT, S_XFER, SLEW, HYST, SINE, TRIANGLE, SQUARE, ZENER, MIPWL, OTA, ILIMIT, ONESHOT, POT, CAPIC, INDIC, SIDIODE, PSWITCH, MEMRISTOR };
 
 // A code model's state at the last accepted time point (int: its limited output; d_dt: its input; s_xfer:
 // its integrator chain, lowest first; slew: input and output; hyst: its leg, -1 before the first evaluation)
 struct AnalogState { double out = 0.0, in = 0.0; std::vector<double> v; int leg = -1; };
 inline bool oscillator(AKind k) { return k == AKind::SINE || k == AKind::TRIANGLE || k == AKind::SQUARE; }
 inline bool stateful(AKind k) {
-    return k == AKind::INT || k == AKind::D_DT || k == AKind::S_XFER || k == AKind::SLEW || k == AKind::HYST || oscillator(k);
+    return k == AKind::INT || k == AKind::D_DT || k == AKind::S_XFER || k == AKind::SLEW || k == AKind::HYST || k == AKind::ONESHOT ||
+           k == AKind::CAPIC || k == AKind::INDIC || k == AKind::MEMRISTOR || oscillator(k);
 }
-inline bool acFunction(AKind k) { return k == AKind::INT || k == AKind::D_DT || k == AKind::S_XFER; }  // AC gain not the DC slope
+inline bool acFunction(AKind k) {  // AC gain not the DC slope
+    return k == AKind::INT || k == AKind::D_DT || k == AKind::S_XFER || k == AKind::CAPIC || k == AKind::INDIC;
+}
 
 struct AnalogModel {
     AKind kind = AKind::GAIN;
+    int out = 0;  // which of the instance's outputs this source is (ota: 0 the input port, 1 the output port)
     // gain, limit, climit: in_offset, gain, out_offset; summer / mult: per input in_offset, in_gain
     double inOffset = 0.0, gain = 1.0, outOffset = 0.0, outGain = 1.0;
     std::vector<double> inOffsets, inGains;
@@ -35,7 +40,8 @@ struct AnalogModel {
     // pwl: the breakpoints with ngspice's extra pair at either end, smoothing domain
     std::vector<double> x, y;
     double domain = 0.01;
-    // aswitch
+    // aswitch, pswitch (+ its control port's resistance rCntl) (ota: gain = gm, rOff = rout, rOn = rin)
+    double rCntl = 1e12;
     double cntlOff = 0.0, cntlOn = 1.0, rOff = 1e12, rOn = 1.0;
     bool logR = true, limitR = false;
     // int: its output at t = 0
@@ -45,6 +51,20 @@ struct AnalogModel {
     // sine / triangle / square: frequency against control (pwl), output levels, duty cycle, square's edges
     std::vector<double> cntl{0.0, 1.0}, freq{1e3, 2e3};
     double outLow = -1.0, outHigh = 1.0, duty = 0.5, tRise = 1e-9, tFall = 1e-9;
+    // ilimit: r_out_source / sink, i_limit_source / sink, their smoothing ranges, r_out_domain (v_pwr_range: range);
+    // a NULL supply port
+    double rSource = 1.0, rSink = 1.0, iSource = 10e-3, iSink = 10e-3, iSourceRange = 1e-9, iSinkRange = 1e-9, rDomain = 1e-9;
+    bool posNull = false, negNull = false;
+    // oneshot (x, y: cntl_array, pw_array; outLow / outHigh, tRise / tFall): clk_trig, its edge, the delays, retrig
+    double trig = 0.5, rDelay = 1e-9, fDelay = 1e-9;
+    bool posEdge = true, retrig = false, clearNull = false, cntlNull = false;
+    // memristor: rmin, rmax, alpha, beta, vt (rinit: outIc)
+    double rMin = 10.0, rMax = 1e4, mAlpha = 0.0, mBeta = 1.0, mVt = 0.0;
+    // potentiometer: its r0-wiper and wiper-r1 resistances (rOn, rOff)
+    // sidiode: ron, roff, rrev, vfwd, vrev, ilimit, revilimit, epsilon, revepsilon
+    double sRon = 1.0, sRoff = 1.0, sRrev = 0.0, vFwd = 0.0, vRev = 1e30, iLim = 1e30, revILim = 1e30, eps = 0.0, revEps = 0.0;
+    // multi_input_pwl: x, y; its gate (and, nand, or, nor)
+    int gate = 0;
     // zener
     double vBreak = 0.0, iBreak = 2e-2, rBreak = 1.0, iRev = 1e-6, iSat = 1e-12, nFwd = 1.0;
     // s_xfer: numerator and denominator in ascending powers of s (frequency-scaled, the top denominator
@@ -66,6 +86,125 @@ std::vector<T> sxferChain(const AnalogModel &m, const T &in, const AnalogState &
     if (h > 0.0)
         for (size_t i = n - 1; i > 0; --i) s[i - 1] = st.v[i - 1] + h * s[i];
     return s;
+}
+
+// ngspice cm_oneshot at an evaluation (t, the step h reaching it; h = 0: the operating point, which resets it and
+// makes the first transient step's previous clock 0). State: t1 .. t4 (delay, rise, width, fall ends), set, state,
+// locked, the output and the clock at the last accepted point. ngspice compares the old output to out_low / out_high
+// with a signed "< 1e-20", kept as is: the retrigger branch sees any output at or below out_high.
+struct OneshotStep { double out; std::vector<double> st; };
+inline OneshotStep oneshotStep(const AnalogModel &m, double clk, double cntl, double clear, const AnalogState &s, double t, double h) {
+    const double low = m.outLow, hi = m.outHigh;
+    if (h <= 0.0 || s.v.size() != 9) return {low, {-1.0, -1.0, -1.0, -1.0, 0.0, 0.0, 0.0, low, 0.0}};
+    double t1 = s.v[0], t2 = s.v[1], t3 = s.v[2], t4 = s.v[3], clock = s.v[8], out;
+    bool set = s.v[4] != 0.0, state = s.v[5] != 0.0, locked = s.v[6] != 0.0;
+    const double outOld = s.v[7], tr = std::max(m.tRise, 1e-12), tf = std::max(m.tFall, 1e-12);
+    if (!m.clearNull && clear > m.trig) {
+        t1 = t2 = t3 = t4 = -1.0;
+        set = locked = state = false;
+        out = low;
+    } else {
+        const double c = m.cntlNull ? 0.0 : cntl;
+        const auto &x = m.x, &y = m.y;
+        const size_t n = x.size();
+        double pw = 0.0;
+        if (c <= x[0]) pw = std::max(0.0, y[0] + (c - x[0]) * (y[1] - y[0]) / (x[1] - x[0]));
+        else if (c >= x[n - 1]) pw = y[n - 1] + (c - x[n - 1]) * (y[n - 1] - y[n - 2]) / (x[n - 1] - x[n - 2]);
+        else for (size_t i = 0; i + 1 < n; ++i) if (c < x[i + 1] && c >= x[i]) pw = (c - x[i]) / (x[i + 1] - x[i]) * (y[i + 1] - y[i]) + y[i];
+        const bool up = clk > clock && clk > m.trig, down = clk < clock && clk < m.trig;
+        if (!set) { if (m.posEdge ? up : down) state = set = true; }
+        else if (m.posEdge ? down : up) set = false;
+        if (state && outOld - low < 1e-20 && !locked) {
+            t1 = t + m.rDelay; t2 = t1 + tr; t3 = t2 + pw + m.fDelay; t4 = t3 + tf;
+            if (!m.retrig) locked = true;
+            state = false;
+        } else if (state && outOld - hi < 1e-20 && !locked) {  // retriggered: the pulse ends pw after this edge
+            t3 = t + pw + m.rDelay + m.fDelay + tr; t4 = t3 + tf;
+            state = false;
+        }
+        if (state && locked) state = false;
+        if (t < t1) out = low;
+        else if (t < t2) out = low + (t - t1) / (t2 - t1) * (hi - low);
+        else if (t < t3) out = hi;
+        else if (t < t4) out = hi + (t - t3) / (t4 - t3) * (low - hi);
+        else { out = low; if (!m.retrig) locked = false; }
+        clock = clk;
+    }
+    return {out, {t1, t2, t3, t4, double(set), double(state), double(locked), out, clock}};
+}
+
+// ngspice cm_memristor's resistance after a step h from r (its state, the last accepted point): it integrates
+// f1(v) = beta v + (alpha - beta)(|v + vt| - |v - vt|) / 2 by backward Euler while inside [rmin, rmax] (ngspice
+// tests the bound on its last iterate; here on the accepted r); at the operating point it holds
+template <typename T>
+inline T memristorR(const AnalogModel &m, const T &v, double r, double h) {
+    if (!(h > 0.0)) return T(r);
+    using std::abs;
+    const T g = m.mBeta * v + 0.5 * (m.mAlpha - m.mBeta) * (abs(v + m.mVt) - abs(v - m.mVt));
+    const bool on = (g > 0.0 && r < m.rMax) || (g < 0.0 && r > m.rMin);
+    return on ? r + h * g : T(r);
+}
+
+// A value carrying a given slope against x (a model whose own partial ngspice uses as its AC gain)
+template <typename T>
+inline T withSlope(const T &x, double value, double slope) {
+    if constexpr (std::is_same_v<T, double>) return value;
+    else { T r(value); r.grad = slope * x.grad; return r; }
+}
+
+// ngspice cm_sidiode: off / on / reverse conductances, optional quadratic overlaps (epsilon) and tanh current limits;
+// returns {current, ngspice's partial} (in the tanh regions the partial is ngspice's g (1 - tanh^2), not exact)
+inline std::pair<double, double> sidiode(const AnalogModel &m, double v) {
+    const double Vrev = -m.vRev, Vfwd = m.vFwd, Ilim = m.iLim, Revilim = -m.revILim;
+    const double goff = 1.0 / m.sRoff, gon = 1.0 / m.sRon, grev = m.sRrev == 0.0 ? gon : 1.0 / m.sRrev;
+    const double Va = Vrev - m.revEps, Vb = Vrev, Vc = Vfwd, Vd = Vfwd + m.eps;
+    const bool revepsi = m.revEps > 0.0, epsi = m.eps > 0.0, ili = Ilim < 1e29, revili = Revilim > -1e29;
+    const double a1 = revepsi ? (goff - grev) / m.revEps : 0.0, a2 = grev / Revilim, b1 = epsi ? (gon - goff) / m.eps : 0.0, b2 = gon / Ilim;
+    if (v < Va) {
+        if (revili) {
+            const double t = std::tanh(a2 * (v - Va)), ia = goff * Va + 0.5 * (Va - Vb) * (Va - Vb) * a1;
+            return {(Revilim - ia) * t + ia, grev * (1.0 - t * t)};
+        }
+        return {Vrev * goff + (v - Vrev) * grev, grev};
+    }
+    if (revepsi && v < Vb) return {0.5 * (v - Vb) * (v - Vb) * a1 + v * goff, (v - Vb) * a1 + goff};
+    if (v >= Vb && v < Vc) return {v * goff, goff};
+    if (epsi && v >= Vc && v < Vd) return {0.5 * (v - Vc) * (v - Vc) * b1 + v * goff, (v - Vc) * b1 + goff};
+    if (ili) {
+        const double t = std::tanh(b2 * (v - Vd)), id = goff * Vd + 0.5 * (Vd - Vc) * (Vd - Vc) * b1;
+        return {(Ilim - id) * t + id, gon * (1.0 - t * t)};
+    }
+    return {Vfwd * goff + (v - Vfwd) * gon, gon};
+}
+
+// cm_smooth_discontinuity: y_lower below x_lower, y_upper above x_upper, two parabolas meeting at the centre
+template <typename T>
+inline T smoothDiscontinuity(const T &x, double xl, double yl, double xu, double yu) {
+    const double xc = (xu + xl) / 2.0, yc = (yu + yl) / 2.0, cs = 2.0 * (yu - yl) / (xu - xl);
+    if (x < xl) return T(yl);
+    if (x < xc) { const double a = cs / (xu - xl), b = cs - 2.0 * a * xc, c = yc - a * xc * xc - b * xc; return a * x * x + b * x + c; }
+    if (x < xu) { const double a = -cs / (xu - xl), b = -2.0 * a * xu, c = yu - a * xu * xu - b * xu; return a * x * x + b * x + c; }
+    return T(yu);
+}
+
+// cm_climit_fcn's value: out limited to [lo, hi], cm_smooth_corner's parabolas over r about each limit
+template <typename T>
+inline T climitFcn(const T &out, const T &lo, const T &hi, const T &r) {
+    if (out < lo + r) {
+        if (out > lo - r) {  // the parabola of cm_smooth_corner at the lower corner, its centre on the limit
+            const T a = (1.0 / 4.0) / r, xu = lo + r, b = 1.0 - 2.0 * a * xu, c = xu - a * xu * xu - b * xu;
+            return a * out * out + b * out + c;
+        }
+        return lo;
+    }
+    if (out > hi - r) {
+        if (out < hi + r) {
+            const T a = (-1.0 / 4.0) / r, xu = hi + r, b = -2.0 * a * xu, c = hi - a * xu * xu - b * xu;
+            return a * out * out + b * out + c;
+        }
+        return hi;
+    }
+    return out;
 }
 
 // cm_smooth_corner: the parabola through the corner (xc, yc) of slopes s0 and s1 over xc - d .. xc + d
@@ -207,6 +346,77 @@ T analogOut(const AnalogModel &m, const std::vector<T> &in, const AnalogState *s
         }
         return i + m.iRev / m.vBreak * v;
     }
+    case AKind::OTA:  // ngspice cm_ota: the input port draws v_in / rin, the output port gm v_in + v_out / rout
+        return m.out == 0 ? in[0] / m.rOn : m.gain * in[0] + in[1] / m.rOff;
+    case AKind::ONESHOT: {  // ngspice's partials are 0 (its AC gain too): the value alone
+        auto value = [](const T &v) { if constexpr (std::is_same_v<T, double>) return v; else return v.val; };
+        return T(oneshotStep(m, value(in[0]), value(in[1]), value(in[2]), st ? *st : AnalogState{}, t, h).out);
+    }
+    case AKind::CAPIC: case AKind::INDIC:
+        // ngspice cm_capacitor (an hd port: its voltage integrates its current / c) / cm_inductor (gd: its current
+        // integrates its voltage / l), by cm_analog_integrate's backward Euler; at the operating point they hold ic
+        // (the inductor a current source, not a short)
+        return h > 0.0 && st ? st->out + h * in[0] / m.gain : T(m.outIc);
+    case AKind::MEMRISTOR: return in[0] / memristorR(m, in[0], st ? st->out : m.outIc, h);
+    case AKind::PSWITCH: {
+        // ngspice cm_pswitch: refs control, out; outputs the control port's current (in / r_cntl_in), the switch's
+        // (v / r). r_on is at least 1e-3, r_off at most 1e12; log: a cubic in the normalised control between
+        // ln(r_off) and ln(r_on) (r_on at least); linear: r interpolates, at least 1e-9. Partials automatic (exact).
+        if (m.out == 0) return in[0] / m.rCntl;
+        const double ron = std::max(m.rOn, 1e-3), roff = std::min(m.rOff, 1e12);
+        double on = m.cntlOn, off = m.cntlOff;
+        if (std::abs(on - off) < 1e-12) { on += 0.001; off -= 0.001; }
+        const T &c = in[0];
+        T r;
+        if (m.logR) {
+            const double L = std::log(ron / roff), lm = std::log(std::sqrt(ron * roff)), d = on > off ? 1.0 : -1.0;
+            const double c1 = 1.5 * L / d, c3 = 2.0 * L / (d * d * d);
+            const bool rising = on > off;
+            if (rising ? c > on : c < on) r = T(ron);
+            else if (rising ? c < off : c > off) r = T(roff);
+            else {
+                const T im = (rising ? (c - off) : (on - c)) / (on - off) - 0.5;
+                using std::exp;
+                r = exp(lm + c1 * im - c3 * im * im * im);
+                if (r < ron) r = T(ron);
+            }
+        } else {
+            const double d = on - off, k = (ron - roff) / d;
+            if (d >= 0 ? c < off : c > off) r = T(roff);
+            else if (d >= 0 ? c > on : c < on) r = T(ron);
+            else r = c * k + (roff * on - ron * off) / d;
+            if (r <= 1e-9) r = T(1e-9);
+        }
+        return in[1] / r;
+    }
+    case AKind::SIDIODE: {
+        auto value = [](const T &v) { if constexpr (std::is_same_v<T, double>) return v; else return v.val; };
+        const auto [i, g] = sidiode(m, value(in[0]));
+        return withSlope(in[0], i, g);
+    }
+    case AKind::POT:  // ngspice cm_potentiometer: refs r0, wiper, r1; outputs r0, wiper, r1 (each port's current in)
+        if (m.out == 0) return (in[0] - in[1]) / m.rOn;
+        if (m.out == 2) return (in[2] - in[1]) / m.rOff;
+        return (in[1] - in[0]) / m.rOn + (in[1] - in[2]) / m.rOff;
+    case AKind::MIPWL: {
+        // ngspice cm_multi_input_pwl: the smallest input (and, nand) or largest (or, nor) through the x-y table,
+        // nand / nor read it backwards with the slope never set (a staircase). No partials: ngspice's Jacobian,
+        // hence its AC gain, is 0, so the value is returned without its derivative.
+        auto value = [](const T &v) { if constexpr (std::is_same_v<T, double>) return v; else return v.val; };
+        double c = value(in[0]);
+        for (const auto &v : in) c = m.gate < 2 ? std::min(c, value(v)) : std::max(c, value(v));
+        const size_t n = m.x.size();
+        const bool rev = m.gate == 1 || m.gate == 3;
+        if (c <= m.x[0]) return T(rev ? m.y[n - 1] : m.y[0]);
+        if (c >= m.x[n - 1]) return T(rev ? m.y[0] : m.y[n - 1]);
+        for (size_t i = 1; i < n; ++i)
+            if (c > m.x[i - 1] && c <= m.x[i]) {
+                if (rev) return T(m.y[n - i - 1]);
+                const double s = (m.y[i] - m.y[i - 1]) / (m.x[i] - m.x[i - 1]);
+                return T(s * c + (m.y[i] - s * m.x[i]));
+            }
+        return T(0.0);
+    }
     case AKind::SINE: case AKind::TRIANGLE: case AKind::SQUARE: {
         auto value = [](const T &v) { if constexpr (std::is_same_v<T, double>) return v; else return v.val; };
         return T(oscStep(m, value(in[0]), st ? *st : AnalogState{}, t, h).out);
@@ -264,23 +474,29 @@ T analogOut(const AnalogModel &m, const std::vector<T> &in, const AnalogState *s
     case AKind::LIMIT: case AKind::CLIMIT: {
         // climit: the limits follow the control inputs (cm_climit_fcn)
         const T lo = m.kind == AKind::CLIMIT ? in[2] + m.lowerDelta : T(m.lo), hi = m.kind == AKind::CLIMIT ? in[1] - m.upperDelta : T(m.hi);
-        const T r = m.fraction ? m.range * (hi - lo) : T(m.range);
-        const T out = m.gain * (m.inOffset + in[0]);
-        if (out < lo + r) {
-            if (out > lo - r) {  // the parabola of cm_smooth_corner at the lower corner, its centre on the limit
-                const T a = (1.0 / 4.0) / r, xu = lo + r, b = 1.0 - 2.0 * a * xu, c = xu - a * xu * xu - b * xu;
-                return a * out * out + b * out + c;
-            }
-            return lo;
+        return climitFcn(m.gain * (m.inOffset + in[0]), lo, hi, m.fraction ? m.range * (hi - lo) : T(m.range));
+    }
+    case AKind::ILIMIT: {
+        // ngspice cm_ilimit: refs in, pos_pwr, neg_pwr, out (a NULL supply reads +-1e6 V and draws nothing). The output
+        // heads for the input limited between the supplies through r_out, its current limited; the supplies source /
+        // sink it, smoothed near 0. As ngspice, the upper corner's smoothing is i_sink_range, and the supply current's
+        // smoothing near 0 ends with a step of its range at twice it.
+        const T pos = m.posNull ? T(1e6) : in[1], neg = m.negNull ? T(-1e6) : in[2], &vout = in[3];
+        const T veq = climitFcn(m.gain * (m.inOffset + in[0]), neg, pos, T(m.range));
+        const T rout = m.rSource == m.rSink ? T(m.rSource) : smoothDiscontinuity(veq - vout, -m.rDomain, m.rSink, m.rDomain, m.rSource);
+        T iout = (veq - vout) / rout, ipos(0.0), ineg(0.0);
+        if (iout < 0.0) {
+            if (iout < -m.iSink + m.iSinkRange) {
+                iout = iout < -m.iSink - m.iSinkRange ? T(-m.iSink) : smoothCorner(iout, -m.iSink, -m.iSink, m.iSinkRange, 0.0, 1.0);
+                ineg = -iout;
+            } else ineg = iout > -2.0 * m.iSinkRange ? -smoothCorner(iout, -m.iSinkRange, 0.0, m.iSinkRange, 1.0, 0.0) : -iout;
+        } else {
+            if (iout > m.iSource - m.iSourceRange) {
+                iout = iout > m.iSource + m.iSourceRange ? T(m.iSource) : smoothCorner(iout, m.iSource, m.iSource, m.iSinkRange, 1.0, 0.0);
+                ipos = -iout;
+            } else ipos = iout < 2.0 * m.iSourceRange ? -smoothCorner(iout, m.iSourceRange, 0.0, m.iSourceRange, 0.0, 1.0) : -iout;
         }
-        if (out > hi - r) {
-            if (out < hi + r) {
-                const T a = (-1.0 / 4.0) / r, xu = hi + r, b = -2.0 * a * xu, c = hi - a * xu * xu - b * xu;
-                return a * out * out + b * out + c;
-            }
-            return hi;
-        }
-        return out;
+        return m.out == 0 ? -ipos : m.out == 1 ? -ineg : -iout;
     }
     case AKind::PWL: {
         const auto &x = m.x, &y = m.y;
@@ -323,6 +539,9 @@ inline std::complex<double> analogAcGain(const AnalogModel &m, double w) {
         // less the slope the operating point's Jacobian already holds (a numerator of the denominator's order)
         return m.gain * nn / dd - (m.num.size() == m.den.size() ? m.gain * m.num.back() : 0.0);
     }
+    // capacitoric: an impedance 1/(jwc) on its current; inductoric: an admittance 1/(jwl) on its voltage. ngspice 47
+    // gives inductoric jwl, which is no inductor's (a shunt one then acts as a series one): a deliberate divergence
+    if (m.kind == AKind::CAPIC || m.kind == AKind::INDIC) return std::complex<double>(0.0, -1.0 / (w * m.gain));
     return m.kind == AKind::INT ? std::complex<double>(0.0, -m.gain / w) : std::complex<double>(0.0, m.gain * w);
 }
 

@@ -690,6 +690,8 @@ public:
   // (the last accepted one at the start of a step)
   // The first DC iteration (swForce_) holds the accepted state, as ngspice's INITJCT / INITFIX.
   bool swForce_ = false;
+  // The first Newton iteration of a solve (or any stamp outside one): XSPICE code models' inputs are not limited
+  bool cmFresh_ = true;
   bool swAcOff_ = false;  // small-signal matrix: ngspice's swacload stamps ROFF whatever the operating point
   bool switchState(const SwitchRef &w, const std::array<int, 2> &c, const std::vector<double> &x) const {
     if (swForce_) return *w.prev != 0;
@@ -1625,9 +1627,12 @@ public:
     double time() const { return t; }
     Dual<double> ref(int k) const { return Dual<double>(rv[k], k == seed ? 1.0 : 0.0); }
   };
-  struct BehavEval { double f = 0.0; std::vector<std::pair<int, double>> d; };
+  // f and its partials (d: per column; g: per input, code models only). limited: XSPICE's convergence limiting
+  // (mifload.c, on by default): past a solve's first iteration a code model's input moves at most
+  // max(0.25 |last|, 0.1) per iteration, and the source is linearised there (rv: the inputs it was evaluated at)
+  struct BehavEval { double f = 0.0; std::vector<std::pair<int, double>> d; std::vector<double> g, rv; };
   BehavEval behavEval(const Behavioural &b, const BranchSlot &sl, const std::vector<double> &x, double time, bool grad,
-                      double h = 0.0) const {
+                      double h = 0.0, bool limited = false) const {
     const size_t n = b.refs.size();
     auto X = [&](int c) { return c >= 0 && c < (int)x.size() ? x[c] : 0.0; };
     std::vector<int> ca(n, -1), cb(n, -1);
@@ -1640,14 +1645,24 @@ public:
     }
     BehavEval out;
     if (b.cm) {  // an XSPICE code model (xspice_analog.h): one Dual pass per input
+      if (limited) {
+        if (!cmFresh_ && b.cmLast.size() == n)
+          for (size_t k = 0; k < n; ++k) {
+            const double last = b.cmLast[k], step = std::max(0.25 * std::abs(last), 0.1);
+            rv[k] = std::clamp(rv[k], last - step, last + step);
+          }
+        b.cmLast = rv;
+      }
       std::vector<Dual<double>> in(n);
       for (size_t k = 0; k < n; ++k) in[k] = Dual<double>(rv[k]);
       const xspice::AnalogState *st = b.cmState.get();
+      out.rv = rv;
       if (!grad || n == 0) { out.f = xspice::analogOut(*b.cm, in, st, h, time).val; return out; }
       for (size_t k = 0; k < n; ++k) {
         for (size_t j = 0; j < n; ++j) in[j].grad = j == k ? 1.0 : 0.0;
         const auto r = xspice::analogOut(*b.cm, in, st, h, time);
         out.f = r.val;
+        out.g.push_back(r.grad);
         if (ca[k] >= 0) out.d.push_back({ca[k], r.grad});
         if (cb[k] >= 0) out.d.push_back({cb[k], -r.grad});
       }
@@ -1687,6 +1702,14 @@ public:
         b.cmState->v = xspice::oscStep(*b.cm, in.empty() ? 0.0 : in[0], *b.cmState, t, h).st;
         return;
       }
+      if (b.cm->kind == xspice::AKind::MEMRISTOR) {
+        b.cmState->out = h > 0.0 ? xspice::memristorR(*b.cm, in[0], b.cmState->out, h) : b.cm->outIc;
+        return;
+      }
+      if (b.cm->kind == xspice::AKind::ONESHOT) {
+        b.cmState->v = xspice::oneshotStep(*b.cm, in[0], in[1], in[2], *b.cmState, t, h).st;
+        return;
+      }
       if (b.cm->kind == xspice::AKind::HYST) {
         const double v = in.empty() ? 0.0 : in[0];
         b.cmState->leg = xspice::hystOut(*b.cm, v, xspice::hystLeg(*b.cm, v, *b.cmState)).second;
@@ -1706,13 +1729,16 @@ public:
   // Newton stamp at x: f ~ f0 + g.(x' - x). A voltage source's row reads v+ - v- - g.x' = f0 - g.x; a
   // current source leaves + (enters -) with g.x' + f0 - g.x.
   void stampBehav(const Behavioural &b, const BranchSlot &sl, int row, const std::vector<double> &x, double time, double h = 0.0) {
-    auto ev = behavEval(b, sl, x, time, true, h);
+    auto ev = behavEval(b, sl, x, time, true, h, true);
     // ponytail: outside a function's domain (ln(0) at the cold start, V = 0) the Newton step sees 0 here;
     // the audit (calculatePhysicalResiduals) keeps the exact value, so a real domain error cannot converge
     if (!std::isfinite(ev.f)) ev.f = 0.0;
     for (auto &[c, g] : ev.d) if (!std::isfinite(g)) g = 0.0;
     double rhs = ev.f;
-    for (auto [c, g] : ev.d) rhs -= g * (c < (int)x.size() ? x[c] : 0.0);
+    if (b.cm) {  // linearised at the (limited) inputs it was evaluated at
+      for (size_t k = 0; k < ev.g.size(); ++k) if (std::isfinite(ev.g[k])) rhs -= ev.g[k] * ev.rv[k];
+    } else
+      for (auto [c, g] : ev.d) rhs -= g * (c < (int)x.size() ? x[c] : 0.0);
     const int np = sl.map(b.outPos) - 1, nn = sl.map(b.outNeg) - 1;
     if (b.voltage) {
       for (auto [c, g] : ev.d) matrixBuilder.add(row, c, -g);

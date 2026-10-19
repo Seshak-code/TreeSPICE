@@ -440,6 +440,7 @@ struct Behavioural {
     std::vector<Ref> refs;
     std::shared_ptr<const xspice::AnalogModel> cm;  // an XSPICE analog code model's output over refs, in place of expr
     std::shared_ptr<xspice::AnalogState> cmState;   // its state at the last accepted time point (int, d_dt)
+    mutable std::vector<double> cmLast;             // its inputs at the last Newton iteration (XSPICE convergence limiting)
 };
 
 // ============================================================================

@@ -166,9 +166,10 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
       matrixBuilder.setDimensions(nTot, nTot);
       rhsVector.assign(nTot, 0.0);
 
-      swForce_ = iteration == 0;
+      swForce_ = cmFresh_ = iteration == 0;
       stampAllElements(netlist, 0.0, voltageEstimate, 0.0);
       swForce_ = false;
+      cmFresh_ = true;
       addDiagonalConditioning(netlist.numGlobalNodes, gmin_factor);
       if (gmin_factor > 0.0) {  // device-internal nodes are nodes too (ngspice CKTdiagGmin)
         int totalRows = 0;
@@ -783,10 +784,12 @@ void CircuitSim::tranCorners(const TensorNetlist &netlist) {
   if (xsim_) corners.push_back([this](double x) { return xsim_->next(x); });  // digital events
   // XSPICE oscillators: the breakpoints their last accepted step set (cm_analog_set_temp_bkpt)
   forEachBehav(netlist, [&](const Behavioural &b, const BranchSlot &, int) {
-    if (!b.cm || !xspice::oscillator(b.cm->kind) || !b.cmState) return;
-    corners.push_back([st = b.cmState](double x) {
+    // oneshot: its pulse's corners t1 .. t4 (cm_analog_set_perm_bkpt)
+    if (!b.cm || !b.cmState || !(xspice::oscillator(b.cm->kind) || b.cm->kind == xspice::AKind::ONESHOT)) return;
+    const size_t k0 = b.cm->kind == xspice::AKind::ONESHOT ? 0 : 5, k1 = b.cm->kind == xspice::AKind::ONESHOT ? 4 : SIZE_MAX;
+    corners.push_back([st = b.cmState, k0, k1](double x) {
       double best = std::numeric_limits<double>::infinity();
-      for (size_t k = 5; k < st->v.size(); ++k) if (st->v[k] > x && st->v[k] < best) best = st->v[k];
+      for (size_t k = k0; k < std::min(k1, st->v.size()); ++k) if (st->v[k] > x && st->v[k] < best) best = st->v[k];
       return best;
     });
   });
@@ -1729,7 +1732,9 @@ bool CircuitSim::coldStartSweep(TensorNetlist &netlist, double totalTime,
       matrixBuilder.setDimensions(nTot, nTot);
       rhsVector.assign(nTot, 0.0);
 
+      cmFresh_ = iteration == 0;
       stampAllElements(netlist, dt_sub, nrEstimate, dt_sub * (k + 1));
+      cmFresh_ = true;
       addDiagonalConditioning(netlist.numGlobalNodes, ptranGmin_);  // 0 except in a transient OP
       // (no node-to-ground gmin in transient: junction GMIN in the device
       // models keeps floating junction nodes referenced, like ngspice)
@@ -1872,8 +1877,10 @@ SolverStep CircuitSim::stepTransient(TensorNetlist &netlist, double timeStep,
         matrixBuilder.setDimensions(nTot, nTot);
         rhsVector.assign(nTot, 0.0);
 
+        cmFresh_ = iteration == 0;
         stampAllElements(netlist, actualTimeStep, nrEstimate,
                          currentTime + actualTimeStep);
+        cmFresh_ = true;
         addDiagonalConditioning(netlist.numGlobalNodes, ptranGmin_);  // 0 except in a transient OP
         // (no node-to-ground gmin in transient: junction GMIN in the device
         // models keeps floating junction nodes referenced, like ngspice)
