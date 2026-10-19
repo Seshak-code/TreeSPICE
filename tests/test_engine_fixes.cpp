@@ -16,6 +16,7 @@
 
 #include <array>
 #include <cmath>
+#include <complex>
 #include <cstdio>
 #include <string>
 #include <filesystem>
@@ -405,6 +406,40 @@ int main() {
             check(okd && near(ra.waveformPoints[0].nodeVoltages[1], sd, 1e-5 * std::abs(sd)) && near(sd, 0.205, 2e-3),
                   "diode RSW (bottom characteristic): 10 Hz AC gain equals the DC slope dv(2)/dVB (" +
                       (okd ? std::to_string(ra.waveformPoints[0].nodeVoltages[1]) : ra.errorDetail) + " vs " + std::to_string(sd) + ")");
+        }
+        // Diode self-heating in AC. ngspice 47's AC leaves CTH0 out (dioacld stamps the thermal capacitor's
+        // operating-point current, 0) and the power's charge-current term its transient has, and its dI/dT misses
+        // the IKF knee (0.0396 against its DC slope 0.0426 here): (1) without junction charge the thermal loop is
+        // one pole, H0 / H(f) - 1 = j f / fp, H0 the 1 mHz gain = the DC slope of v(tj), IKF in;
+        // (2) with TT, v(tj) at 25.1 kHz is ngspice's own transient's 17.1606 - 0.00029j (a 1 mV sine, fitted),
+        // where its AC gives +0.0075j
+        {
+            const auto dh = [](double vd, const char* tt, const char* an) {
+                return "* diode heat ac\nVD a 0 DC " + std::to_string(vd) + " AC 1\nR1 a k 10\nD1 k 0 tj DH PJ=1 THERMAL\n"
+                       ".model DH D(IS=1e-12 N=1.2 RS=0.5 RTH0=200 TRS1=3e-3 JSW=1e-12 " + std::string(tt) + ")\n" + std::string(an);
+            };
+            auto ac = [&](const std::string& nl) {
+                req.source.payload = nl;
+                return engine->createSession()->runAC(req, cb);
+            };
+            const auto r1 = ac(dh(2.5, "CTH0=1e-5 IKF=0.5", ".ac lin 1 100 100\n")), r4 = ac(dh(2.5, "CTH0=1e-5 IKF=0.5", ".ac lin 1 400 400\n"));
+            const auto r0 = ac(dh(2.5, "CTH0=1e-5 IKF=0.5", ".ac lin 1 1e-3 1e-3\n"));
+            const double hv = 1e-5, sh = (V(run(mode, dh(2.5 + hv, "CTH0=1e-5 IKF=0.5", "")), 3) - V(run(mode, dh(2.5 - hv, "CTH0=1e-5 IKF=0.5", "")), 3)) / (2 * hv);
+            const bool okh = r0.converged && r1.converged && r4.converged && !r0.waveformPoints.empty() &&
+                             !r1.waveformPoints.empty() && !r4.waveformPoints.empty();
+            auto H = [](const SimulationResponseDTO& r) {
+                return std::complex<double>(r.waveformPoints[0].nodeVoltages[2], r.waveformPoints[0].nodeVoltagesImag[2]);
+            };
+            const std::complex<double> h0 = okh ? H(r0) : NAN, e1 = okh ? h0 / H(r1) - 1.0 : NAN, e4 = okh ? h0 / H(r4) - 1.0 : NAN;
+            check(okh && near(h0.real(), sh, 1e-5 * std::abs(sh)) && std::abs(e1.real()) < 1e-4 * std::abs(e1) &&
+                      near(e4.imag() / e1.imag(), 4.0, 1e-4) && e1.imag() > 0.0,
+                  "diode self-heating AC: the thermal loop's one pole at RTH0 || CTH0 (fp " +
+                      (okh ? std::to_string(100.0 / e1.imag()) : std::string("?")) + " Hz), its DC slope " + std::to_string(sh));
+            const auto rt = ac(dh(2.5, "CTH0=1e-13 TT=5n", ".ac lin 1 25118.9 25118.9\n"));
+            const bool okt = rt.converged && !rt.waveformPoints.empty();
+            check(okt && near(H(rt).real(), 17.16060, 2e-5) && near(H(rt).imag(), -2.8999e-4, 2e-6),
+                  "diode self-heating AC with TT: v(tj) is ngspice's transient's (" +
+                      (okt ? std::to_string(H(rt).real()) + std::to_string(H(rt).imag()) + "j" : rt.errorDetail) + ")");
         }
         // XSPICE aswitch in AC is the resistance its control sets (ngspice 47's AC load negates the conductance:
         // a 1 V source over 1k and the switch read 1.46 V there): the same divider as a resistor of that value

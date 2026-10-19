@@ -648,6 +648,7 @@ public:
         j.n[2] = d.card.rs > 0.0 ? next++ : j.n[0];
         if (d.card.qp()) { j.n[3] = next++; j.terms = 4; }        // soft recovery's qp node
         if (d.card.rswGiven) { j.n[4] = next++; j.terms = 5; }    // the separate sidewall's A_sw (n[3] = 0 without VP)
+        if (d.heat) { j.n[5] = sl.map(d.thermal); j.terms = 6; }  // self-heating's tj
         j.st = i < st->diodeState.size() ? &st->diodeState[i] : nullptr;
         f(j);
       }
@@ -918,7 +919,7 @@ public:
 
   // Charge branches (terminal pairs, q flows from -> to): diode A'->C; BJT
   // be (B'->E'), bc (B'->C'), bx (B->C'), substrate (S->C'; lateral: S->B', Junction::sub).
-  static constexpr int diodeFrom[3] = {2, 3, 4}, diodeTo[3] = {1, 7, 1};  // + qp -> ground (7: no diode terminal), A_sw -> C
+  static constexpr int diodeFrom[4] = {2, 3, 4, 5}, diodeTo[4] = {1, 7, 1, 7};  // + qp, A_sw -> C, tj (7: ground, no diode terminal)
   static constexpr int bjtFrom[5] = {5, 5, 1, 3, 5}, bjtTo[5] = {6, 4, 4, 4, 7};  // + quasi-saturation bcx (B'->Cx)
   static constexpr int jfetFrom[2] = {1, 1}, jfetTo[2] = {2, 0};  // JFET gs (G->S), gd (G->D)
   static double jfetType(const JFET &f) { return f.isNChannel ? 1.0 : -1.0; }
@@ -927,11 +928,17 @@ public:
   // Junction-limiting shifts (junctionLimit): added to the junction voltages
   // (diode vd; BJT vbe, vbc) so the device is evaluated at its limited point.
   // seed: the shift carries derivative 1 (the G*(vl - v) correction pass).
-  struct JShift { double d[2] = {0.0, 0.0}; bool seed = false; };
+  struct JShift { double d[3] = {0.0, 0.0, 0.0}; bool seed = false; };  // [2]: a self-heating diode's temperature rise
   template <typename T> static T shifted(const T &v, const JShift *sh, int k) {
     if (!sh || sh->d[k] == 0.0) return v;
     if constexpr (std::is_same_v<T, double>) return v + sh->d[k];
     else return v + T(sh->d[k], sh->seed ? sh->d[k] : 0.0);
+  }
+
+  // f(the diode's model): a self-heating one's at its junction temperature T0 + dT (a Dual with T), else the card's
+  template <typename T, class F> decltype(auto) withDiodeModel(const Diode &d, const T &dT, F &&f) const {
+    if (d.heat) return f(diodeModel<T>(d, devtemp::diodeAt(d.heat->law, T(d.heat->t0) + dT), gmin_));
+    return f(diodeModel(d, gmin_));
   }
 
   // hist: a MESFET's charges advance from the last accepted step (j.st); false: the operating point itself
@@ -939,20 +946,25 @@ public:
   int junctionCharges(const Junction &j, const std::array<T, kJT> &x, T *v, T *q,
                       const JShift *sh = nullptr, bool hist = true) const {
     if (j.d) {
-      auto p = diodeModel(*j.d, gmin_);
       const auto &c = j.d->card;
-      v[0] = shifted(T(x[2] - x[1]), sh, 0);
-      if (!c.qp() && !c.rswGiven) { q[0] = diode_iq(v[0], p).second; return 1; }
-      // soft recovery (ngspice dioload): the junction keeps its depletion charge, TT vqp is the qp node's
-      v[1] = x[3]; q[1] = c.qp() ? T(p.tt * x[3]) : T(0.0);
-      if (c.qp()) p.tt = 0.0;
-      q[0] = diode_iq(v[0], p).second;
-      if (!c.rswGiven) return 2;
-      // the separate sidewall's depletion charge at A_sw - C. ngspice's transient takes its capacitance for the
-      // charge (dioload: DIOcapChargeSW = deplcapSW), so its sidewall current there is d(C)/dt: a deliberate divergence
-      v[2] = shifted(T(x[4] - x[1]), sh, 1);
-      q[2] = diode_sw_iq(v[0], v[2], p).second;
-      return 3;
+      const T dT = j.d->heat ? shifted(T(x[5]), sh, 2) : T(0.0);
+      return withDiodeModel(*j.d, dT, [&](auto p) {
+        v[0] = shifted(T(x[2] - x[1]), sh, 0);
+        const int K = j.d->heat ? 4 : c.rswGiven ? 3 : c.qp() ? 2 : 1;
+        if (K == 1) { q[0] = diode_iq(v[0], p).second; return 1; }
+        // soft recovery (ngspice dioload): the junction keeps its depletion charge, TT vqp is the qp node's
+        v[1] = x[3]; q[1] = c.qp() ? T(p.tt * x[3]) : T(0.0);
+        if (c.qp()) p.tt = 0.0;
+        q[0] = diode_iq(v[0], p).second;
+        if (K == 2) return 2;
+        // the separate sidewall's depletion charge at A_sw - C. ngspice's transient takes its capacitance for the
+        // charge (dioload: DIOcapChargeSW = deplcapSW), so its sidewall current there is d(C)/dt: a deliberate divergence
+        v[2] = c.rswGiven ? shifted(T(x[4] - x[1]), sh, 1) : T(0.0);
+        q[2] = c.rswGiven ? T(diode_sw_iq(v[0], v[2], p).second) : T(0.0);
+        if (K == 3) return 3;
+        v[3] = dT; q[3] = j.d->heat->cth0 * dT;  // self-heating: CTH0 at tj
+        return 4;
+      });
     }
     if (j.f) {
       const double t = jfetType(*j.f);
@@ -982,7 +994,7 @@ public:
     return 5;
   }
   static bool junctionHasCharge(const Junction &j) {
-    if (j.d) return j.d->card.cjo > 0.0 || j.d->card.cjsw > 0.0 || j.d->card.tt > 0.0;
+    if (j.d) return j.d->card.cjo > 0.0 || j.d->card.cjsw > 0.0 || j.d->card.tt > 0.0 || (j.d->heat && j.d->heat->cth0 > 0.0);
     if (j.f) return j.f->card.cgs > 0.0 || j.f->card.cgd > 0.0;
     const auto &c = j.q->card;
     return c.cje > 0.0 || c.cjc > 0.0 || c.cjs > 0.0 || c.tf > 0.0 || c.tr > 0.0 || (c.rco > 0.0 && c.qco > 0.0);
@@ -999,15 +1011,21 @@ public:
     double type = 1.0;
     const int *from, *to;
     if (j.d) {
-      const auto p = diodeModel(*j.d, gmin_);
-      if (p.rs > 0.0) { const T ir = (x[0] - x[2]) / p.rs; I[0] += ir; I[2] -= ir; }
-      const T vd = shifted(T(x[2] - x[1]), sh, 0), id = diode_iq(vd, p).first;
-      I[2] += id; I[1] -= id;
-      if (j.d->card.qp()) I[3] += (x[3] - p.tt * id) / j.d->card.vp;  // qp row: vqp/VP + ddt(TT vqp) = TT/VP id
-      if (p.swSep) {  // A - RSW - A_sw, the sidewall junction A_sw - C
-        const T ir = (x[0] - x[4]) * p.gsw, isw = diode_sw_iq(vd, shifted(T(x[4] - x[1]), sh, 1), p).first;
-        I[0] += ir; I[4] += isw - ir; I[1] -= isw;
-      }
+      withDiodeModel(*j.d, j.d->heat ? shifted(T(x[5]), sh, 2) : T(0.0), [&](const auto &p) {
+        T ith(0.0);  // self-heating: the power into tj (ngspice dioload: vd cd + vrs^2 / RS, the sidewall's likewise)
+        if (p.rs > 0.0) { const T ir = (x[0] - x[2]) / p.rs; I[0] += ir; I[2] -= ir; ith = ith + (x[0] - x[2]) * ir; }
+        const T vd = shifted(T(x[2] - x[1]), sh, 0), id = diode_iq(vd, p).first;
+        I[2] += id; I[1] -= id;
+        ith = ith + vd * id;
+        if (j.d->card.qp()) I[3] += (x[3] - p.tt * id) / j.d->card.vp;  // qp row: vqp/VP + ddt(TT vqp) = TT/VP id
+        if (p.swSep) {  // A - RSW - A_sw, the sidewall junction A_sw - C
+          const T vdsw = shifted(T(x[4] - x[1]), sh, 1), ir = (x[0] - x[4]) * p.gsw, isw = diode_sw_iq(vd, vdsw, p).first;
+          I[0] += ir; I[4] += isw - ir; I[1] -= isw;
+          ith = ith + vdsw * isw + (x[0] - x[4]) * ir;
+        }
+        if (j.d->heat) I[5] += x[5] / j.d->heat->rth0 - ith;  // tj row: v(tj)/RTH0 + ddt(CTH0 v(tj)) = Ith
+        return 0;
+      });
       from = diodeFrom; to = diodeTo;
     } else if (j.f) {
       const auto p = jfetModel(*j.f, gmin_);
@@ -1065,6 +1083,7 @@ public:
       I[from[k]] += (sub ? j.subSign : 1.0) * type * i;
       I[sub ? j.sub : to[k]] -= (sub ? j.subSign : 1.0) * type * i;
       if (j.d && k == 1 && j.d->card.qp()) { const T g = (1.0 - j.d->card.vp) / j.d->card.tt * i; I[2] += g; I[1] -= g; }  // (1-VP)/TT ddt(Qp)
+      if (j.d && j.d->heat && (k == 0 || k == 2)) I[5] -= v[k] * i;  // ngspice's Ith takes the junctions' charge currents too
       if constexpr (std::is_same_v<T, double>)
         if (next) { next->v[0][k] = v[k]; next->q[k] = q[k]; next->i[k] = i; }
     }
@@ -1114,11 +1133,24 @@ public:
       const double raw[2] = {j.d ? V(2) - V(1) : j.f ? t * (V(1) - V(2)) : t * (V(5) - V(6)),
                              j.d ? (j.d->card.rswGiven ? V(4) - V(1) : 0.0) : j.f ? t * (V(1) - V(0)) : t * (V(5) - V(4))};
       for (int k = 0; k < 2; ++k) { st->jv[k] = 0.0; sh.d[k] = -raw[k]; }
+      if (j.d && j.d->heat) { st->jv[2] = 0.0; sh.d[2] = -V(5); }
       st->jvState = 1;
       return sh;
     }
     if (j.d) {
-      const auto m = diodeModel(*j.d, gmin_);
+      const auto m = j.d->heat ? diodeModel<double>(*j.d, devtemp::diodeAt(j.d->heat->law, j.d->heat->t0 + st->jv[2]), gmin_)
+                               : diodeModel(*j.d, gmin_);
+      if (j.d->heat) {  // the temperature rise: ngspice's DEVlimitlog (100 K, log-damped beyond); 0 at the first iteration
+        const double raw = V(5), old = st->jv[2];
+        double tl = 0.0;
+        if (st->jvState) {
+          tl = raw;
+          if (raw > old + 100.0) tl = old + 100.0 + std::log10((raw - old) / 100.0);
+          else if (raw < old - 100.0) tl = old - 100.0 - std::log10((old - raw) / 100.0);
+        }
+        st->jv[2] = tl;
+        sh.d[2] = tl - raw;
+      }
       const double vcrit = compute_vcrit(m.vte, m.is), raw = V(2) - V(1);
       double vl = vcrit;
       if (st->jvState) {
@@ -1186,7 +1218,7 @@ public:
   void stampJunction(const Junction &j, const std::vector<double> &v, double h) {
     const JShift sh = limitJunctions_ ? junctionLimit(j, v) : JShift{};
     stampByDual(j.n, j.terms, v, [&](const std::array<Dual<double>, kJT> &x) { return junctionCurrents(j, x, h, nullptr, &sh); });
-    if (sh.d[0] == 0.0 && sh.d[1] == 0.0) return;
+    if (sh.d[0] == 0.0 && sh.d[1] == 0.0 && sh.d[2] == 0.0) return;
     JShift seeded = sh;
     seeded.seed = true;
     std::array<Dual<double>, kJT> x;
@@ -1528,7 +1560,7 @@ public:
       for (const auto &e : b.inductors) mark({e.nodeCoil1, e.nodeCoil2});
       for (const auto &e : b.voltageSources) mark({e.nodePositive, e.nodeNegative});
       for (const auto &e : b.currentSources) mark({e.nodePositive, e.nodeNegative});
-      for (const auto &e : b.diodes) mark({e.anode, e.cathode});
+      for (const auto &e : b.diodes) mark({e.anode, e.cathode, e.thermal});
       for (const auto &e : b.mosfets) mark({e.drain, e.gate, e.source, e.body});
       for (const auto &e : b.bjts) mark({e.nodeCollector, e.base, e.emitter, e.substrate});
       for (const auto &e : b.osdiDevices)

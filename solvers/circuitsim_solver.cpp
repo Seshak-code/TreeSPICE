@@ -1225,6 +1225,7 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
         Q[from[k]] += s * q[k].grad;
         Q[j.q && k == 3 ? j.sub : to[k]] -= s * q[k].grad;
         if (j.d && k == 1 && j.d->card.qp()) { const double g = (1.0 - j.d->card.vp) / j.d->card.tt * q[k].grad; Q[2] += g; Q[1] -= g; }  // soft recovery
+        if (j.d && j.d->heat && (k == 0 || k == 2)) Q[5] -= v[k].val * q[k].grad;  // the transient's Ith takes vd i_charge
       }
       for (int t = 0; t < j.terms; ++t) if (Q[t] != 0.0) addC(j.n[t] - 1, j.n[u] - 1, Q[t]);
     }
@@ -1358,7 +1359,8 @@ CircuitSim::NoiseResult CircuitSim::solveNoise(TensorNetlist &netlist, const std
   // shot noise of the junction currents between the internal nodes
   forEachJunction(netlist, [&](const Junction &j) {
     if (j.d) {
-      const auto m = diodeModel(*j.d, gmin_);
+      const auto m = j.d->heat ? diodeModel<double>(*j.d, devtemp::diodeAt(j.d->heat->law, j.d->heat->t0 + V(j.n[5])), gmin_)
+                               : diodeModel(*j.d, gmin_);
       if (m.rs > 0.0) gens.push_back({j.n[0], j.n[2], kT4 / m.rs});
       const double vd = V(j.n[2]) - V(j.n[1]), id = diode_iq(vd, m).first;
       auto junction = [&](int a, double i) {  // shot 2q|I|, flicker M KF (|I|/M)^AF / f

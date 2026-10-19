@@ -130,6 +130,7 @@ def node_map(text):
             pos = range(1, next((k for k in range(1, len(t)) if t[k].upper() in models), 1))
         if c == "M" and len(t) > 4 and t[4].upper() in models: pos = [1, 2, 3]  # a 3-node VDMOS
         if c == "M" and len(t) > 6 and t[6].upper() in models and t[4].upper() not in models: pos = [1, 2, 3, 4, 5]  # VDMOS THERMAL
+        if c == "D" and len(t) > 4 and t[3].upper() not in models and t[4].upper() in models: pos = [1, 2, 3]  # D a k tj
         # Q c b e [s] model ...: the 4th field is a substrate node when the 5th is a name (engine rule)
         if c == "Q" and len(t) >= 6 and not re.fullmatch(r"[-+.\d].*", t[5]) and t[5].upper() not in ("AREA", "OFF", "IC", "M", "TEMP", "DTEMP"):
             pos = [1, 2, 3, 4]

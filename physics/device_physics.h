@@ -537,16 +537,18 @@ struct DiodeModel {
 
 // Breakdown voltage xbv such that the reverse current at -BV is IBV (ngspice
 // diotemp; vte = NBV*Vt): returns BV unchanged when IBV is below the knee current.
-inline double diode_breakdown_xbv(double bv, double ibv, double is, double vte, double reltol = 1e-3)
+template <class P>
+inline P diode_breakdown_xbv(P bv, P ibv, P is, P vte, double reltol = 1e-3)
 {
-    double cbv = ibv;
+    using std::log; using std::exp; using std::abs;
+    const P cbv = ibv;
     if (cbv < is * bv / vte) return bv;
-    const double tol = reltol * cbv;
-    double xbv = bv - vte * std::log(1.0 + cbv / is);
+    const P tol = reltol * cbv;
+    P xbv = bv - vte * log(1.0 + cbv / is);
     for (int it = 0; it < 25; ++it) {
-        xbv = bv - vte * std::log(cbv / is + 1.0 - xbv / vte);
-        const double xcbv = is * (std::exp((bv - xbv) / vte) - 1.0 + xbv / vte);
-        if (std::abs(xcbv - cbv) <= tol) break;
+        xbv = bv - vte * log(cbv / is + 1.0 - xbv / vte);
+        const P xcbv = is * (exp((bv - xbv) / vte) - 1.0 + xbv / vte);
+        if (abs(xcbv - cbv) <= tol) break;
     }
     return xbv;
 }

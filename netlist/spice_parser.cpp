@@ -1397,7 +1397,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                           "NBV", "NZ", "CTA", "CTC", "CTP", "TPB", "TVJ", "TPHP", "TLEVC", "TLEV", "CJP", "FCS", "GAP1", "GAP2",
                           "JTUN", "JTUNSW", "NTUN", "XTITUN", "KEG", "AREA", "PJ", "TREF", "VP", "RSW",
                           "FV_MAX", "BV_MAX", "ID_MAX", "TE_MAX", "PD_MAX",  // SOA: ngspice's warnings only
-                          "RTH0", "CTH0"});  // self-heating: only a THERMAL instance (D a k tj, not supported yet) uses them
+                          "RTH0", "CTH0"});  // self-heating: a THERMAL instance (D a k tj) uses them
             // Temperature selectors (probed on ngspice 47): TLEV 1 scales BV by (1 - TCV dT) where 0 subtracts TCV dT
             // (IS follows the same law under both); TLEV 2 also takes the band gap EG - GAP1 T^2 / (T + GAP2) for the
             // saturation currents (exp(EG(Tn)/(N Vt(Tn)) - EG(T)/(N Vt) + XTI/N ln(T/Tn))) and the junction potentials;
@@ -1433,37 +1433,31 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (k.rswGiven && k.qp()) throw std::runtime_error("model " + c->name + ": VP with RSW is not supported yet");
             if (!(k.m < 1.0 && k.mjsw < 1.0 && k.vj > 0.0 && k.fc < 1.0 && k.fcs < 1.0 && k.rs >= 0.0 && k.ibv > 0.0))
                 throw std::runtime_error("model " + c->name + ": needs M, MJSW < 1, VJ > 0, FC, FCS < 1, RS >= 0, IBV > 0");
-            using namespace devtemp;
-            const double Tn = first(c, {"TNOM", "TREF"}, tnomC_) + 273.15, T = instK(d.inst), dt = T - Tn;
-            d.thermalVoltage_V_T_V = vt(T);
-            k.m = std::min(k.m * poly(c->get("TM1", 0.0), c->get("TM2", 0.0), dt), 0.9);
-            if (T != Tn) {
-                const double eg = std::max(c->get("EG", 1.11), 0.1), xti = c->get("XTI", 3.0);
-                const Gap gap = tlev == 2.0 ? Gap{eg, c->get("GAP1", 7.02e-4), c->get("GAP2", 1108.0)} : Gap{};
-                // saturation-current law for emission coefficient n, band gap scale keg and exponent x
-                auto law = [&](double n, double keg, double x) {
-                    if (tlev != 2.0) return isFactor(T, Tn, keg * eg, x, n);
-                    return std::exp(keg * egfet(Tn, gap) / (n * vt(Tn)) - keg * egfet(T, gap) / (n * vt(T)) + x / n * std::log(T / Tn));
-                };
-                d.saturationCurrent_I_S_A *= law(d.emissionCoefficient_N, 1.0, xti);
-                if (tlevc == 1.0) {
-                    k.cjo *= 1.0 + first(c, {"CTA", "CTC"}, 0.0) * dt; k.vj -= first(c, {"TPB", "TVJ"}, 0.0) * dt;
-                    k.cjsw *= 1.0 + c->get("CTP", 0.0) * dt; k.php -= c->get("TPHP", 0.0) * dt;
-                } else {
-                    k.cjo *= junctionAt(k.vj, k.m, Tn, T, gap);
-                    k.cjsw *= junctionAt(k.php, k.mjsw, Tn, T, gap);
-                }
-                k.jsw *= law(k.ns, 1.0, xti);
-                k.isr *= law(k.nr, 1.0, xti);  // probed: the NR law
-                const double ft = law(k.ntun, c->get("KEG", 1.0), c->get("XTITUN", 3.0));
-                k.jtun *= ft; k.jtunsw *= ft;
+            devtemp::DiodeLaw l;
+            l.tn = first(c, {"TNOM", "TREF"}, tnomC_) + 273.15;
+            l.eg = std::max(c->get("EG", 1.11), 0.1); l.xti = c->get("XTI", 3.0);
+            l.keg = c->get("KEG", 1.0); l.xtitun = c->get("XTITUN", 3.0);
+            l.tlev = (int)tlev; l.tlevc = (int)tlevc;
+            if (tlev == 2.0) l.gap = devtemp::Gap{l.eg, c->get("GAP1", 7.02e-4), c->get("GAP2", 1108.0)};
+            l.tm1 = c->get("TM1", 0.0); l.tm2 = c->get("TM2", 0.0); l.ttt1 = c->get("TTT1", 0.0); l.ttt2 = c->get("TTT2", 0.0);
+            l.trs1 = first(c, {"TRS1", "TRS"}, 0.0); l.trs2 = c->get("TRS2", 0.0); l.tcv = first(c, {"TCV", "TBV1"}, 0.0);
+            l.cta = first(c, {"CTA", "CTC"}, 0.0); l.tpb = first(c, {"TPB", "TVJ"}, 0.0); l.ctp = c->get("CTP", 0.0);
+            l.tphp = c->get("TPHP", 0.0);
+            l.n = d.emissionCoefficient_N; l.ns = k.ns; l.nr = k.nr; l.ntun = k.ntun; l.mjsw = k.mjsw; l.fc = k.fc;
+            l.bvGiven = k.bvGiven;
+            l.is = d.saturationCurrent_I_S_A; l.m = k.m; l.cjo = k.cjo; l.vj = k.vj; l.cjsw = k.cjsw; l.php = k.php;
+            l.jsw = k.jsw; l.isr = k.isr; l.jtun = k.jtun; l.jtunsw = k.jtunsw; l.tt = k.tt; l.rs = k.rs; l.rsw = k.rsw; l.bv = k.bv;
+            const double T = instK(d.inst);
+            const auto a = devtemp::diodeAt(l, T);
+            d.thermalVoltage_V_T_V = a.vt; d.saturationCurrent_I_S_A = a.is;
+            k.m = a.m; k.cjo = a.cjo; k.vj = a.vj; k.cjsw = a.cjsw; k.php = a.php; k.jsw = a.jsw; k.isr = a.isr;
+            k.jtun = a.jtun; k.jtunsw = a.jtunsw; k.tt = a.tt; k.rs = a.rs; k.rsw = a.rsw; k.bv = a.bv;
+            // self-heating (ngspice: a thermal node, THERMAL and the model's RTH0; else tj is left to its circuit)
+            if (d.thermal > 0 && d.thermalFlag && c->params.count("RTH0")) {
+                const double rth0 = c->get("RTH0", 0.0), cth0 = c->get("CTH0", 1e-5);
+                if (!(rth0 > 0.0) || cth0 < 0.0) throw std::runtime_error("model " + c->name + ": self-heating needs RTH0 > 0, CTH0 >= 0");
+                d.heat = std::make_shared<const Diode::Heat>(Diode::Heat{l, T, rth0, cth0});
             }
-            if (k.fc * k.vj > 1.0) k.vj = 1.0 / k.fc;  // diotemp: the depletion knee stays below 1 V
-            k.tt *= poly(c->get("TTT1", 0.0), c->get("TTT2", 0.0), dt);
-            k.rs *= poly(first(c, {"TRS1", "TRS"}, 0.0), c->get("TRS2", 0.0), dt);
-            k.rsw *= poly(first(c, {"TRS1", "TRS"}, 0.0), c->get("TRS2", 0.0), dt);
-            const double tcv = first(c, {"TCV", "TBV1"}, 0.0);
-            if (k.bvGiven) k.bv = tlev != 0.0 ? k.bv * (1.0 - tcv * dt) : k.bv - tcv * dt;
         }
         // HICUM/L2 (LEVEL 8): OpenVAF's hicuml2.va 2.4.0, ngspice's native version (they agree to 4e-5 in ngspice),
         // through OSDI (hicum2.osdi from TREESPICE_OSDI_PATH); its parameter names are ngspice's.
@@ -2021,12 +2015,18 @@ void SPICEParser::parseCurrSrc(const std::vector<std::string>& tok, TensorBlock&
 }
 
 // D<name> <n+> <n-> <modelName> [area] [AREA=] [M=] [OFF] [IC=]   (params from .model in parse())
-void SPICEParser::parseDiode(const std::vector<std::string>& tok, TensorBlock& blk) {
-    requireFields(tok, 4);
+void SPICEParser::parseDiode(const std::vector<std::string>& tok0, TensorBlock& blk) {
+    requireFields(tok0, 4);
     Diode d;
+    std::vector<std::string> tok = tok0;  // D a k [tj] model ...: a third node before the model is the thermal one
+    if (tok.size() > 4 && !modelNames_.count(toUpper(tok[3])) && modelNames_.count(toUpper(tok[4]))) {
+        d.thermal = nodeIndex(tok[3]);
+        tok.erase(tok.begin() + 3);
+    }
     std::vector<std::string> rest(tok.begin(), tok.begin() + 4);  // PJ= is the sidewall perimeter; M= also scales it
     for (size_t i = 4; i < tok.size(); ++i) {
         const std::string k = toUpper(tok[i]);
+        if (k == "THERMAL") { d.thermalFlag = true; continue; }
         if (k == "PJ" && i + 1 < tok.size() && isValue(tok[i + 1])) { d.pj = parseValue(tok[++i]); d.pjGiven = true; continue; }
         if (k == "AREA" || (i == 4 && isValue(tok[i]))) d.areaGiven = true;
         if (k == "M" && i + 1 < tok.size() && isValue(tok[i + 1])) d.mult = parseValue(tok[i + 1]);

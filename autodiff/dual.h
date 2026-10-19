@@ -185,6 +185,11 @@ constexpr Dual<T> operator-(Dual<T> x) { return { -x.val, -x.grad }; }
     }
 
     template <typename T>
+    inline Dual<T> pow(const Dual<T>& x, const Dual<T>& e) {  // x > 0
+        return exp(e * log(x));
+    }
+
+    template <typename T>
     inline Dual<T> sqrt(const Dual<T>& x) {
         // d/dx sqrt(u) = u' / (2*sqrt(u))
         T s = std::sqrt(x.val);

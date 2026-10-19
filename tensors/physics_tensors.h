@@ -64,28 +64,42 @@ inline Mos1Params<double> mos1Params(const Mosfet& m, double gmin = PhysicsConst
 // scale, resistances divide). Devices built without a card keep the IS/N or
 // IS/BF/BR they were constructed with and SPICE defaults for the rest.
 // The parser holds them at the instance temperature (Vt in thermalVoltage_V_T_V, IS, betas, junctions).
-inline DiodeModel<double> diodeModel(const Diode& d, double gmin = PhysicsConstants::JUNCTION_GMIN) {
+// The diode's model with its temperature-dependent values t: the card's (the parser's, at the instance
+// temperature), or a self-heating instance's at its junction temperature (P a Dual there)
+template <class P>
+inline DiodeModel<P> diodeModel(const Diode& d, const devtemp::DiodeAt<P>& t, double gmin) {
     const auto& c = d.card;
-    DiodeModel<double> p;
+    DiodeModel<P> p;
     p.gmin = gmin;
-    const double vt = d.thermalVoltage_V_T_V, is = d.saturationCurrent_I_S_A;
-    p.is = is * d.area;
+    const P vt = t.vt;
+    p.is = t.is * d.area;
     p.vte = d.emissionCoefficient_N * vt;
-    p.rs = c.rs / d.area;
-    p.cjo = c.cjo * d.area; p.vj = c.vj; p.m = c.m; p.fc = c.fc; p.tt = c.tt;
-    p.isw = c.jsw * d.pj * d.mult; p.vtesw = c.ns * vt; p.swOwn = c.nsGiven;
+    p.rs = t.rs / d.area;
+    p.cjo = t.cjo * d.area; p.vj = t.vj; p.m = t.m; p.fc = c.fc; p.tt = t.tt;
+    p.isw = t.jsw * d.pj * d.mult; p.vtesw = c.ns * vt; p.swOwn = c.nsGiven;
     p.fcs = c.fcs; p.ikp = c.ikp * d.pj * d.mult;
-    p.itun = c.jtun * d.area; p.itunsw = c.jtunsw * d.pj * d.mult; p.vtt = c.ntun * vt;
-    p.cjsw = c.cjsw * d.pj * d.mult; p.mjsw = c.mjsw; p.vjsw = c.php;
+    p.itun = t.jtun * d.area; p.itunsw = t.jtunsw * d.pj * d.mult; p.vtt = c.ntun * vt;
+    p.cjsw = t.cjsw * d.pj * d.mult; p.mjsw = c.mjsw; p.vjsw = t.php;
     p.ikf = c.ikf * d.area; p.ikr = c.ikr * d.area;
-    p.isr = c.isr * d.area; p.vtr = c.nr * vt;
+    p.isr = t.isr * d.area; p.vtr = c.nr * vt;
     p.vtb = (std::isnan(c.nbv) ? d.emissionCoefficient_N : c.nbv) * vt;
     p.breakdown = c.bvGiven;
-    p.swSep = c.rswGiven; p.gsw = c.rsw > 0.0 ? d.pj * d.mult / c.rsw : 0.0;  // ngspice: RSW = 0 leaves A_sw on GMIN
+    p.swSep = c.rswGiven;  // ngspice: RSW = 0 leaves A_sw on GMIN
+    p.gsw = t.rsw > 0.0 ? P(d.pj * d.mult) / t.rsw : P(0.0);
     // ngspice (probed): I(-BV) is IBV per parallel device, M scales it and AREA does not; xbv is solved with the
     // bottom and sidewall saturation currents together, and only the bottom one breaks down
-    if (p.breakdown) p.xbv = diode_breakdown_xbv(c.bv, c.ibv * d.mult, p.is + p.isw, p.vtb);
+    if (p.breakdown) p.xbv = diode_breakdown_xbv(t.bv, P(c.ibv * d.mult), p.is + p.isw, p.vtb);
     return p;
+}
+
+inline devtemp::DiodeAt<double> diodeCardAt(const Diode& d) {
+    const auto& c = d.card;
+    return {d.thermalVoltage_V_T_V, d.saturationCurrent_I_S_A, c.m, c.cjo, c.vj, c.cjsw, c.php, c.jsw, c.isr,
+            c.jtun, c.jtunsw, c.tt, c.rs, c.rsw, c.bv};
+}
+
+inline DiodeModel<double> diodeModel(const Diode& d, double gmin = PhysicsConstants::JUNCTION_GMIN) {
+    return diodeModel<double>(d, diodeCardAt(d), gmin);
 }
 
 inline JfetModel<double> jfetModel(const JFET& j, double gmin = PhysicsConstants::JUNCTION_GMIN) {

@@ -12,6 +12,7 @@
 #include "../physics/xspice.h"
 #include "../physics/ltra.h"
 #include "../physics/physics_constants.h"
+#include "../physics/device_temp.h"
 #include "graph_canonical.h"
 #include "numparam.h"
 
@@ -628,6 +629,12 @@ struct Diode {
     double pj = 0.0, mult = 1.0;  // PJ= (sidewall perimeter) and M= (the sidewall terms scale by M, not by AREA)
     bool areaGiven = false, pjGiven = false;  // else the model's AREA / PJ (ngspice diosetup)
     InstTemp inst;  // card and saturation current are held at the instance temperature (resolved by the parser)
+    // Self-heating (D a k tj model THERMAL, the model with RTH0): tj's voltage is the junction's rise over the
+    // instance temperature T0 (ngspice dioload); the law gives the card at T0 + v(tj). thermal 0: none.
+    int thermal = 0;
+    bool thermalFlag = false;
+    struct Heat { devtemp::DiodeLaw law; double t0 = 300.15, rth0 = 0.0, cth0 = 0.0; };
+    std::shared_ptr<const Heat> heat;  // null: no self-heating
 };
 
 struct Mosfet {
@@ -1246,7 +1253,7 @@ struct BlockState {
         // Diode / BJT junction limiting (ngspice state0): the limited junction
         // voltages of the last Newton iteration (diode vd; BJT vbe, vbc).
         // jvState 0: none yet -> start at vcrit (ngspice MODEINITJCT).
-        double jv[2] = {};
+        double jv[3] = {};  // [2]: a self-heating diode's temperature rise
         int jvState = 0;
         // BJT excess phase (PTF): the filtered transfer current of the last two accepted steps, the last step
         double xf[2] = {}, hPrev = 0.0;
