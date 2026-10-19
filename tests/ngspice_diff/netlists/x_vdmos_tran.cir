@@ -1,0 +1,12 @@
+* VDMOS switching an inductive load: Cgd(vgd) from CGDMIN to CGDMAX, CGS, the body diode freewheels (CJO, TT recovery)
+VDD vdd 0 DC 24
+VG gin 0 PULSE(0 10 1u 50n 50n 4u 10u)
+RGD gin g 10
+L1 vdd d 20u
+D1 d vdd DF
+M1 d g 0 sw
+M2 vdd 0 d sw
+.model sw VDMOS(Vto=3 Kp=20 Rd=20m Rs=5m Rg=2 lambda=0.01 Cgdmax=1.5n Cgdmin=40p a=0.8 Cgs=1.2n Cjo=800p M=0.45 Vj=0.75 Is=5p N=1.1 TT=60n Rb=10m)
+.model DF D(IS=1e-12 RS=0.01 CJO=100p TT=10n)
+.tran 5n 20u
+.end

@@ -97,11 +97,13 @@ def needed_osdi(text):
     """OSDI libraries a netlist needs: its .osdi cards, and the ones the native BSIM and HICUM cards run on."""
     libs = set(osdi_libs(text))
     for typ, lvl in re.findall(r"^\s*\.model\s+\S+\s+(\w+)\s*\(?[^\n]*?\blevel\s*=\s*(\d+)", text, re.I | re.M):
+        if typ.lower().startswith("vdmos"): continue
         if typ.lower() in ("npn", "pnp"):
             libs |= {"8": {"hicum2.osdi"}, "4": {"vbic.osdi"}, "9": {"vbic.osdi"}}.get(lvl, set())
             continue
         libs |= {"54": {"bsim4.osdi"}, "14": {"bsim4.osdi"}, "49": {"bsim3.osdi"}, "8": {"bsim3.osdi"},
                  "10": {"bsimsoi.osdi"}, "58": {"bsimsoi.osdi"}}.get(lvl, set())
+    if re.search(r"^\s*\.model\s+\S+\s+vdmos", text, re.I | re.M): libs.add("vdmos.osdi")
     return sorted(libs)
 
 def node_map(text):
@@ -126,6 +128,8 @@ def node_map(text):
             pos = [1, 2]  # behavioural forms: the control nodes are not at the linear positions
         if c == "N":  # N<name> <terminals...> <model> [params]: terminals precede the first model name
             pos = range(1, next((k for k in range(1, len(t)) if t[k].upper() in models), 1))
+        if c == "M" and len(t) > 4 and t[4].upper() in models: pos = [1, 2, 3]  # a 3-node VDMOS
+        if c == "M" and len(t) > 6 and t[6].upper() in models and t[4].upper() not in models: pos = [1, 2, 3, 4, 5]  # VDMOS THERMAL
         # Q c b e [s] model ...: the 4th field is a substrate node when the 5th is a name (engine rule)
         if c == "Q" and len(t) >= 6 and not re.fullmatch(r"[-+.\d].*", t[5]) and t[5].upper() not in ("AREA", "OFF", "IC", "M", "TEMP", "DTEMP"):
             pos = [1, 2, 3, 4]

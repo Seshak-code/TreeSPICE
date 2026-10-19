@@ -962,6 +962,51 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         throw std::runtime_error(inst + ": model " + c->name + " is " + c->type + ", not a " +
                                  std::string(*types.begin()) + "/" + *(types.begin() + 1) + " model");
     };
+    // VDMOS (ngspice vdmos*.c) through OSDI: tests/models/vdmos_ng.va, a port of ngspice 47's model, as vdmos.osdi
+    // from TREESPICE_OSDI_PATH. M d g s model, or M d g s tj tc model THERMAL (self-heating, tj and tc in deg C).
+    auto vdmosOsdi = [&](const Mosfet& m, const ModelCard& c) {
+        static const std::map<std::string, std::string> alias = {{"VTH0", "VTO"}, {"VTOTC", "TCVTH"}, {"BEX", "MU"}, {"M", "MJ"}};
+        static const std::set<std::string> soa = {"VGS_MAX", "VGD_MAX", "VDS_MAX", "VGSR_MAX", "VGDR_MAX", "PD_MAX",
+                                                  "ID_MAX", "IDR_MAX", "TE_MAX", "RTH_EXT", "DERATING"};  // warnings only
+        static const std::set<std::string> known = {"VTO", "KP", "PHI", "LAMBDA", "THETA", "RD", "RS", "RG", "TNOM",
+            "KF", "AF", "RQ", "VQ", "MTRIODE", "TCVTH", "MU", "TEXP0", "TEXP1", "TRD1", "TRD2", "TRG1", "TRG2", "TRS1",
+            "TRS2", "TRB1", "TRB2", "SUBSHIFT", "KSUBTHRES", "TKSUBTHRES1", "TKSUBTHRES2", "BV", "IBV", "NBV", "RDS", "RB",
+            "N", "TT", "EG", "XTI", "IS", "VJ", "VP", "CJO", "MJ", "FC", "CGDMIN", "CGDMAX", "A", "CGS", "RTHJC", "RTHCA", "CTHJ"};
+        if (!m.given.empty() || !m.osdiParams.empty())
+            throw std::runtime_error(m.instanceName + ": a VDMOS takes M, TEMP, DTEMP and THERMAL only");
+        if (m.thermal != (!m.threeTerm && m.soiNodes.size() == 1))
+            throw std::runtime_error(m.instanceName + ": a VDMOS has 3 nodes (d g s), or 5 (d g s tj tc) with THERMAL");
+        if (m.thermal && !c.params.count("RTHJC"))
+            throw std::runtime_error(m.instanceName + ": THERMAL needs RTHJC on model " + c.name);
+        std::map<std::string, double> p;
+        for (const auto& [k, v] : c.params) {
+            if (soa.count(k)) continue;
+            const auto a = alias.find(k);
+            const std::string key = a == alias.end() ? k : a->second;
+            if (!known.count(key)) throw std::runtime_error("model " + c.name + ": parameter " + k + " is not supported yet");
+            p[key] = v;
+        }
+        bounded(&c, {"RD", "RS", "RG", "RB", "RQ", "TT", "CJO", "CGDMIN", "CGDMAX", "CGS", "CTHJ", "IS", "IBV", "KF"},
+                {"PHI", "N", "NBV", "KSUBTHRES", "RTHJC", "RTHCA"});
+        if (!(c.get("M", 0.5) < 1.0 && c.get("VJ", 0.8) > 0.0))
+            throw std::runtime_error("model " + c.name + ": needs M < 1, VJ > 0");
+        p["TYPE"] = c.type == "VDMOSP" ? -1.0 : 1.0;
+        if (!p.count("TNOM")) p["TNOM"] = tnomC_;
+        if (!osdi::findModule("vdmos_ng")) osdi::loadLibrary("vdmos.osdi");
+        auto& model = osdiModels_[toUpper(c.name) + " VDMOS"];
+        if (!model) model = std::make_shared<osdi::Model>(osdi::findModule("vdmos_ng"), c.name, p);
+        OsdiDevice o;
+        o.instanceName = m.instanceName;
+        o.modelName = c.name;
+        o.nodes = {m.drain, m.gate, m.source, m.thermal ? m.body : 0, m.thermal ? m.soiNodes[0] : 0};
+        if (m.thermal) o.params.push_back({"thermal", 1.0});
+        if (m.extra.mult != 1.0) { o.params.push_back({"m", m.extra.mult}); o.params.push_back({"mult_i", m.extra.mult}); }
+        // ngspice: DTEMP wins over TEMP when both are given; under self-heating TEMP sets the ambient
+        if (m.inst.dtemp != 0.0) o.params.push_back({"dtemp_i", m.inst.dtemp});
+        else if (!std::isnan(m.inst.temp)) o.params.push_back({"temp_i", m.inst.temp + 273.15});
+        o.model = model;
+        return o;
+    };
     auto resolveBlock = [&](TensorBlock& blk) {
         // BSIM4 (LEVEL=54 or 14) and BSIM3 (LEVEL=49 or 8) cards, ngspice's native models, run on the OSDI
         // bsim4va / bsim3_va (OpenVAF, loaded from TREESPICE_OSDI_PATH as bsim4.osdi / bsim3.osdi when needed).
@@ -1116,6 +1161,13 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         }
         std::vector<Mosfet> level1;
         for (auto& m : blk.mosfets) {
+            if (const ModelCard* v = mosCard(m); v->type == "VDMOSN" || v->type == "VDMOSP") {
+                sensList(blk, m.instanceName, *v);
+                blk.osdiDevices.push_back(vdmosOsdi(m, *sensed(v, m.instanceName)));
+                continue;
+            }
+            if (m.threeTerm || m.thermal)
+                throw std::runtime_error(m.instanceName + ": expected 4 nodes (d g s b); 3 nodes and THERMAL are for a VDMOS model");
             if (sens_ && !sens_->model && toUpper(m.instanceName) == sens_->instance)
                 (sens_->param == "W" ? m.w : m.l) = m.given[sens_->param] = sens_->value;
             const ModelCard* c = kind(mosCard(m), m.instanceName, {"NMOS", "PMOS"});
@@ -1765,22 +1817,23 @@ void SPICEParser::parseDiode(const std::vector<std::string>& tok, TensorBlock& b
 
 // M<name> <nd> <ng> <ns> <nb> <modelName> [W=] [L=] [AD=] [AS=] [PD=] [PS=] [NRD=] [NRS=] [NF=] [M=]
 void SPICEParser::parseMosfet(const std::vector<std::string>& tok, TensorBlock& blk) {
-    requireFields(tok, 6);
+    requireFields(tok, 5);
     Mosfet m;
     m.instanceName = tok[0];
     m.drain  = nodeIndex(tok[1]);
     m.gate   = nodeIndex(tok[2]);
     m.source = nodeIndex(tok[3]);
-    m.body   = nodeIndex(tok[4]);
     auto isModel = [&](const std::string& t) {  // a .model card, or a binned family NAME.0, NAME.1, ...
         const std::string mu = toUpper(t);
         const auto bin = modelNames_.lower_bound(mu + ".");
         return modelNames_.count(mu) || (bin != modelNames_.end() && bin->compare(0, mu.size() + 1, mu + ".") == 0);
     };
-    size_t mi = 5;  // the model name: after 4 nodes, or after up to 3 more (BSIM-SOI P, B, T)
+    size_t mi = 5;  // the model name: after 4 nodes, or after up to 3 more (BSIM-SOI P, B, T); a VDMOS has 3 (or 5)
+    m.threeTerm = isModel(tok[4]);
+    if (m.threeTerm) { mi = 4; m.body = 0; } else m.body = nodeIndex(tok[4]);
     while (mi < 8 && mi + 1 < tok.size() && !isModel(tok[mi])) ++mi;
-    if (!isModel(tok[mi]))
-        throw std::runtime_error(tok[0] + ": expected 4 nodes (d g s b), then a model name; '" + tok[5] +
+    if (mi >= tok.size() || !isModel(tok[mi]))
+        throw std::runtime_error(tok[0] + ": expected 4 nodes (d g s b), then a model name; '" + tok.back() +
                                  "' is not a .model card");
     for (size_t k = 5; k < mi; ++k) m.soiNodes.push_back(nodeIndex(tok[k]));
     m.modelName = tok[mi];
@@ -1793,6 +1846,7 @@ void SPICEParser::parseMosfet(const std::vector<std::string>& tok, TensorBlock& 
     for (size_t i = mi + 1; i < tok.size(); ++i) {
         std::string upper = toUpper(tok[i]);
         if (upper == "OFF" || upper == "IC") throw std::runtime_error(tok[0] + ": " + upper + " is not supported yet");
+        if (upper == "THERMAL") { m.thermal = true; continue; }
         if (i + 1 >= tok.size()) throw std::runtime_error(tok[0] + ": parameter " + upper + " has no value");
         const double s = scale_;
         if (upper == "W")        m.w = parseValue(tok[++i]) * s;
@@ -1967,12 +2021,25 @@ void SPICEParser::parseModelCard(const std::vector<std::string>& tok) {
     ModelCard card;
     card.name = tok[1];
     card.type = toUpper(tok[2]);
+    std::vector<std::string> t(tok.begin(), tok.begin() + 3);
+    if (card.type.rfind("VDMOS", 0) == 0) {
+        // ngspice inp_vdmos_model: PCHAN (or VDMOSP) makes it p-channel; the datasheet notes RON, VDS, QG and MFG
+        // (MFG a name) are dropped
+        bool p = card.type == "VDMOSP";
+        for (size_t i = 3; i < tok.size(); ++i) {
+            const std::string k = toUpper(tok[i]);
+            if (k == "PCHAN" || k == "NCHAN") { p = p || k == "PCHAN"; continue; }
+            if ((k == "RON" || k == "VDS" || k == "QG" || k == "MFG") && i + 1 < tok.size()) { ++i; continue; }
+            t.push_back(tok[i]);
+        }
+        card.type = p ? "VDMOSP" : "VDMOSN";
+    } else t = tok;
 
     // Parse optional parameters (key=value pairs flattened by tokenizer)
-    for (size_t i = 3; i + 1 < tok.size(); i += 2) {
-        std::string key = toUpper(tok[i]);
-        const std::string word = toUpper(tok[i + 1]);  // XSPICE booleans (inertial_delay=false)
-        double val = word == "TRUE" ? 1.0 : word == "FALSE" ? 0.0 : parseValue(tok[i + 1]);
+    for (size_t i = 3; i + 1 < t.size(); i += 2) {
+        std::string key = toUpper(t[i]);
+        const std::string word = toUpper(t[i + 1]);  // XSPICE booleans (inertial_delay=false)
+        double val = word == "TRUE" ? 1.0 : word == "FALSE" ? 0.0 : parseValue(t[i + 1]);
         card.params[key] = val;
 
         // Extract well-known fields

@@ -1,0 +1,7 @@
+* VDMOS (ngspice vdmos) output curves through reverse conduction: RD/RS/RG, LAMBDA, THETA, MTRIODE, subthreshold, body diode with RB
+VD d 0 DC 10
+VG g 0 DC 5
+M1 d g 0 IRF540
+.model IRF540 VDMOS(ron=44m qg=72n mfg=International_Rectifier Rg=3 Rd=10m Rs=5m Vto=4 Kp=25 lambda=0.01 theta=0.08 mtriode=1.2 ksubthres=0.12 subshift=0.05 Cgdmax=2n Cgdmin=50p Cgs=1.4n Cjo=1.5n Is=40p Rb=8m N=1.2 TT=100n)
+.dc VD -1.5 10 0.1 VG 3 6 0.5
+.end

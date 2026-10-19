@@ -1,0 +1,7 @@
+* VDMOS p-channel (pchan): transfer curves, M=3, body diode breakdown off (BV not given)
+VD d 0 DC -8
+VG g 0 DC -5
+M1 d g 0 p9540 M=3
+.model p9540 VDMOS(pchan Vto=-3.5 Kp=8 lambda=0.02 Rd=40m Rs=10m Rg=2 Is=10p N=1.1 Cjo=1n)
+.dc VG 0 -8 -0.1 VD -0.5 -8 -2.5
+.end
