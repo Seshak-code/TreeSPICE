@@ -109,7 +109,8 @@ struct Resistor {
 /*
  * Switch (S voltage-controlled, W current-controlled): a resistor of RON or ROFF with ngspice's
  * hysteresis. The state is decided from the control value of the Newton iterate against the
- * last accepted state (BlockState::swPrev): on above VT+VH, off below VT-VH, else unchanged.
+ * last accepted state (BlockState::swPrev): on above VT+VH, off below VT-VH, else unchanged
+ * (negative VH: CircuitSim::switchState).
  */
 struct Switch {
     std::string name;
@@ -225,7 +226,7 @@ struct VoltageSource {
     std::vector<double> pwl_t, pwl_v;
     double pwl_td = 0.0, pwl_r = -1.0;  // r < 0: no repeat
 
-    // EXP v1 v2 td1 tau1 td2 tau2 | SFFM vo va fc mdi fs | AM vo vmo vma fm fc td (ngspice order)
+    // EXP v1 v2 td1 tau1 td2 tau2 | SFFM vo va fc mdi fm td phasem phasec | AM vo vmo vma fm fc td (ngspice order)
     std::vector<double> wf;
 
     std::string expression;  // Symbolic override for DC/main value
@@ -320,10 +321,10 @@ inline double waveformValue(const Src& s, double dcValue, double t) {
         const double a = w[0] + (w[1] - w[0]) * (1.0 - std::exp(-(t - w[2]) / w[3]));
         return t <= w[4] ? a : a + (w[0] - w[1]) * (1.0 - std::exp(-(t - w[4]) / w[5]));
     }
-    if (s.type == "SFFM") {
+    if (s.type == "SFFM") {  // ngspice 47: 0 until TD, then VO + VA sin(2 pi FC t' + PHASEC + MDI sin(2 pi FM t' + PHASEM))
         const auto& w = s.wf;
-        const double kTwoPi = 6.283185307179586;
-        return w[0] + w[1] * std::sin(kTwoPi * w[2] * t + w[3] * std::sin(kTwoPi * w[4] * t));
+        const double kTwoPi = 6.283185307179586, tt = t - w[5], deg = kTwoPi / 360.0;
+        return tt <= 0.0 ? 0.0 : w[0] + w[1] * std::sin(kTwoPi * w[2] * tt + w[7] * deg + w[3] * std::sin(kTwoPi * w[4] * tt + w[6] * deg));
     }
     if (s.type == "AM") {
         const auto& w = s.wf;

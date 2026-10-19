@@ -1183,9 +1183,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (w) supported(c, {"IT", "IH", "RON", "ROFF"}); else supported(c, {"VT", "VH", "RON", "ROFF"});
             s.vt = c->get(w ? "IT" : "VT", 0.0); s.vh = c->get(w ? "IH" : "VH", 0.0);
             s.ron = c->get("RON", 1.0); s.roff = c->get("ROFF", 1e12);
-            // ponytail: ngspice also runs a negative hysteresis (it turns on at VT+VH and off at VT-VH); not modelled
-            if (!(s.vh >= 0.0 && s.ron > 0.0 && s.roff > 0.0))
-                throw std::runtime_error("model " + c->name + ": needs " + (w ? "IH" : "VH") + " >= 0 (negative is not supported yet) and RON, ROFF > 0");
+            if (!(s.ron > 0.0 && s.roff > 0.0)) throw std::runtime_error("model " + c->name + ": needs RON, ROFF > 0");
         }
         // Resistors (ngspice restemp): a model card gives the value from its sheet resistance and the
         // geometry, R = RSH (L - 2 SHORT) / (W - 2 NARROW), unless the instance gives it; TC1/TC2 (the
@@ -1378,7 +1376,8 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                           "IBV", "IB", "EG", "XTI", "TNOM", "TM1", "TM2", "TCV", "TBV1", "TTT1", "TTT2", "TRS", "TRS1", "TRS2",
                           "JSW", "ISW", "NS", "CJSW", "MJSW", "PHP", "VJSW", "IKF", "IK", "IKR", "IKP", "KF", "AF", "ISR", "NR",
                           "NBV", "NZ", "CTA", "CTC", "CTP", "TPB", "TVJ", "TPHP", "TLEVC", "TLEV", "CJP", "FCS", "GAP1", "GAP2",
-                          "JTUN", "JTUNSW", "NTUN", "XTITUN", "KEG", "AREA", "PJ"});
+                          "JTUN", "JTUNSW", "NTUN", "XTITUN", "KEG", "AREA", "PJ", "TREF",
+                          "FV_MAX", "BV_MAX", "ID_MAX", "TE_MAX", "PD_MAX"});  // SOA: ngspice's warnings only
             // Temperature selectors (probed on ngspice 47): TLEV 1 scales BV by (1 - TCV dT) where 0 subtracts TCV dT
             // (IS follows the same law under both); TLEV 2 also takes the band gap EG - GAP1 T^2 / (T + GAP2) for the
             // saturation currents (exp(EG(Tn)/(N Vt(Tn)) - EG(T)/(N Vt) + XTI/N ln(T/Tn))) and the junction potentials;
@@ -1410,7 +1409,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (!(k.m < 1.0 && k.mjsw < 1.0 && k.vj > 0.0 && k.fc < 1.0 && k.fcs < 1.0 && k.rs >= 0.0 && k.ibv > 0.0))
                 throw std::runtime_error("model " + c->name + ": needs M, MJSW < 1, VJ > 0, FC, FCS < 1, RS >= 0, IBV > 0");
             using namespace devtemp;
-            const double Tn = c->get("TNOM", tnomC_) + 273.15, T = instK(d.inst), dt = T - Tn;
+            const double Tn = first(c, {"TNOM", "TREF"}, tnomC_) + 273.15, T = instK(d.inst), dt = T - Tn;
             d.thermalVoltage_V_T_V = vt(T);
             k.m = std::min(k.m * poly(c->get("TM1", 0.0), c->get("TM2", 0.0), dt), 0.9);
             if (T != Tn) {
@@ -1686,10 +1685,18 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         {
             const double ts = result_.tranStep;
             auto edges = [&](auto& s) {
+                auto dflt = [](double& x, double v) { if (std::isnan(x)) x = v; };
                 if (s.type == "EXP") {
                     auto& w = s.wf;
-                    auto dflt = [](double& x, double v) { if (std::isnan(x)) x = v; };
-                    if (s.type == "EXP") { dflt(w[2], ts); dflt(w[3], ts); dflt(w[4], w[2] + ts); dflt(w[5], ts); }
+                    dflt(w[2], ts); dflt(w[3], ts); dflt(w[4], w[2] + ts); dflt(w[5], ts);
+                }
+                // SFFM: ngspice's TSTOP defaults, then the index held to [0, FC/FM]
+                // ponytail: with no .tran card (a transient requested through the API) FC / FM stay NaN, as EXP's
+                if (s.type == "SFFM") {
+                    auto& w = s.wf;
+                    if (result_.tranStop > 0.0) { dflt(w[2], 5.0 / result_.tranStop); dflt(w[4], 500.0 / result_.tranStop); }
+                    dflt(w[3], 90.0);
+                    if (!std::isnan(w[2]) && !std::isnan(w[4])) w[3] = std::clamp(w[3], 0.0, w[2] / w[4]);
                 }
                 if (s.type != "PULSE" || !(ts > 0.0)) return;
                 if (s.pulse_tr <= 0.0) s.pulse_tr = ts;
@@ -1905,23 +1912,20 @@ void SPICEParser::parseSourceSpec(const std::vector<std::string>& tok, Src& s, d
             // ngspice order. EXP's missing values are NaN until .tran is known (resolveBlock): TD1,
             // TAU1, TAU2 take TSTEP and TD2 TD1+TSTEP.
             // ponytail: with no .tran card (a transient requested through the API) they stay NaN.
-            const size_t lo = kw == "AM" ? 5 : kw == "SFFM" ? 5 : 2, hi = kw == "EXP" || kw == "AM" ? 6 : 5;
+            // SFFM (ngspice 47): VO VA [FC MDI FM TD PHASEM PHASEC]; FC, MDI, FM default 5/TSTOP, 90, 500/TSTOP (NaN until
+            // resolveBlock knows .tran; an FM of 0 is not given)
+            const size_t lo = kw == "AM" ? 5 : 2, hi = kw == "EXP" || kw == "AM" ? 6 : kw == "SFFM" ? 8 : 5;
             const double nan = std::nan("");
             s.wf = kw == "EXP" ? std::vector<double>{0, 0, nan, nan, nan, nan}
-                 : std::vector<double>(kw == "SFFM" ? 5 : 6, 0.0);
+                 : kw == "SFFM" ? std::vector<double>{0, 0, nan, nan, nan, 0, 0, 0}
+                 : std::vector<double>(6, 0.0);
             size_t n = 0;
             for (++i; i < tok.size() && n < hi && isValue(tok[i]); ++i, ++n) s.wf[n] = parseValue(tok[i]);
             if (n < lo) throw std::runtime_error(tok[0] + ": " + kw + " needs at least " + std::to_string(lo) + " values");
             if (i < tok.size()) throw std::runtime_error(tok[0] + ": " + kw + " takes at most " + std::to_string(hi) + " values");
             if (kw == "EXP")  // ngspice: a 0 TD1, TAU1, TD2 or TAU2 is "not given"
                 for (size_t k = 2; k < 6; ++k) if (s.wf[k] == 0.0) s.wf[k] = nan;
-            // ngspice limits the deviation to FC: the index is min(MDI, FC/FS). Its FC / FS defaults
-            // (1/TSTOP) did not match the documented sine, so they are not offered.
-            if (kw == "SFFM") {
-                if (!(s.wf[2] > 0.0 && s.wf[4] > 0.0 && s.wf[3] >= 0.0))
-                    throw std::runtime_error(tok[0] + ": SFFM needs FC > 0, MDI >= 0 and FS > 0 (defaults are not supported yet)");
-                s.wf[3] = std::min(s.wf[3], s.wf[2] / s.wf[4]);
-            }
+            if (kw == "SFFM" && s.wf[4] == 0.0) s.wf[4] = nan;
             if (!hasDC) { dc = kw == "EXP" ? s.wf[0] : 0.0; return; }  // ngspice's DC value of SFFM and AM is 0, not their t = 0 value
             break;
         } else {

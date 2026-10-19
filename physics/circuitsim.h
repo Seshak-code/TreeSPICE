@@ -696,11 +696,22 @@ public:
   // The first Newton iteration of a solve (or any stamp outside one): XSPICE code models' inputs are not limited
   bool cmFresh_ = true;
   bool swAcOff_ = false;  // small-signal matrix: ngspice's swacload stamps ROFF whatever the operating point
-  bool switchState(const SwitchRef &w, const std::array<int, 2> &c, const std::vector<double> &x) const {
-    if (swForce_) return *w.prev != 0;
+  // States as ngspice's: 0 off, 1 on, 2 off and 3 on inside the hysteresis band. A negative VH (VT + VH < VT - VH)
+  // inverts the band: entering it from on turns the switch off and from off turns it on, until it leaves the band.
+  static bool swIsOn(char s) { return s == 1 || s == 3; }
+  char switchState(const SwitchRef &w, const std::array<int, 2> &c, const std::vector<double> &x) const {
     auto V = [&](int g) { return g > 0 && g <= (int)x.size() ? x[g - 1] : 0.0; };
     const double ctrl = w.s->ctrlName.empty() ? V(c[0]) - V(c[1]) : V(w.n[2]);
-    return ctrl > w.s->vt + w.s->vh ? true : ctrl < w.s->vt - w.s->vh ? false : *w.on != 0;
+    const double vt = w.s->vt, vh = w.s->vh;
+    if (swForce_) {  // INITJCT / INITFIX: the accepted state, in or out of the band by the control
+      if (swIsOn(*w.prev)) return (vh >= 0.0 ? ctrl > vt + vh : ctrl > vt - vh) ? 1 : 3;
+      return (vh >= 0.0 ? ctrl < vt - vh : ctrl < vt + vh) ? 0 : 2;
+    }
+    if (vh > 0.0) return ctrl > vt + vh ? 1 : ctrl < vt - vh ? 0 : *w.on;
+    if (ctrl > vt - vh) return 1;
+    if (ctrl < vt + vh) return 0;
+    const char p = *w.prev;  // in the band: from the accepted state
+    return p == 2 || p == 3 ? p : p == 1 ? 2 : 3;
   }
   // The accepted state moves to the last stamped one (ngspice sets no breakpoint at a toggle)
   bool acceptSwitches(const TensorNetlist &nl) const {
@@ -1866,10 +1877,10 @@ public:
     });
     // 3.62 Switches: the stamped state's conductance; a state the iterate would change is not converged
     forEachSwitch(netlist, [&](const SwitchRef &w, const std::array<int, 2> &c) {
-        const double i = (getV(w.n[0]) - getV(w.n[1])) / (*w.on ? w.s->ron : w.s->roff);
+        const double i = (getV(w.n[0]) - getV(w.n[1])) / (swIsOn(*w.on) ? w.s->ron : w.s->roff);
         addRes(w.n[0], -i);
         addRes(w.n[1], i);
-        if (switchState(w, c, v_candidate) != (*w.on != 0)) addRes(w.n[0], 1.0);
+        if (swIsOn(switchState(w, c, v_candidate)) != swIsOn(*w.on)) addRes(w.n[0], 1.0);
     });
     // 3.65 OSDI devices: the stamped osdiCurrents(), internal-node rows included
     osdiAll(netlist, v_candidate, h, false, false);
@@ -2390,8 +2401,8 @@ public:
                                const BlockState::DeviceCharge *st) { stampMos1(n, mos1Params(m, gmin_), st, h, v_guess, offHold_ && m.off); });
     forEachJunction(netlist, [&](const Junction &j) { stampJunction(j, v_guess, h); });
     forEachSwitch(netlist, [&](const SwitchRef &w, const std::array<int, 2> &c) {
-      *w.on = !swAcOff_ && switchState(w, c, v_guess);
-      stampResistor(w.n[0], w.n[1], *w.on ? w.s->ron : w.s->roff, matrixBuilder);
+      *w.on = swAcOff_ ? 0 : switchState(w, c, v_guess);
+      stampResistor(w.n[0], w.n[1], swIsOn(*w.on) ? w.s->ron : w.s->roff, matrixBuilder);
     });
     osdiAll(netlist, v_guess, h, true, false);  // stamped in device order: the same sequence every iteration
     for (size_t i = 0; i < osdiRefs_.size(); ++i) stampOsdi(osdiRefs_[i], osdiI_[i], osdiJ_[i], v_guess);
