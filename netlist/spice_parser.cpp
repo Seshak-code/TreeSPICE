@@ -2436,13 +2436,12 @@ void SPICEParser::resolveXspice(int& at) {
         {"ADC_BRIDGE", Kind::ADC}, {"DAC_BRIDGE", Kind::DAC}};
     auto net = std::make_shared<xspice::Net>();
     std::map<std::string, int> dnode;  // upper-case name -> digital node
-    auto digital = [&](const std::string& n, const std::string& inst, bool nullOk, bool invOk) -> xspice::Port {
+    auto digital = [&](const std::string& n, const std::string& inst, bool nullOk) -> xspice::Port {
         if (toUpper(n) == "NULL") {
             if (!nullOk) throw std::runtime_error(inst + ": this port cannot be NULL");
             return {};
         }
-        const bool inv = n[0] == '~';
-        if (inv && !invOk) throw std::runtime_error(inst + ": an inverted (~) output is not supported yet");
+        const bool inv = n[0] == '~';  // inverted: an input reads, an output drives, the inverse
         const std::string name = inv ? n.substr(1) : n, key = toUpper(name);
         if (nodeMap_.count(key)) throw std::runtime_error(inst + ": node " + name + " is analog; a digital port needs an event node");
         auto [it, fresh] = dnode.emplace(key, (int)net->nodes.size());
@@ -2474,33 +2473,33 @@ void SPICEParser::resolveXspice(int& at) {
         switch (x.kind) {
         case Kind::BUF: case Kind::INV:
             need(2);
-            x.in = {digital(single(0), a.name, false, true)};
-            x.out = {digital(single(1), a.name, false, false)};
+            x.in = {digital(single(0), a.name, false)};
+            x.out = {digital(single(1), a.name, false)};
             allowed = {"RISE_DELAY", "FALL_DELAY", "INPUT_LOAD", "INERTIAL_DELAY"};
             break;
         case Kind::AND: case Kind::NAND: case Kind::OR: case Kind::NOR: case Kind::XOR: case Kind::XNOR:
             need(2);
-            for (const auto& n : a.groups[0]) x.in.push_back(digital(n, a.name, false, true));
+            for (const auto& n : a.groups[0]) x.in.push_back(digital(n, a.name, false));
             if (x.in.empty()) throw std::runtime_error(a.name + ": no inputs");
-            x.out = {digital(single(1), a.name, false, false)};
+            x.out = {digital(single(1), a.name, false)};
             allowed = {"RISE_DELAY", "FALL_DELAY", "INPUT_LOAD", "INERTIAL_DELAY"};
             break;
         case Kind::TRI:
             need(3);
-            x.in = {digital(single(0), a.name, false, true), digital(single(1), a.name, false, true)};
-            x.out = {digital(single(2), a.name, false, false)};
-            allowed = {"DELAY", "INPUT_LOAD", "ENABLE_LOAD"};
+            x.in = {digital(single(0), a.name, false), digital(single(1), a.name, false)};
+            x.out = {digital(single(2), a.name, false)};
+            allowed = {"DELAY", "INPUT_LOAD", "ENABLE_LOAD", "INERTIAL_DELAY"};
             break;
         case Kind::PULLUP: case Kind::PULLDOWN:
             need(1);
-            x.out = {digital(single(0), a.name, false, false)};
+            x.out = {digital(single(0), a.name, false)};
             allowed = {"LOAD"};
             break;
         case Kind::DFF:
             need(6);
-            x.in = {digital(single(0), a.name, false, true), digital(single(1), a.name, false, true),
-                    digital(single(2), a.name, true, true), digital(single(3), a.name, true, true)};
-            x.out = {digital(single(4), a.name, true, false), digital(single(5), a.name, true, false)};
+            x.in = {digital(single(0), a.name, false), digital(single(1), a.name, false),
+                    digital(single(2), a.name, true), digital(single(3), a.name, true)};
+            x.out = {digital(single(4), a.name, true), digital(single(5), a.name, true)};
             allowed = {"CLK_DELAY", "SET_DELAY", "RESET_DELAY", "IC", "RISE_DELAY", "FALL_DELAY", "DATA_LOAD", "CLK_LOAD", "SET_LOAD", "RESET_LOAD"};
             break;
         case Kind::ADC: case Kind::DAC: {
@@ -2512,7 +2511,7 @@ void SPICEParser::resolveXspice(int& at) {
             for (size_t i = 0; i < an.size(); ++i) {
                 if (dnode.count(toUpper(an[i]))) throw std::runtime_error(a.name + ": node " + an[i] + " is digital; this port is analog");
                 x.analog.push_back(nodeIndex(an[i]));
-                (adc ? x.out : x.in).push_back(digital(dn[i], a.name, false, !adc));
+                (adc ? x.out : x.in).push_back(digital(dn[i], a.name, false));
                 if (!adc) {  // the output: an ideal source to ground, ramped by the simulation (ngspice: a#branch)
                     VoltageSource v{};
                     v.name = toUpper(a.name) + "#" + std::to_string(i);
@@ -2529,7 +2528,9 @@ void SPICEParser::resolveXspice(int& at) {
         }
         for (const auto& [key, v] : c->params)
             if (!allowed.count(key)) throw std::runtime_error("model " + c->name + ": parameter " + key + " is not a " + c->type + " parameter");
-        if (c->get("INERTIAL_DELAY", 0.0) != 0.0) throw std::runtime_error("model " + c->name + ": inertial_delay is not supported yet");
+        x.inertial = c->get("INERTIAL_DELAY", 0.0) != 0.0;
+        if (x.inertial && x.kind == Kind::TRI)  // d_tristate's runs its state and strength as two inertial channels
+            throw std::runtime_error("model " + c->name + ": inertial_delay on a d_tristate is not supported yet");
         const double d = c->get("DELAY", 1e-9);  // d_tristate
         x.rise = x.kind == Kind::TRI ? d : c->get("RISE_DELAY", 1e-9);
         x.fall = x.kind == Kind::TRI ? d : c->get("FALL_DELAY", 1e-9);
@@ -2537,7 +2538,10 @@ void SPICEParser::resolveXspice(int& at) {
         const double ic = c->get("IC", 0.0);
         x.ic = ic == 1.0 ? xspice::L1 : ic == 0.0 ? xspice::L0 : xspice::LU;
         x.lo = c->get("IN_LOW", 0.1); x.hi = c->get("IN_HIGH", 0.9);
-        x.vlo = c->get("OUT_LOW", 0.0); x.vhi = c->get("OUT_HIGH", 1.0); x.vun = c->get("OUT_UNDEF", 0.5);
+        x.vlo = c->get("OUT_LOW", 0.0); x.vhi = c->get("OUT_HIGH", 1.0);
+        // dac_bridge: with out_low and out_high given and out_undef not, U is their mean
+        x.vun = c->params.count("OUT_LOW") && c->params.count("OUT_HIGH") && !c->params.count("OUT_UNDEF") ? (x.vlo + x.vhi) / 2.0
+                                                                                                         : c->get("OUT_UNDEF", 0.5);
         x.trise = c->get("T_RISE", 1e-9); x.tfall = c->get("T_FALL", 1e-9);
         if (!(x.hi > x.lo)) throw std::runtime_error("model " + c->name + ": in_high must be > in_low");
         if (x.kind == Kind::DAC && !(x.trise > 0.0 && x.tfall > 0.0 && x.vhi != x.vlo))

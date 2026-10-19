@@ -1,0 +1,21 @@
+* XSPICE inverted outputs (~out): a buffer, a NOR and a d_dff's Nout through ~, an adc_bridge's ~ output
+vin in_a 0 pulse(0 3 0.5n 0.1n 0.1n 2n 4n)
+vck ck_a 0 pulse(0 3 1n 0.1n 0.1n 1n 2n)
+a_adc [in_a ck_a] [d_in ~d_inb] adc_mod
+.model adc_mod adc_bridge(in_low=1.0 in_high=2.0)
+a_adc2 [ck_a] [d_ck] adc_mod
+a_buf d_in ~d_nbuf buf
+.model buf d_buffer(rise_delay=0.2n fall_delay=0.3n)
+a_nor [d_in d_ck] ~d_or nor
+.model nor d_nor(rise_delay=0.2n fall_delay=0.2n)
+a_ff d_in d_ck NULL NULL d_q ~d_qq ff
+.model ff d_dff(clk_delay=0.1n rise_delay=0.2n fall_delay=0.2n)
+a_dac [d_nbuf d_or d_q d_qq d_inb] [o1 o2 o3 o4 o5] dac_mod
+.model dac_mod dac_bridge(out_low=0 out_high=3.3 t_rise=0.1n t_fall=0.1n)
+.tran 0.05n 10n
+.control
+run
+print v(o1) v(o2) v(o3) v(o4) v(o5)
+eprint d_nbuf d_or d_q d_qq d_inb
+.endc
+.end
