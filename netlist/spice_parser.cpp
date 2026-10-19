@@ -1125,7 +1125,9 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 blk.osdiDevices.push_back(bsimOsdi(m, *c, level == 49.0 || level == 8.0 ? 3 : level == 10.0 || level == 58.0 ? 10 : 4));
                 continue;
             }
-            const int level = (int)c->get("LEVEL", 1.0);
+            // LEVEL 9 is ngspice's mos9: mos3 with its effective L and W required above 1 um (mos9temp)
+            // ponytail: mos9load also drops mos3load's argb == 0 guard on dldvd / dldem (a degenerate bias); level 3's applies
+            const int levelIn = (int)c->get("LEVEL", 1.0), level = levelIn == 9 ? 3 : levelIn;
             if (level >= 55 && level <= 57)
                 throw std::runtime_error("model " + c->name + ": LEVEL " + std::to_string(level) + " (B3SOI) is not supported yet; B4SOI is LEVEL 10/58");
             if (!m.soiNodes.empty()) throw std::runtime_error(m.instanceName + ": expected 4 nodes (d g s b) for a LEVEL " + std::to_string(level) + " model");
@@ -1193,8 +1195,10 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             k.cbd = c->get("CBD", 0.0); k.cbs = c->get("CBS", 0.0); k.cj = c->get("CJ", 0.0);
             k.cjsw = c->get("CJSW", 0.0); k.mj = c->get("MJ", 0.5); k.mjsw = c->get("MJSW", hi ? 0.33 : 0.5);  // mos2set / mos3set grade the sidewall 0.33, mos1set 0.5
             k.pb = c->get("PB", 0.8); k.fc = c->get("FC", 0.5);
-            if (!(m.l - 2.0 * k.ld + k.xl > 0.0 && m.w - 2.0 * k.wd + k.xw > 0.0))
-                throw std::runtime_error(m.instanceName + ": effective L (L - 2*LD + XL) and W (W - 2*WD + XW) must be > 0");
+            const double lmin = levelIn == 9 ? 1e-6 : 0.0;
+            if (!(m.l - 2.0 * k.ld + k.xl > lmin && m.w - 2.0 * k.wd + k.xw > lmin))
+                throw std::runtime_error(m.instanceName + ": effective L (L - 2*LD + XL) and W (W - 2*WD + XW) must be > " +
+                                         (levelIn == 9 ? std::string("1 um (LEVEL 9)") : std::string("0")));
             if (!(k.mj < 1.0 && k.mjsw < 1.0 && k.pb > 0.0 && k.fc < 1.0))
                 throw std::runtime_error("model " + c->name + ": needs MJ, MJSW < 1, PB > 0, FC < 1");
             // mos1temp: KP/T^1.5, PHI, VTO (via the flat-band voltage), IS and the junctions at the instance temperature
