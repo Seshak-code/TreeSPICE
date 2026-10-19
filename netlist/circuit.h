@@ -689,6 +689,7 @@ struct BJT {
     int emitter = -1;                          // E terminal
     int substrate = 0;                         // S terminal (ground when not given, as SPICE)
     int thermal = -1;                          // T terminal of a HICUM (LEVEL 8) device; -1: not given (internal)
+    double m = 1.0;                            // M, already in area; flicker noise is M KF (Ib/M)^AF (ngspice bjtnoise)
     bool off = false;                          // OFF, as Diode::off
     double ic[2] = {NAN, NAN};                 // IC=vbe,vce: the junctions' state at t = 0 under UIC (NaN: nodes)
     std::string modelName = "default";
@@ -753,7 +754,7 @@ struct JFET {
     int source = -1;                      // S terminal
     std::string modelName = "default";
     bool isNChannel = true;               // true=N-ch, false=P-ch
-    double m = 1.0;                       // parallel multiplier (scales beta)
+    double m = 1.0;                       // M, already in area; flicker noise is M KF (Id/M)^AF (ngspice jfetnoi)
     bool off = false;                     // OFF, as Diode::off
     double ic[2] = {NAN, NAN};            // IC=vds,vgs: the junctions' state at t = 0 under UIC (NaN: nodes)
     

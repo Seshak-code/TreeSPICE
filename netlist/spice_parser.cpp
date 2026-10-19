@@ -1473,7 +1473,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             const double T = ambientK_, Tn = c->get("TNOM", tnomC_) + 273.15, dT = T - Tn;
             j.thermalVoltage_V_T_V = devtemp::vt(T);
             j.isNChannel = (c->type == "NJF" || c->type == "NJFET");
-            j.beta   = c->get("BETA", 1e-4) * j.m * (c->params.count("BETATCE") ? std::pow(1.01, c->get("BETATCE", 0.0) * dT)
+            j.beta   = c->get("BETA", 1e-4) * (c->params.count("BETATCE") ? std::pow(1.01, c->get("BETATCE", 0.0) * dT)
                                                                                  : std::pow(T / Tn, c->get("BEX", 0.0)));
             j.Vto    = c->params.count("VTOTC") ? c->get("VTO", -2.0) + c->get("VTOTC", 0.0) * dT
                                                 : c->get("VTO", -2.0) - c->get("TCV", 0.0) * dT;
@@ -1892,6 +1892,8 @@ void SPICEParser::parseBJT(const std::vector<std::string>& tok, TensorBlock& blk
     if (modelIdx == 6) q.thermal = nodeIndex(tok[5]);
     q.modelName = tok[modelIdx];
     q.area = instanceArea(tok, modelIdx + 1, &q.inst, &q.off, q.ic, 2);
+    for (size_t i = modelIdx + 1; i + 1 < tok.size(); ++i)
+        if (toUpper(tok[i]) == "M") q.m = parseValue(tok[i + 1]);
     blk.bjts.push_back(q);
 }
 
@@ -1920,7 +1922,7 @@ void SPICEParser::parseSwitch(const std::vector<std::string>& tok, TensorBlock& 
 void SPICEParser::parseJFET(const std::vector<std::string>& tok, TensorBlock& blk) {
     requireFields(tok, 5);
     JFET j;
-    j.area = instanceArea(tok, 5, nullptr, &j.off, j.ic, 2);
+    j.area = instanceArea(tok, 5, nullptr, &j.off, j.ic, 2) * mult_;  // ngspice jfetload: M on every stamp, as AREA
     j.instanceName = tok[0];
     j.drain  = nodeIndex(tok[1]);
     j.gate   = nodeIndex(tok[2]);
