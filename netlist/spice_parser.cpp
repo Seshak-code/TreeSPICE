@@ -2262,7 +2262,7 @@ void SPICEParser::parseModelCard(const std::vector<std::string>& tok) {
     // Parse optional parameters (key=value pairs flattened by tokenizer)
     // the code models' string parameters (quotes optional, as ngspice)
     static const std::map<std::string, std::string> stringKeys = {
-        {"D_LUT", "TABLE_VALUES"}, {"D_SOURCE", "INPUT_FILE"}, {"D_STATE", "STATE_FILE"}, {"MULTI_INPUT_PWL", "MODEL"}};
+        {"D_LUT", "TABLE_VALUES"}, {"D_SOURCE", "INPUT_FILE"}, {"D_STATE", "STATE_FILE"}, {"MULTI_INPUT_PWL", "MODEL"}, {"FILESOURCE", "FILE"}, {"XFER", "FILE"}};
     for (size_t i = 3; i + 1 < t.size(); i += 2) {
         std::string key = toUpper(t[i]);
         const std::string& raw = t[i + 1];
@@ -2580,14 +2580,18 @@ void SPICEParser::parseXspice(const std::string& line, int lineNum) {
 
 // The A devices against their .model cards: ngspice 47's d_buffer ... d_dff, adc_bridge and dac_bridge
 // (parameters and defaults probed; see physics/xspice.h). A dac_bridge output becomes a voltage source.
+std::string SPICEParser::dataPath(const std::string& file) const {
+    const std::filesystem::path path(file);
+    if (path.is_relative() && !baseDir_.empty() && std::filesystem::is_regular_file(std::filesystem::path(baseDir_) / path))
+        return (std::filesystem::path(baseDir_) / path).string();
+    return file;
+}
+
 // ngspice d_source's vector file: rows "time state..." (one 12-state token per output, as 0s 1r Uz), lines starting
 // with * and blank lines skipped, tokens split at blanks = ( ) and commas. ngspice reports a bad file and holds the
 // outputs at U; here it is an error.
 void SPICEParser::readDigitalSource(::xspice::Inst& x, const std::string& file, const std::string& model) {
-    std::filesystem::path path(file);
-    if (path.is_relative() && !baseDir_.empty() && std::filesystem::is_regular_file(std::filesystem::path(baseDir_) / path))
-        path = std::filesystem::path(baseDir_) / path;
-    std::ifstream in(path);
+    std::ifstream in(dataPath(file));
     if (!in) throw std::runtime_error("model " + model + ": cannot open d_source input_file " + file);
     static const std::string states[12] = {"0s", "1s", "Us", "0r", "1r", "Ur", "0z", "1z", "Uz", "0u", "1u", "Uu"};
     std::string line;
@@ -2621,10 +2625,7 @@ void SPICEParser::readDigitalSource(::xspice::Inst& x, const std::string& file, 
 // then rows "in... -> next" for the same state; tokens and comments as d_source. ngspice falls back to row 0 for a
 // state it cannot find and stops at rows of one state split apart; both are errors here, as is a bad file.
 void SPICEParser::readDigitalState(::xspice::Inst& x, const std::string& file, const std::string& model) {
-    std::filesystem::path path(file);
-    if (path.is_relative() && !baseDir_.empty() && std::filesystem::is_regular_file(std::filesystem::path(baseDir_) / path))
-        path = std::filesystem::path(baseDir_) / path;
-    std::ifstream in(path);
+    std::ifstream in(dataPath(file));
     if (!in) throw std::runtime_error("model " + model + ": cannot open d_state state_file " + file);
     static const std::string states[12] = {"0s", "1s", "Us", "0r", "1r", "Ur", "0z", "1z", "Uz", "0u", "1u", "Uu"};
     const size_t ni = x.in.size() - 2, no = x.out.size();
@@ -2735,7 +2736,7 @@ void SPICEParser::resolveXspice(int& at) {
         const auto mc = modelCards_.find(toUpper(a.model));
         if (mc == modelCards_.end()) throw std::runtime_error(a.name + ": no .model card " + a.model);
         const ModelCard* c = &mc->second;
-        static const std::set<std::string> analogKinds = {"GAIN", "SUMMER", "MULT", "DIVIDE", "LIMIT", "CLIMIT", "PWL", "ASWITCH", "INT", "D_DT", "S_XFER", "SLEW", "HYST", "SINE", "TRIANGLE", "SQUARE", "ZENER", "MULTI_INPUT_PWL", "OTA", "ILIMIT", "ONESHOT", "POTENTIOMETER", "CAPACITORIC", "INDUCTORIC", "SIDIODE", "PSWITCH", "MEMRISTOR"};
+        static const std::set<std::string> analogKinds = {"GAIN", "SUMMER", "MULT", "DIVIDE", "LIMIT", "CLIMIT", "PWL", "ASWITCH", "INT", "D_DT", "S_XFER", "SLEW", "HYST", "SINE", "TRIANGLE", "SQUARE", "ZENER", "MULTI_INPUT_PWL", "OTA", "ILIMIT", "ONESHOT", "POTENTIOMETER", "CAPACITORIC", "INDUCTORIC", "SIDIODE", "PSWITCH", "MEMRISTOR", "FILESOURCE", "PWLTS", "XFER"};
         if (analogKinds.count(c->type)) { resolveXspiceAnalog(a, *c, analogNode); continue; }
         const auto k = kinds.find(c->type);
         if (k == kinds.end()) throw std::runtime_error(a.name + ": XSPICE model type " + c->type + " is not supported yet");
@@ -2988,6 +2989,9 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         {"ZENER", {AKind::ZENER, {{'b', "gd", false}}}},
         {"MULTI_INPUT_PWL", {AKind::MIPWL, {{'i', "vd", true}, {'o', "vd", false}}}},
         {"OTA", {AKind::OTA, {{'b', "gd", false}, {'b', "g", false}}}},
+        {"XFER", {AKind::XFER, {{'i', "v", false}, {'o', "v", false}}}},
+        {"PWLTS", {AKind::PWLTS, {{'o', "v", false}}}},
+        {"FILESOURCE", {AKind::FILESRC, {{'o', "v", true}}}},
         {"MEMRISTOR", {AKind::MEMRISTOR, {{'b', "gd", false}}}},
         {"PSWITCH", {AKind::PSWITCH, {{'b', "gd", false, "g gd"}, {'b', "gd", false}}}},
         {"SIDIODE", {AKind::SIDIODE, {{'b', "gd", false}}}},
@@ -3083,7 +3087,7 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
             if (m->fraction) { m->range *= m->hi - m->lo; m->fraction = false; }
         } else { m->upperDelta = num("UPPER_DELTA", 0.0); m->lowerDelta = num("LOWER_DELTA", 0.0); }
         break;
-    case AKind::PWL: {
+    case AKind::PWL: case AKind::PWLTS: {
         allowed.insert("X_ARRAY"); allowed.insert("Y_ARRAY");
         const auto xi = c.vectors.find("X_ARRAY"), yi = c.vectors.find("Y_ARRAY");
         if (xi == c.vectors.end() || yi == c.vectors.end() || xi->second.size() != yi->second.size() || xi->second.size() < 2)
@@ -3098,6 +3102,13 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         if (flag("LIMIT", false)) { m->y[0] = m->y[1]; m->y[n - 1] = m->y[n - 2]; }
         else { m->y[0] = 2 * m->y[1] - m->y[2]; m->y[n - 1] = 2 * m->y[n - 2] - m->y[n - 3]; }
         m->domain = num("INPUT_DOMAIN", 0.01); m->fraction = flag("FRACTION", true);
+        if (kind == AKind::PWLTS)  // ngspice cm_pwlts: breakpoints at each corner and either side of its smoothing (after t = 0)
+            for (size_t i = 1; i + 1 < n; ++i) {
+                const double dt = m->fraction ? std::min(m->x[i] - m->x[i - 1], m->x[i + 1] - m->x[i]) * m->domain : m->domain;
+                if (m->x[i] - dt <= 0.0) continue;
+                for (double b : {m->x[i] - dt, m->x[i], m->x[i] + dt}) m->bkpts.push_back(b);
+            }
+        std::sort(m->bkpts.begin(), m->bkpts.end());
         break;
     }
     case AKind::INT: case AKind::D_DT:
@@ -3186,6 +3197,76 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         const auto gi = std::find(gates.begin(), gates.end(), g);
         if (gi == gates.end()) throw std::runtime_error("model " + c.name + ": multi_input_pwl model " + g + " is not and, nand, or, nor");
         m->gate = static_cast<int>(gi - gates.begin());
+        break;
+    }
+    case AKind::XFER: {
+        // ngspice cm_xfer's table: span numbers per entry, the frequency [Hz] then a pair at offset (magnitude in dB
+        // and phase in degrees by default; r_i: real / imaginary; db false: magnitude; rad: phase in radians)
+        allowed.insert("TABLE");
+        if (c.strings.count("FILE") || c.params.count("FILE")) throw std::runtime_error("model " + c.name + ": xfer's Touchstone file is not supported yet");
+        const double spanD = num("SPAN", 3.0), offD = num("OFFSET", 1.0);
+        const bool ri = flag("R_I", false), db = flag("DB", true), rad = flag("RAD", false);
+        if (spanD != std::floor(spanD) || offD != std::floor(offD) || offD < 1.0 || spanD < offD + 2.0)
+            throw std::runtime_error("model " + c.name + ": xfer needs integer offset >= 1 and span >= offset + 2");
+        const size_t span = static_cast<size_t>(spanD), off = static_cast<size_t>(offD);
+        const auto ti = c.vectors.find("TABLE");
+        if (ti == c.vectors.end() || ti->second.empty() || ti->second.size() % span)
+            throw std::runtime_error("model " + c.name + ": xfer needs a table of whole entries (" + std::to_string(span) + " numbers each)");
+        const auto& tb = ti->second;
+        for (size_t i = 0; i < tb.size(); i += span) {
+            if (tb[i] < 0.0 || (i && tb[i] < tb[i - span])) throw std::runtime_error("model " + c.name + ": xfer frequencies must be >= 0 and not decrease");
+            double a = tb[i + off], b = tb[i + off + 1];
+            m->x.push_back(tb[i] * 2.0 * M_PI);
+            if (ri) { m->sx.push_back({a, b}); continue; }
+            if (db) a = std::pow(10.0, a / 20.0);
+            if (!rad) b *= 2.0 * M_PI / 360.0;
+            m->sx.push_back(std::polar(a, b));
+        }
+        break;
+    }
+    case AKind::FILESRC: {
+        // ngspice cm_filesource: rows "time value...", lines from * # ; skipped, values split at blanks and commas;
+        // times scaled, then offset (or each relative to the last); values scaled, then offset, per column.
+        // ngspice skips a bad time and keeps a short row; both are errors here.
+        allowed.insert("AMPLOFFSET"); allowed.insert("AMPLSCALE");
+        auto arr = [&](const char* k) {
+            if (c.vectors.count(k)) return c.vectors.at(k);
+            if (c.params.count(k)) return std::vector<double>{c.params.at(k)};
+            throw std::runtime_error("model " + c.name + ": filesource needs " + std::string(k == std::string("AMPLOFFSET") ? "amploffset" : "amplscale"));
+        };
+        const auto off = arr("AMPLOFFSET"), scale = arr("AMPLSCALE");
+        const double toff = num("TIMEOFFSET", 0.0), tscale = num("TIMESCALE", 1.0);
+        const bool rel = flag("TIMERELATIVE", false);
+        m->fraction = flag("AMPLSTEP", false);  // hold each row until the next
+        const size_t width = ports[0].size();
+        m->width = static_cast<int>(width);
+        const std::string file = c.strings.count("FILE") ? c.strings.at("FILE") : "filesource.txt";
+        std::ifstream in(dataPath(file));
+        if (!in) throw std::runtime_error("model " + c.name + ": cannot open filesource file " + file);
+        std::string line;
+        double tprev = toff;
+        for (int n = 1; std::getline(in, line); ++n) {
+            const size_t b = line.find_first_not_of(" \t\r");
+            if (b == std::string::npos || line[b] == '*' || line[b] == '#' || line[b] == ';') continue;
+            for (char& ch : line) if (ch == ',') ch = ' ';
+            std::istringstream ss(line);
+            std::vector<std::string> tok;
+            for (std::string w; ss >> w;) tok.push_back(w);
+            const std::string where = "model " + c.name + ": " + file + " line " + std::to_string(n) + ": ";
+            if (tok.size() < width + 1) throw std::runtime_error(where + "expected a time and " + std::to_string(width) + " values");
+            double t = parseValue(tok[0]) * tscale;
+            t = rel ? t + tprev : t + toff;
+            tprev = t;
+            if (!m->x.empty() && !(t > m->x.back())) throw std::runtime_error(where + "times must increase");
+            m->x.push_back(t);
+            for (size_t j = 0; j < width; ++j) {
+                double d = parseValue(tok[j + 1]);
+                if (j < scale.size()) d *= scale[j];
+                if (j < off.size()) d += off[j];
+                m->y.push_back(d);
+            }
+        }
+        if (m->x.size() < 2) throw std::runtime_error("model " + c.name + ": filesource file " + file + " needs 2 rows at least");
         break;
     }
     case AKind::MEMRISTOR:

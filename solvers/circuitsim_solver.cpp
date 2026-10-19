@@ -784,6 +784,11 @@ void CircuitSim::tranCorners(const TensorNetlist &netlist) {
   if (xsim_) corners.push_back([this](double x) { return xsim_->next(x); });  // digital events
   // XSPICE oscillators: the breakpoints their last accepted step set (cm_analog_set_temp_bkpt)
   forEachBehav(netlist, [&](const Behavioural &b, const BranchSlot &, int) {
+    if (b.cm && !b.cm->bkpts.empty())  // pwlts: its fixed breakpoints
+      corners.push_back([cm = b.cm](double x) {
+        const auto it = std::upper_bound(cm->bkpts.begin(), cm->bkpts.end(), x);
+        return it == cm->bkpts.end() ? std::numeric_limits<double>::infinity() : *it;
+      });
     // oneshot: its pulse's corners t1 .. t4 (cm_analog_set_perm_bkpt)
     if (!b.cm || !b.cmState || !(xspice::oscillator(b.cm->kind) || b.cm->kind == xspice::AKind::ONESHOT)) return;
     const size_t k0 = b.cm->kind == xspice::AKind::ONESHOT ? 0 : 5, k1 = b.cm->kind == xspice::AKind::ONESHOT ? 4 : SIZE_MAX;
@@ -808,6 +813,11 @@ bool CircuitSim::settleDigital(TensorNetlist &netlist, const std::vector<double>
 
 std::string CircuitSim::beginTransient(TensorNetlist &netlist, double step, bool uic, double stop) {
   if (!(step > 0.0)) return "Transient needs step > 0.";
+  std::string noTran;  // ngspice's xfer warns in a transient and gives its DC gain: an error here
+  forEachBehav(netlist, [&](const Behavioural &b, const BranchSlot &, int) {
+    if (b.cm && b.cm->kind == xspice::AKind::XFER) noTran = b.name + ": the xfer code model has no transient (AC and DC only)";
+  });
+  if (!noTran.empty()) return noTran;
   osdiFatal_.clear();
   osdiNonFinite_.clear();
   applyOptions(netlist.environment);

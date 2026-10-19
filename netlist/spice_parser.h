@@ -138,6 +138,7 @@ private:
     void parseOsdiDevice (const std::vector<std::string>& tok, TensorBlock& blk);
     void parseXspice     (const std::string& line, int lineNum);  // A<name> ports... model: resolved once the models are known
     void resolveXspice   (int& line);  // line: the A card an error refers to
+    std::string dataPath(const std::string& file) const;  // a code model's data file: the netlist's directory first
     void readDigitalSource(::xspice::Inst& x, const std::string& file, const std::string& model);  // d_source's vector file
     void readDigitalState(::xspice::Inst& x, const std::string& file, const std::string& model);   // d_state's state table
     void parseVCVS       (const std::vector<std::string>& tok, TensorBlock& blk);

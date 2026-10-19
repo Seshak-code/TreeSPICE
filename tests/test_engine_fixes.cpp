@@ -511,6 +511,11 @@ int main() {
             {".if (1)\nV1 1 0 DC 1\nR1 1 0 1k\n", ".if without .endif"},
             {".subckt rr a b r=1k\nR1 a b {r}\n.ends\nV1 1 0 DC 1\nX1 1 0 rr q=2\n", "has no parameter Q"},
         };
+        {  // ngspice's xfer warns in a transient and gives its DC gain: an error here
+            const auto t = run(mode, "* xfer tran\nV1 1 0 DC 1\na1 1 2 xf\n.model xf xfer(table=[0 0 0 1k -3 -45])\nR1 2 0 1k\n", 1e-6, 1e-5);
+            check(!t.converged && t.errorDetail.find("xfer code model has no transient") != std::string::npos,
+                  "explicit error 'xfer code model has no transient' (" + t.errorDetail + ")");
+        }
         for (const auto &[net, want] : bad) {
             r = run(mode, std::string("* bad\n") + net + ".op\n");
             check(!r.converged && r.errorDetail.find(want) != std::string::npos,

@@ -12,7 +12,7 @@
 
 namespace xspice {
 
-enum class AKind { GAIN, SUMMER, MULT, DIVIDE, LIMIT, CLIMIT, PWL, ASWITCH, INT, D_DT, S_XFER, SLEW, HYST, SINE, TRIANGLE, SQUARE, ZENER, MIPWL, OTA, ILIMIT, ONESHOT, POT, CAPIC, INDIC, SIDIODE, PSWITCH, MEMRISTOR };
+enum class AKind { GAIN, SUMMER, MULT, DIVIDE, LIMIT, CLIMIT, PWL, ASWITCH, INT, D_DT, S_XFER, SLEW, HYST, SINE, TRIANGLE, SQUARE, ZENER, MIPWL, OTA, ILIMIT, ONESHOT, POT, CAPIC, INDIC, SIDIODE, PSWITCH, MEMRISTOR, FILESRC, PWLTS, XFER };
 
 // A code model's state at the last accepted time point (int: its limited output; d_dt: its input; s_xfer:
 // its integrator chain, lowest first; slew: input and output; hyst: its leg, -1 before the first evaluation)
@@ -23,7 +23,7 @@ inline bool stateful(AKind k) {
            k == AKind::CAPIC || k == AKind::INDIC || k == AKind::MEMRISTOR || oscillator(k);
 }
 inline bool acFunction(AKind k) {  // AC gain not the DC slope
-    return k == AKind::INT || k == AKind::D_DT || k == AKind::S_XFER || k == AKind::CAPIC || k == AKind::INDIC;
+    return k == AKind::INT || k == AKind::D_DT || k == AKind::S_XFER || k == AKind::CAPIC || k == AKind::INDIC || k == AKind::XFER;
 }
 
 struct AnalogModel {
@@ -37,8 +37,9 @@ struct AnalogModel {
     // limit / climit: limits, smoothing range (absolute after `fraction`), climit's deltas
     double lo = 0.0, hi = 1.0, range = 1e-6, upperDelta = 0.0, lowerDelta = 0.0;
     bool fraction = false;
-    // pwl: the breakpoints with ngspice's extra pair at either end, smoothing domain
-    std::vector<double> x, y;
+    // pwl, pwlts (its input is time): the breakpoints with ngspice's extra pair at either end, smoothing domain;
+    // pwlts' transient breakpoints (each corner and either side of its smoothing)
+    std::vector<double> x, y, bkpts;
     double domain = 0.01;
     // aswitch, pswitch (+ its control port's resistance rCntl) (ota: gain = gm, rOff = rout, rOn = rin)
     double rCntl = 1e12;
@@ -58,6 +59,10 @@ struct AnalogModel {
     // oneshot (x, y: cntl_array, pw_array; outLow / outHigh, tRise / tFall): clk_trig, its edge, the delays, retrig
     double trig = 0.5, rDelay = 1e-9, fDelay = 1e-9;
     bool posEdge = true, retrig = false, clearNull = false, cntlNull = false;
+    // xfer: x its angular frequencies (increasing), sx its complex gains there
+    std::vector<std::complex<double>> sx;
+    // filesource: x the times, y the values row by row (width columns); fraction: amplstep
+    int width = 1;
     // memristor: rmin, rmax, alpha, beta, vt (rinit: outIc)
     double rMin = 10.0, rMax = 1e4, mAlpha = 0.0, mBeta = 1.0, mVt = 0.0;
     // potentiometer: its r0-wiper and wiper-r1 resistances (rOn, rOff)
@@ -357,6 +362,22 @@ T analogOut(const AnalogModel &m, const std::vector<T> &in, const AnalogState *s
         // integrates its voltage / l), by cm_analog_integrate's backward Euler; at the operating point they hold ic
         // (the inductor a current source, not a short)
         return h > 0.0 && st ? st->out + h * in[0] / m.gain : T(m.outIc);
+    case AKind::XFER: return m.sx[0].real() * in[0];  // ngspice cm_xfer: DC is the first entry's real part
+    case AKind::FILESRC: {
+        // ngspice cm_filesource at time t, output m.out: between rows linear (amplstep: the earlier row's, up to and
+        // including the later row's time); before the first row the second row's value; past the last row 0 (ngspice
+        // reads past its data there, zero in practice). No inputs, no partials: AC 0.
+        const auto &x = m.x;
+        const size_t n = x.size(), w = m.width, j = m.out;
+        if (t > x[n - 1]) return T(0.0);
+        size_t k = 0;
+        while (k + 2 < n && t > x[k + 1]) ++k;
+        const double y0 = m.y[k * w + j], y1 = m.y[(k + 1) * w + j];
+        if (t < x[k]) return T(y1);
+        if (m.fraction) return T(y0);
+        const double a = (x[k + 1] - t) / (x[k + 1] - x[k]);
+        return T(a * y0 + (1.0 - a) * y1);
+    }
     case AKind::MEMRISTOR: return in[0] / memristorR(m, in[0], st ? st->out : m.outIc, h);
     case AKind::PSWITCH: {
         // ngspice cm_pswitch: refs control, out; outputs the control port's current (in / r_cntl_in), the switch's
@@ -498,10 +519,10 @@ T analogOut(const AnalogModel &m, const std::vector<T> &in, const AnalogState *s
         }
         return m.out == 0 ? -ipos : m.out == 1 ? -ineg : -iout;
     }
-    case AKind::PWL: {
+    case AKind::PWL: case AKind::PWLTS: {
         const auto &x = m.x, &y = m.y;
         const size_t n = x.size();
-        const T &v = in[0];
+        const T v = m.kind == AKind::PWLTS ? T(t) : in[0];
         if (v <= (x[0] + x[1]) / 2.0) return y[0] + (v - x[0]) * ((y[1] - y[0]) / (x[1] - x[0]));
         if (v >= (x[n - 2] + x[n - 1]) / 2.0) return y[n - 1] + (v - x[n - 1]) * ((y[n - 1] - y[n - 2]) / (x[n - 1] - x[n - 2]));
         for (size_t i = 1; i + 1 < n; ++i) {
@@ -538,6 +559,19 @@ inline std::complex<double> analogAcGain(const AnalogModel &m, double w) {
         for (size_t i = 0; i < m.den.size(); ++i, p *= s) { if (i < m.num.size()) nn += m.num[i] * p; dd += m.den[i] * p; }
         // less the slope the operating point's Jacobian already holds (a numerator of the denominator's order)
         return m.gain * nn / dd - (m.num.size() == m.den.size() ? m.gain * m.num.back() : 0.0);
+    }
+    if (m.kind == AKind::XFER) {  // the table interpolated linearly in w (held past its ends), less the DC slope
+        const auto &f = m.x;
+        const size_t n = f.size();
+        std::complex<double> g;
+        if (w <= f[0]) g = m.sx[0];
+        else if (w >= f[n - 1]) g = m.sx[n - 1];
+        else {
+            size_t i = 1;
+            while (!(f[i] > w)) ++i;
+            g = m.sx[i - 1] + (w - f[i - 1]) / (f[i] - f[i - 1]) * (m.sx[i] - m.sx[i - 1]);
+        }
+        return g - m.sx[0].real();
     }
     // capacitoric: an impedance 1/(jwc) on its current; inductoric: an admittance 1/(jwl) on its voltage. ngspice 47
     // gives inductoric jwl, which is no inductor's (a shunt one then acts as a series one): a deliberate divergence
