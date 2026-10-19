@@ -862,6 +862,9 @@ struct TensorBlock {
     std::vector<CCVS> currentControlledVoltageSources;
     std::vector<CCCS> currentControlledCurrentSources;
     std::vector<Behavioural> behavioural;
+    // U lines (uniform distributed RC), expanded into R / C (or diode) ladders once the .model cards are read
+    struct URC { std::string name, model; int n1 = 0, n2 = 0, n3 = 0; double length = 0.0; int lumps = 0; int line = 0; };
+    std::vector<URC> urcs;
     
     // Semiconductors
     std::vector<Diode> diodes;

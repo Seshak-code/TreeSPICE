@@ -675,6 +675,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 case 'Q': parseBJT(tok, blk);         break;
                 case 'J': parseJFET(tok, blk);        break;
                 case 'Z': parseJFET(tok, blk); blk.jfets.back().mes = true; break;  // MESFET: d g s model
+                case 'U': parseURC(tok, blk); break;
                 case 'S': case 'W': parseSwitch(tok, blk); break;
                 case 'N': parseOsdiDevice(tok, blk);  break;
                 case 'A':
@@ -875,7 +876,91 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (top) result_.netlist.numGlobalNodes = std::max(result_.netlist.numGlobalNodes, q.thermal);
         }
     };
+    auto supported = [&](const ModelCard* c, const std::vector<const char*>& used) {
+        for (const auto& [k, v] : c->params) {
+            bool ok = v == 0.0 || (k == "LEVEL" && v == 1.0) || (k == "AF" && c->get("KF", 0.0) == 0.0);
+            for (const char* u : used) ok = ok || k == u;
+            if (!ok) throw std::runtime_error("model " + c->name + ": parameter " + k + " is not supported yet");
+        }
+    };
+    // Magnitudes (>= 0) and scales (> 0): a negative value is a sign error, never a
+    // model; it used to be simulated silently (VAF = -5 put 18 V on a 3 V supply).
+    auto bounded = [&](const ModelCard* c, std::initializer_list<const char*> nonNeg,
+                       std::initializer_list<const char*> pos) {
+        for (const char* k : nonNeg)
+            if (c->params.count(k) && !(c->params.at(k) >= 0.0))
+                throw std::runtime_error("model " + c->name + ": " + k + " must be >= 0");
+        for (const char* k : pos)
+            if (c->params.count(k) && !(c->params.at(k) > 0.0))
+                throw std::runtime_error("model " + c->name + ": " + k + " must be > 0");
+    };
+    // U lines (ngspice urcsetup): two R ladders, from either end to the middle, each section's resistance and
+    // capacitance (to n3) growing by K; with ISPERL, diodes (IS, CJO, RS per section) in place of the capacitors
+    auto urcExpand = [&](TensorBlock& blk, bool top) {
+        for (const auto& u : blk.urcs) {
+            const ModelCard* c = card(u.model);
+            if (c->type != "URC") throw std::runtime_error(u.name + ": model " + c->name + " is " + c->type + ", not a URC model");
+            supported(c, {"K", "FMAX", "RPERL", "CPERL", "ISPERL", "RSPERL"});
+            bounded(c, {"CPERL", "ISPERL", "RSPERL"}, {"FMAX", "RPERL"});
+            const double p = c->get("K", 1.5);
+            if (!(p > 1.0)) throw std::runtime_error("model " + c->name + ": K must be > 1");
+            const double r0 = u.length * c->get("RPERL", 1000.0), c0 = u.length * c->get("CPERL", 1e-12), i0 = u.length * c->get("ISPERL", 0.0);
+            int lumps = u.lumps;
+            if (lumps == 0) {
+                const double wnorm = c->get("FMAX", 1e9) * r0 * c0 * 2.0 * M_PI;
+                lumps = wnorm < 35.0 ? 3 : (int)std::max(3.0, std::log(wnorm * ((p - 1) / p) * ((p - 1) / p)) / std::log(p));
+            }
+            const double r1 = r0 * (p - 1) / (2 * std::pow(p, lumps) - 2);
+            const double c1 = c0 * (p - 1) / (std::pow(p, lumps - 1) * (p + 1) - 2);
+            const double i1 = i0 * (p - 1) / (std::pow(p, lumps - 1) * (p + 1) - 2);
+            const bool diodes = c->params.count("ISPERL") > 0;
+            std::string dmodel;
+            if (diodes) {
+                dmodel = toUpper(u.name) + "#DIODEMOD";
+                ModelCard d;
+                d.name = dmodel; d.type = "D";
+                d.params = {{"CJO", c1}, {"RS", u.length * lumps * c->get("RSPERL", 0.0)}, {"IS", i1}};
+                modelCards_[dmodel] = d;
+            }
+            auto node = [&]() {
+                const int n = top ? std::max(nextNode_++, result_.netlist.numGlobalNodes + 1) : ++blk.numInternalNodes;
+                if (top) result_.netlist.numGlobalNodes = std::max(result_.netlist.numGlobalNodes, n);
+                return n;
+            };
+            auto shunt = [&](const std::string& tag, int n, double prop) {
+                if (diodes) {
+                    Diode d;
+                    d.instanceName = u.name + "#" + tag; d.anode = n; d.cathode = u.n3; d.modelName = dmodel;
+                    d.area = prop; d.areaGiven = true;
+                    blk.diodes.push_back(d);
+                } else {
+                    Capacitor cap{};
+                    cap.name = u.name + "#" + tag; cap.nodePlate1 = n; cap.nodePlate2 = u.n3; cap.capacitance_farads = prop * c1;
+                    blk.capacitors.push_back(cap);
+                }
+            };
+            auto res = [&](const std::string& tag, int a, int b, double r) {
+                Resistor x{};
+                x.name = u.name + "#" + tag; x.nodeTerminal1 = a; x.nodeTerminal2 = b; x.resistance_ohms = r;
+                blk.resistors.push_back(x);
+            };
+            int lowl = u.n1, hir = u.n2;
+            double prop = 1.0;
+            for (int i = 1; i <= lumps; ++i) {
+                const int hil = node(), lowr = i == lumps ? hil : node();
+                res("RLO" + std::to_string(i), lowl, lowr, prop * r1);
+                res("RHI" + std::to_string(i), hil, hir, prop * r1);
+                shunt("LO" + std::to_string(i), lowr, prop);
+                if (i != lumps) shunt("HI" + std::to_string(i), hil, prop);
+                prop *= p;
+                lowl = lowr; hir = hil;
+            }
+        }
+        blk.urcs.clear();
+    };
     try {
+        urcExpand(result_.netlist.globalBlock, true);
+        for (auto& [name, blk] : result_.netlist.blockDefinitions) urcExpand(blk, false);
         mosSeries(result_.netlist.globalBlock, true);
         jfetSeries(result_.netlist.globalBlock, true);
         bjtThermal(result_.netlist.globalBlock, true);
@@ -924,24 +1009,6 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     // A parameter the engine does not model is an error, never silently dropped.
     // 0 is accepted for any key (SPICE: off / infinite), AF only without KF.
     // ponytail: a 0 that is not "off" (e.g. TNOM=0) is still accepted.
-    auto supported = [&](const ModelCard* c, const std::vector<const char*>& used) {
-        for (const auto& [k, v] : c->params) {
-            bool ok = v == 0.0 || (k == "LEVEL" && v == 1.0) || (k == "AF" && c->get("KF", 0.0) == 0.0);
-            for (const char* u : used) ok = ok || k == u;
-            if (!ok) throw std::runtime_error("model " + c->name + ": parameter " + k + " is not supported yet");
-        }
-    };
-    // Magnitudes (>= 0) and scales (> 0): a negative value is a sign error, never a
-    // model; it used to be simulated silently (VAF = -5 put 18 V on a 3 V supply).
-    auto bounded = [&](const ModelCard* c, std::initializer_list<const char*> nonNeg,
-                       std::initializer_list<const char*> pos) {
-        for (const char* k : nonNeg)
-            if (c->params.count(k) && !(c->params.at(k) >= 0.0))
-                throw std::runtime_error("model " + c->name + ": " + k + " must be >= 0");
-        for (const char* k : pos)
-            if (c->params.count(k) && !(c->params.at(k) > 0.0))
-                throw std::runtime_error("model " + c->name + ": " + k + " must be > 0");
-    };
     // A top-level device's real parameters for .sens: what its card gives, plus instance W/L as given
     auto sensList = [&](const TensorBlock& blk, const std::string& inst, const ModelCard& c,
                         const std::map<std::string, double>* given = nullptr) {
@@ -2035,6 +2102,25 @@ void SPICEParser::parseJFET(const std::vector<std::string>& tok, TensorBlock& bl
     j.modelName = tok[4];
     j.m = mult_;
     blk.jfets.push_back(j);
+}
+
+// U<name> <n1> <n2> <n3> <model> L=<length> [N=<lumps>]   (uniform distributed RC line, ngspice urc)
+void SPICEParser::parseURC(const std::vector<std::string>& tok, TensorBlock& blk) {
+    requireFields(tok, 5);
+    TensorBlock::URC u;
+    u.name = tok[0];
+    u.n1 = nodeIndex(tok[1]); u.n2 = nodeIndex(tok[2]); u.n3 = nodeIndex(tok[3]);
+    u.model = tok[4];
+    for (size_t i = 5; i < tok.size(); ++i) {
+        const std::string k = toUpper(tok[i]);
+        if (i + 1 >= tok.size()) throw std::runtime_error(tok[0] + ": parameter " + k + " has no value");
+        if (k == "L") u.length = parseValue(tok[++i]) * scale_;
+        else if (k == "N") u.lumps = (int)std::lround(parseValue(tok[++i]));
+        else throw std::runtime_error(tok[0] + ": parameter " + k + " is not supported yet");
+    }
+    if (!(u.length > 0.0)) throw std::runtime_error(tok[0] + ": L must be > 0");
+    if (u.lumps < 0 || u.lumps == 1 || u.lumps == 2) throw std::runtime_error(tok[0] + ": N must be at least 3");
+    blk.urcs.push_back(u);
 }
 
 // N<name> <terminal>... <modelName> [<param> <value>]...   (OSDI device, as ngspice)

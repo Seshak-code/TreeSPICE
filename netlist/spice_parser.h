@@ -132,6 +132,7 @@ private:
     void parseBJT        (const std::vector<std::string>& tok, TensorBlock& blk);
     void parseSwitch     (const std::vector<std::string>& tok, TensorBlock& blk);
     void parseJFET       (const std::vector<std::string>& tok, TensorBlock& blk);
+    void parseURC        (const std::vector<std::string>& tok, TensorBlock& blk);
     void parseOsdiDevice (const std::vector<std::string>& tok, TensorBlock& blk);
     void parseXspice     (const std::string& line, int lineNum);  // A<name> ports... model: resolved once the models are known
     void resolveXspice   (int& line);  // line: the A card an error refers to
