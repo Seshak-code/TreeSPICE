@@ -173,6 +173,7 @@ struct Mos1Params {
     P nfs = 0.0, nsub = 0.0, xd = 0.0, xj = 0.0, ld = 0.0, delta = 0.0;  // NFS [1/cm^2], NSUB given, depletion width coefficient
     P ucrit = 1e4, uexp = 0.0, vmax = 0.0, neff = 1.0;                    // level 2
     P eta = 0.0, theta = 0.0, kappa = 0.2, alpha = 0.0;                   // level 3
+    P kv = 2.0, nv = 0.5, nc = 1.0, gamma1 = 0.0, sigma = 0.0, lambda1 = 0.0;  // level 6 (beta: KC * W / Leff * M)
 };
 
 
@@ -372,6 +373,19 @@ inline T mos1_von(T vbx, const Mos1Params<P>& p)
     return p.polarity * p.vto + p.gamma * (sarg - sphi);
 }
 
+// Level 6 (ngspice mos6load, Sakurai-Newton n-th power law) in the type domain, source/drain already exchanged
+template <typename T, typename P>
+inline MosChannel<T> mos6_channel(T lvgs, T lvbs, T lvds, const Mos1Params<P>& p)
+{
+    using std::exp; using std::log;
+    const T von = mos1_von(lvbs, p) - p.gamma1 * lvbs - p.sigma * lvds, vgon = lvgs - von;
+    if (vgon <= P(0.0)) return {T(0.0), von, T(0.0)};
+    const T lv = log(vgon), vdsat = p.kv * exp(lv * p.nv);
+    T id = p.beta * exp(lv * p.nc) * (1.0 + (p.lambda - p.lambda1 * lvbs) * lvds);  // saturation
+    if (vdsat > lvds) { const T vdst = lvds / vdsat; id = id * (2.0 - vdst) * vdst; }  // linear
+    return {id, von, vdsat};
+}
+
 template <typename T> struct Mos1Currents { T d, s, b; };
 
 template <typename T, typename P>
@@ -391,6 +405,7 @@ inline Mos1Currents<T> mos1_currents(T vd, T vg, T vs, T vb, const Mos1Params<P>
     T cdrain(0.0);
     if (p.level == 2) cdrain = mos2_channel(normal ? vgs : vgd, normal ? vbs : vbd, vdsm, p).id;
     else if (p.level == 3) cdrain = mos3_channel(normal ? vgs : vgd, normal ? vbs : vbd, vdsm, p).id;
+    else if (p.level == 6) cdrain = mos6_channel(normal ? vgs : vgd, normal ? vbs : vbd, vdsm, p).id;
     else if (vgst > P(0.0)) {
         const T betap = p.beta * (1.0 + p.lambda * vdsm);
         cdrain = vgst <= vdsm ? 0.5 * betap * vgst * vgst                // saturation
@@ -460,7 +475,8 @@ inline Mos1Charges<T> mos1_charges(T vd, T vg, T vs, T vb, const Mos1Params<doub
     if (vdsat < 0.0) vdsat = T(0.0);
     if (p.level != 1) {
         const T vdsm = normal ? vgs - vgd : vgd - vgs, lg = normal ? vgs : vgd, lb = normal ? vbs : vbd;
-        const auto ch = p.level == 2 ? mos2_channel(lg, lb, vdsm, p) : mos3_channel(lg, lb, vdsm, p);
+        const auto ch = p.level == 2 ? mos2_channel(lg, lb, vdsm, p) : p.level == 3 ? mos3_channel(lg, lb, vdsm, p)
+                                                                     : mos6_channel(lg, lb, vdsm, p);
         von = ch.von; vdsat = ch.vdsat;
     }
     const auto h = normal ? mos1_meyer(vgs, vgd, von, vdsat, p.phi, p.cox)

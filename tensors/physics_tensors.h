@@ -47,10 +47,11 @@ inline Mos1Params<double> mos1Params(const Mosfet& m, double gmin = PhysicsConst
     p.czbs = (c.cbs > 0.0 ? c.cbs : c.cj * m.geo.as) * M; p.czbssw = c.cjsw * m.geo.ps * M;
     p.mj = c.mj; p.mjsw = c.mjsw; p.pb = c.pb; p.fc = c.fc;
     if (c.level > 1) {
-        p.level = c.level; p.vbi = c.vbi; p.leff = leff; p.weff = weff; p.coxf = 3.9 * 8.854214871e-12 / c.tox; p.mu = c.mu;
+        p.level = c.level; p.vbi = c.vbi; p.leff = leff; p.weff = weff; p.coxf = c.tox > 0.0 ? 3.9 * 8.854214871e-12 / c.tox : 0.0; p.mu = c.mu;
         p.nfs = c.nfs; p.nsub = c.nsub; p.xd = c.xd; p.xj = c.xj; p.ld = c.ld; p.delta = c.delta;
         p.ucrit = c.ucrit; p.uexp = c.uexp; p.vmax = c.vmax; p.neff = c.neff;
         p.eta = c.eta; p.theta = c.theta; p.kappa = c.kappa; p.alpha = c.alpha;
+        p.kv = c.kv; p.nv = c.nv; p.nc = c.nc; p.gamma1 = c.gamma1; p.sigma = c.sigma; p.lambda1 = c.lambda1;
     }
     p.caps = p.cox > 0.0 || p.cgso > 0.0 || p.cgdo > 0.0 || p.cgbo > 0.0 ||
              p.czbd > 0.0 || p.czbdsw > 0.0 || p.czbs > 0.0 || p.czbssw > 0.0;

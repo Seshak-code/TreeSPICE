@@ -1133,7 +1133,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (!m.soiNodes.empty()) throw std::runtime_error(m.instanceName + ": expected 4 nodes (d g s b) for a LEVEL " + std::to_string(level) + " model");
             if (!m.osdiParams.empty()) throw std::runtime_error(m.instanceName + ": parameter " + m.osdiParams.begin()->first + " is not supported yet");
             const bool hi = level == 2 || level == 3;  // native levels 2 and 3 (mos2*.c, mos3*.c)
-            if (level != 1 && !hi) throw std::runtime_error("model " + c->name + ": LEVEL " + std::to_string(level) + " is not supported yet");
+            if (level != 1 && level != 6 && !hi) throw std::runtime_error("model " + c->name + ": LEVEL " + std::to_string(level) + " is not supported yet");
             if (m.extra.nf != 1) throw std::runtime_error(m.instanceName + ": NF is not supported yet (level " + std::to_string(level) + ")");
             // RD, RS and RSH became series resistors in mosSeries(); JSSW is no MOS1 parameter in ngspice
             // (it warns and ignores it), so it stays an error rather than a silently dropped one.
@@ -1144,7 +1144,11 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 for (const char* x : level == 2 ? std::vector<const char*>{"LAMBDA", "UCRIT", "UEXP", "NEFF"}
                                                 : std::vector<const char*>{"ETA", "THETA", "KAPPA", "XL", "WD", "XW"}) used.push_back(x);
                 supported(c, used);
-            } else
+            } else if (level == 6)  // mos6*.c; ngspice reads NVTH and PS but no equation uses them (mos6load)
+                supported(c, {"LEVEL", "VTO", "VT0", "KV", "NV", "KC", "NC", "NVTH", "PS", "GAMMA", "GAMMA1", "SIGMA", "PHI",
+                              "LAMBDA", "LAMBDA0", "LAMBDA1", "RD", "RS", "CBD", "CBS", "IS", "PB", "CGSO", "CGDO", "CGBO",
+                              "RSH", "CJ", "MJ", "CJSW", "MJSW", "JS", "LD", "TOX", "U0", "UO", "FC", "TPG", "NSUB", "NSS", "TNOM"});
+            else
             supported(c, {"KP", "VTO", "LAMBDA", "GAMMA", "PHI", "IS", "LD", "TOX", "UO", "U0",
                           "CGSO", "CGDO", "CGBO", "CBD", "CBS", "CJ", "MJ", "CJSW", "MJSW", "PB", "FC",
                           "RD", "RS", "RSH", "JS", "NSUB", "KF", "AF", "TNOM"});
@@ -1156,12 +1160,17 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             auto& k = m.card;
             k.resolved = true;
             k.pmos = c->type == "PMOS";
-            k.level = hi ? level : 1;
+            k.level = hi || level == 6 ? level : 1;
             k.tox = c->get("TOX", hi ? 1e-7 : 0.0);  // mos2set / mos3set: 100 nm unless given
             // No KP with TOX: KP = UO[cm^2/Vs] * COX (ngspice mos1temp)
             k.kp = c->get("KP", k.tox > 0.0 ? c->get("UO", c->get("U0", 600.0)) * 1e-4 * 3.9 * 8.854214871e-12 / k.tox
                                             : 2e-5);
-            k.vto = c->get("VTO", 0.0); k.lambda = c->get("LAMBDA", 0.0); k.gamma = c->get("GAMMA", 0.0);
+            if (level == 6) {  // mos6set / mos6temp: KC (in kp) from U0 and TOX unless given, LAMBDA0 over LAMBDA
+                k.kp = c->get("KC", k.tox > 0.0 ? 0.5 * c->get("UO", c->get("U0", 600.0)) * 1e-4 * 3.9 * 8.854214871e-12 / k.tox : 5e-5);
+                k.kv = c->get("KV", 2.0); k.nv = c->get("NV", 0.5); k.nc = c->get("NC", 1.0);
+                k.gamma1 = c->get("GAMMA1", 0.0); k.sigma = c->get("SIGMA", 0.0); k.lambda1 = c->get("LAMBDA1", 0.0);
+            }
+            k.vto = first(c, {"VTO", "VT0"}, 0.0); k.lambda = first(c, {"LAMBDA0", "LAMBDA"}, 0.0); k.gamma = c->get("GAMMA", 0.0);
             k.phi = c->get("PHI", 0.6); k.is = c->get("IS", 1e-14); k.ld = c->get("LD", 0.0);
             k.js = c->get("JS", 0.0); k.kf = c->get("KF", 0.0); k.af = c->get("AF", 1.0);
             if (k.kf != 0.0 && !(k.tox > 0.0)) throw std::runtime_error("model " + c->name + ": KF needs TOX (flicker noise divides by the oxide capacitance)");
@@ -1184,7 +1193,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 if (!c->params.count("PHI")) k.phi = std::max(0.1, 2.0 * vt * std::log(nsub / ni));
                 if (!c->params.count("GAMMA"))
                     k.gamma = std::sqrt(2.0 * 11.7 * 8.854214871e-12 * PhysicsConstants::Q_ELECTRON * nsub) / cox;
-                if (!c->params.count("VTO")) {
+                if (!c->params.count("VTO") && !c->params.count("VT0")) {
                     const double tpg = c->get("TPG", 1.0), fermis = type * 0.5 * k.phi, fermig = type * tpg * 0.5 * eg;
                     const double wkfngs = (tpg != 0.0 ? 3.25 + 0.5 * eg - fermig : 3.2) - (3.25 + 0.5 * eg + fermis);
                     k.vto = wkfngs - c->get("NSS", 0.0) * 1e4 * PhysicsConstants::Q_ELECTRON / cox + type * (k.gamma * std::sqrt(k.phi) + k.phi);

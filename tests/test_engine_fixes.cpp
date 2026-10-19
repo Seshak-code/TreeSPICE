@@ -346,6 +346,22 @@ int main() {
                   near(r.extended.noise.inoise[0], 2 * expect, 2e-6 * expect) &&
                   near(r.extended.noise.onoiseTotal, expect, 1e-6 * expect),  // white: total over 1 Hz
               "noise: 1k/1k divider gives sqrt(4kT*500) out, x2 input-referred, white total");
+        // MOS LEVEL 6: ngspice's mos6 has no AC load (its .ac sees no device), so the oracle is the DC slope, which
+        // run_diff holds to ngspice (x_mos6_*): the 10 Hz gain equals the central difference of v(3) over VG
+        const auto mos6 = [](double vg, const char* an) {
+            return "* mos6 cs\nVDD 1 0 DC 5\nVG 2 0 DC " + std::to_string(vg) + " AC 1\nRD 1 3 10k\nM1 3 2 0 0 NM W=20u L=2u m=2\n"
+                   ".model NM NMOS(LEVEL=6 VTO=0.8 KV=2 NV=0.7 KC=2e-5 NC=1.3 GAMMA=0.5 PHI=0.65 TOX=50n LAMBDA=0.02 SIGMA=0.01 "
+                   "CGSO=4e-10 CGDO=4e-10 CJ=3e-4)\n" + std::string(an);
+        };
+        req.source.payload = mos6(1.3, ".ac lin 1 10 10\n");
+        r = engine->createSession()->runAC(req, cb);
+        const double h = 1e-4, slope = (V(run(mode, mos6(1.3 + h, "")), 3) - V(run(mode, mos6(1.3 - h, "")), 3)) / (2 * h);
+        ok = r.converged && r.waveformPoints.size() == 1;
+        check(ok && near(r.waveformPoints[0].nodeVoltages[2], slope, 1e-6 * std::abs(slope)) && std::abs(slope) > 1.0,
+              "MOS LEVEL 6: 10 Hz AC gain equals the DC slope dv(3)/dVG");
+        req.source.payload = mos6(1.3, ".noise v(3) VG lin 1 10 10\n");
+        r = engine->createSession()->runNoise(req, cb);
+        check(!r.converged && r.errorDetail.find("no noise model") != std::string::npos, "MOS LEVEL 6 .noise is an error");
     }
 
     // No node gmin: a node with no DC path is not silently 0 (the contraction

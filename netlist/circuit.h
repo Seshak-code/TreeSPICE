@@ -668,6 +668,7 @@ struct Mosfet {
         int level = 1;
         double vbi = 0.0, mu = 0.0, nfs = 0.0, nsub = 0.0, xd = 0.0, xj = 0.0, delta = 0.0, wd = 0.0, xl = 0.0, xw = 0.0;
         double ucrit = 1e4, uexp = 0.0, vmax = 0.0, neff = 1.0, eta = 0.0, theta = 0.0, kappa = 0.2, alpha = 0.0;
+        double kv = 2.0, nv = 0.5, nc = 1.0, gamma1 = 0.0, sigma = 0.0, lambda1 = 0.0;  // level 6 (kp holds KC)
     } card;
     InstTemp inst;  // card is held at the instance temperature (resolved by the parser)
 

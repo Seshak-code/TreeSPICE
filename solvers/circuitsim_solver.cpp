@@ -1222,6 +1222,8 @@ CircuitSim::NoiseResult CircuitSim::solveNoise(TensorNetlist &netlist, const std
     for (const auto &sw : blk.switches)  // thermal noise of the conductance the small-signal matrix holds (ROFF)
       gens.push_back({sl.map(sw.nodePos), sl.map(sw.nodeNeg), kT4 / sw.roff});
     for (const auto &m : blk.mosfets) {
+      // ngspice's mos6 has no noise routine: a LEVEL 6 MOSFET would be silently noiseless there, so it fails here
+      if (m.card.level == 6) { r.error = m.instanceName + ": MOS LEVEL 6 has no noise model"; return r; }
       const int d = sl.map(m.drain), g = sl.map(m.gate), s = sl.map(m.source), b = sl.map(m.body);
       // channel gm = dI_drain/dV_gate (the bulk junctions do not see the gate)
       const double gm = mos1_currents(Dual<double>(V(d)), Dual<double>(V(g), 1.0), Dual<double>(V(s)),
