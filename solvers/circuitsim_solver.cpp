@@ -821,7 +821,8 @@ std::string CircuitSim::beginTransient(TensorNetlist &netlist, double step, bool
   if (uic) {
     for (const auto &[n, v] : netlist.nodeICs)
       if (n > 0 && n <= netlist.numGlobalNodes) x0[n - 1] = v;
-    if (xsim_) settleDigital(netlist, x0);
+    try { if (xsim_) settleDigital(netlist, x0); }
+    catch (const std::exception &e) { return e.what(); }  // a code model's runtime error (d_osc out of its table)
   } else {
     // DC bias. SPICE3 forces .ic nodes during it through 1e10 S to the value
     // (Norton: 1e-10 ohm to ground plus v*1e10 A in). UIC skips it, which an
@@ -844,7 +845,8 @@ std::string CircuitSim::beginTransient(TensorNetlist &netlist, double step, bool
         return "DC bias failed." + (dc.stats.error_detail.empty() ? "" : " " + dc.stats.error_detail);
       x0 = lastSolution_;
       x0.resize(nTot, 0.0);
-      if (!xsim_ || !settleDigital(netlist, x0)) break;
+      try { if (!xsim_ || !settleDigital(netlist, x0)) break; }
+      catch (const std::exception &e) { return e.what(); }
       if (!netlist.nodeICs.empty())
         for (size_t i = 0; i < netlist.globalBlock.voltageSources.size(); ++i)
           forced.globalBlock.voltageSources[i].voltage_V = netlist.globalBlock.voltageSources[i].voltage_V;
@@ -883,6 +885,9 @@ std::string CircuitSim::beginTransient(TensorNetlist &netlist, double step, bool
 std::string CircuitSim::advanceTo(TensorNetlist &netlist, double stop,
                                   const std::function<bool(const SolverStep &)> &onPoint) {
   auto &[step, dtMin, endTol, hMax, h, t, landedOnCorner, tinySteps, accepted, corners] = tran_;
+  // A corner (or digital event) this close counts as reached, as ngspice's CKTminBreak (5e-5 maxStep): an adc_bridge
+  // crossing and an event a delay after an earlier one landed 5e-19 s apart, a step below stepTransient's floor.
+  const double minBreak = std::max(endTol, 5e-5 * hMax);
   while (stop - t > endTol) {
     const bool endClip = stop - t < h;
     double hTry = std::min(h, stop - t);
@@ -908,7 +913,7 @@ std::string CircuitSim::advanceTo(TensorNetlist &netlist, double stop,
     }
     bool toCorner = false;
     for (const auto &next : corners)
-      if (next(t + endTol) - t <= hTry) { hTry = next(t + endTol) - t; toCorner = true; }
+      if (next(t + minBreak) - t <= hTry) { hTry = next(t + minBreak) - t; toCorner = true; }
     // The second step is backward Euler too (ngspice stays at order 1 until LTE allows 2): the
     // first step's i history is the start inrush, and a trapezoid step on it rings +-dI forever
     // (OSDI devices at a UIC start, +-0.1 A on i(vdd)); BE stores the relaxed current instead.
@@ -960,7 +965,9 @@ std::string CircuitSim::advanceTo(TensorNetlist &netlist, double stop,
     if (lteHold_ > 0) --lteHold_;
     if (xsim_) {  // the digital events up to t, the adc_bridges at t; a dac_bridge ramp starts at its event
       auto v = [&](int n) { return n > 0 && n <= (int)s.nodeVoltages.size() ? s.nodeVoltages[n - 1] : 0.0; };
-      const auto ramps = xsim_->advance(t, endTol, v);
+      std::vector<xspice::Sim::Ramp> ramps;
+      try { ramps = xsim_->advance(t, minBreak, v); }
+      catch (const std::exception &e) { return e.what(); }
       for (const auto &r : ramps) {
         auto &src = netlist.globalBlock.voltageSources[r.vsrc];
         const double now = waveformValue(src, src.voltage_V, r.t);
@@ -977,7 +984,7 @@ std::string CircuitSim::advanceTo(TensorNetlist &netlist, double stop,
     if (landedOnCorner) {
       lteHold_ = 3;
       double gap = std::numeric_limits<double>::infinity();
-      for (const auto &next : corners) gap = std::min(gap, next(t + endTol) - t);
+      for (const auto &next : corners) gap = std::min(gap, next(t + minBreak) - t);
       h = std::min(h, 0.1 * std::min(intended, gap));
     }
   }

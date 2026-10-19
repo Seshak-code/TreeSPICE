@@ -552,7 +552,7 @@ public:
                                BlockState::DeviceCharge *next = nullptr) const {
       const auto dc = mos1_currents(x[0], x[1], x[2], x[3], p);
       std::array<T, 4> I{dc.d, T(0.0), dc.s, dc.b};
-      if (!p.caps || !st || !(h > 1e-15) || !integrator) return I;
+      if (!p.caps || !st || !(h > 0.0) || !integrator) return I;
       const auto c = mos1_charges(x[0], x[1], x[2], x[3], p, st->v[0], st->q, st->half);
       if constexpr (std::is_same_v<T, double>)
           if (next) {  // shift the voltage history (next may alias st)
@@ -721,7 +721,7 @@ public:
   mutable std::string osdiNonFinite_;
   double ptranGmin_ = 0.0;  // node-to-ground gmin while solveDC runs its transient OP  // the last non-finite OSDI evaluation: reported if the analysis fails
   template <class S> double sourceValue(const S &s, double dc, double h, double time) const {
-    return srcFact_ * (h > 1e-15 ? waveformValue(s, dc, time) : tranOpSources_ ? tranOpValue(s, dc) : dc);
+    return srcFact_ * (h > 0.0 ? waveformValue(s, dc, time) : tranOpSources_ ? tranOpValue(s, dc) : dc);
   }
 
   // OSDI devices (compiled Verilog-A: BSIM4, BSIM-CMG, ...). An instance's local
@@ -813,7 +813,7 @@ public:
     const size_t L = r.n.size();
     std::vector<double> x(L), I(L);
     for (size_t k = 0; k < L; ++k) x[k] = r.n[k] > 0 && r.n[k] <= (int)v.size() ? v[r.n[k] - 1] : 0.0;
-    const bool tran = h > 1e-15 && integrator;
+    const bool tran = h > 0.0 && integrator;
     osdi::Instance &in = *r.in;
     const uint32_t flags = tran ? osdi::ANALYSIS_TRAN : osdi::ANALYSIS_DC | osdi::ANALYSIS_STATIC;
     // Device bypass (ngspice's, voltage criterion): a device whose local voltages moved
@@ -986,7 +986,7 @@ public:
       }
       res(0, 4, p.rc); res(1, 5, rbb); res(2, 6, p.re);
       double arg3 = 1.0, hist = 0.0;  // excess phase: the filter of this step (ngspice bjtload)
-      if (p.td > 0.0 && h > 1e-15 && j.st) {
+      if (p.td > 0.0 && h > 0.0 && j.st) {
         const double a2 = 3.0 * h / p.td, a1 = a2 * h / p.td, denom = 1.0 + a1 + a2, r = j.st->hPrev > 0.0 ? h / j.st->hPrev : 1.0;
         arg3 = a1 / denom;
         hist = (j.st->xf[0] * (1.0 + r + a2) - j.st->xf[1] * r) / denom;
@@ -994,7 +994,7 @@ public:
       const auto e = bjt_gp(shifted(T(type * (x[5] - x[6])), sh, 0), shifted(T(type * (x[5] - x[4])), sh, 1),
                             T(type * (x[1] - x[4])), T(type * j.subSign * (x[3] - x[j.sub])), p, arg3, hist);
       if constexpr (std::is_same_v<T, double>)
-        if (next && p.td > 0.0 && h > 1e-15 && j.st) {  // next may alias st
+        if (next && p.td > 0.0 && h > 0.0 && j.st) {  // next may alias st
           next->xf[1] = j.st->xf[0]; next->xf[0] = e.xf; next->hPrev = h;
         }
       I[4] += type * e.cc; I[5] += type * e.cb; I[6] -= type * (e.cc + e.cb);
@@ -1002,7 +1002,7 @@ public:
       from = bjtFrom; to = bjtTo;
     }
     const BlockState::DeviceCharge *st = j.st;
-    if (!st || !(h > 1e-15) || !integrator || !junctionHasCharge(j)) return I;
+    if (!st || !(h > 0.0) || !integrator || !junctionHasCharge(j)) return I;
     T v[5], q[5];
     const int K = junctionCharges(j, x, v, q, sh);
     if constexpr (std::is_same_v<T, double>)
@@ -1527,7 +1527,7 @@ public:
     auto add = [&](int r, int c, double v) {
       if (r >= 0 && c >= 0) { S.r.push_back(r); S.c.push_back(c); S.v.push_back(v); }
     };
-    const bool tran = h > 1e-15 && integrator;
+    const bool tran = h > 0.0 && integrator;
     const IntegrationType type = tran ? integrator->getType() : IntegrationType::GEAR_1_EULER;
     // Inductor companion: v = coef * sum_j L_aj * i_j + history (per method)
     const double coef = !tran ? 0.0 : type == IntegrationType::TRAPEZOIDAL ? 2.0 / h
@@ -1836,7 +1836,7 @@ public:
     
     // 4. Capacitors (Transient Only)
     // If h > 0, we are in transient and must audit the displacement current
-    if (h > 1e-15 && integrator) {
+    if (h > 0.0 && integrator) {
       for (size_t i = 0; i < netlist.globalBlock.capacitors.size(); ++i) {
         const auto &c = netlist.globalBlock.capacitors[i];
         const auto &hist = netlist.globalState.capacitorState[i];
@@ -1906,7 +1906,7 @@ public:
         }
 
         // Capacitors (Transient)
-        if (h > 1e-15 && integrator) {
+        if (h > 0.0 && integrator) {
           const auto &instState = netlist.instanceStates[instanceIdx];
           for (size_t c_idx = 0; c_idx < block.capacitors.size(); ++c_idx) {
             const auto &c = block.capacitors[c_idx];
@@ -2302,12 +2302,12 @@ public:
         // SoA Pathway (Flattened). tensorizeNetlist() stores DC values only, so
         // in transient re-evaluate every source at `time`, walking blocks in the
         // same order tensorizeNetlist() flattens them (global, then instances).
-        if (h > 1e-15 || tranOpSources_) {
+        if (h > 0.0 || tranOpSources_) {
             size_t ki = 0;
             auto refresh = [&](const TensorBlock &blk) {
                 for (const auto &i : blk.currentSources)
                     if (ki < soaBlock.currentSources.currents.size())
-                        soaBlock.currentSources.currents[ki++] = h > 1e-15 ? waveformValue(i, i.current_A, time) : tranOpValue(i, i.current_A);
+                        soaBlock.currentSources.currents[ki++] = h > 0.0 ? waveformValue(i, i.current_A, time) : tranOpValue(i, i.current_A);
             };
             refresh(netlist.globalBlock);
             for (const auto &inst : netlist.instances) {
