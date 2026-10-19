@@ -11,7 +11,7 @@
 
 namespace xspice {
 
-enum class AKind { GAIN, SUMMER, MULT, DIVIDE, LIMIT, CLIMIT, PWL, ASWITCH, INT, D_DT, S_XFER, SLEW, HYST, SINE, TRIANGLE, SQUARE };
+enum class AKind { GAIN, SUMMER, MULT, DIVIDE, LIMIT, CLIMIT, PWL, ASWITCH, INT, D_DT, S_XFER, SLEW, HYST, SINE, TRIANGLE, SQUARE, ZENER };
 
 // A code model's state at the last accepted time point (int: its limited output; d_dt: its input; s_xfer:
 // its integrator chain, lowest first; slew: input and output; hyst: its leg, -1 before the first evaluation)
@@ -45,6 +45,8 @@ struct AnalogModel {
     // sine / triangle / square: frequency against control (pwl), output levels, duty cycle, square's edges
     std::vector<double> cntl{0.0, 1.0}, freq{1e3, 2e3};
     double outLow = -1.0, outHigh = 1.0, duty = 0.5, tRise = 1e-9, tFall = 1e-9;
+    // zener
+    double vBreak = 0.0, iBreak = 2e-2, rBreak = 1.0, iRev = 1e-6, iSat = 1e-12, nFwd = 1.0;
     // s_xfer: numerator and denominator in ascending powers of s (frequency-scaled, the top denominator
     // coefficient divided out into gain), the integrators' initial values (lowest first)
     std::vector<double> num, den, intIc;
@@ -185,6 +187,26 @@ std::pair<T, int> hystOut(const AnalogModel &m, const T &in, int leg) {
 template <typename T>
 T analogOut(const AnalogModel &m, const std::vector<T> &in, const AnalogState *st = nullptr, double h = 0.0, double t = 0.0) {
     switch (m.kind) {
+    case AKind::ZENER: {  // ngspice cm_zener: forward diode, a linear region, the reverse breakdown, a leakage
+        using std::exp; using std::log;
+        const T &v = in[0];
+        const double vt = 0.026, nvt = m.nFwd * vt, v12 = nvt * std::log(nvt / 10.0), k = 1.0 / m.iBreak / m.rBreak;
+        const double v23 = -m.vBreak + std::log(10.0 / m.iSat / m.rBreak) / k;
+        T i;
+        if (v23 < v12) {  // three segments
+            const double i0 = 1e-6, v0 = -m.vBreak + 1.0 / k * std::log(m.iBreak / i0);
+            const double ord = m.iSat * (std::exp(v12 / nvt) - 1.0), a = m.iSat / 10.0, b = ord - a * v12;
+            const double c = a * v23 + b + i0 * std::exp(-k * (v23 - v0));
+            if (v >= v12) i = m.iSat * (exp(v / nvt) - 1.0);
+            else if (v >= v23) i = a * v + b;
+            else i = -i0 * exp(-k * (v - v0)) + c;
+        } else {          // two segments
+            const double i0 = m.iBreak / (std::exp(k * m.vBreak) - 1.0), s1 = m.iSat / nvt, s2 = i0 * k;
+            if (v >= 0.0) { i = m.iSat * (exp(v / nvt) - 1.0); if (s2 - s1 > 0.0) i = i + (s2 - s1) * v; }
+            else { i = -i0 * (exp(-k * v) - 1.0); if (s1 - s2 > 0.0) i = i + (s1 - s2) * v; }
+        }
+        return i + m.iRev / m.vBreak * v;
+    }
     case AKind::SINE: case AKind::TRIANGLE: case AKind::SQUARE: {
         auto value = [](const T &v) { if constexpr (std::is_same_v<T, double>) return v; else return v.val; };
         return T(oscStep(m, value(in[0]), st ? *st : AnalogState{}, t, h).out);

@@ -36,12 +36,12 @@ inline Val resolve(Val a, Val b) {
     return {c[0] == '0' ? L0 : c[0] == '1' ? L1 : LU, c[1] == 's' ? SS : c[1] == 'r' ? SR : c[1] == 'z' ? SZ : SU};
 }
 
-enum class Kind { BUF, INV, AND, NAND, OR, NOR, XOR, XNOR, TRI, PULLUP, PULLDOWN, DFF, ADC, DAC };
+enum class Kind { BUF, INV, AND, NAND, OR, NOR, XOR, XNOR, TRI, PULLUP, PULLDOWN, DFF, JKFF, TFF, SRFF, ADC, DAC };
 struct Port { int node = -1; bool inv = false; };  // a digital node, or -1 (NULL)
 struct Inst {
     std::string name;
     Kind kind = Kind::BUF;
-    std::vector<Port> in, out;  // digital; DFF in: data clk set reset, out: out Nout; tristate in: in enable
+    std::vector<Port> in, out;  // digital; flip-flops in: data (JK, SR: two) clk set reset, out: out Nout; tristate in: in enable
     std::vector<int> analog;    // adc_bridge inputs / dac_bridge outputs (global analog nodes)
     std::vector<int> vsrc;      // dac_bridge: its voltage source per output (global block)
     double rise = 1e-9, fall = 1e-9;              // output delays (tristate: its delay, both)
@@ -81,7 +81,7 @@ public:
             st_[i].prev.assign(x.in.size(), LU);
             st_[i].when.assign(x.out.size(), -1.0);
             st_[i].iprev.assign(x.out.size(), LU);
-            st_[i].adc.assign(x.kind == Kind::ADC ? x.analog.size() : 0, LU);
+            st_[i].adc.assign(x.kind == Kind::ADC ? x.analog.size() : 0, static_cast<Lv>(3));  // none yet: the first sample posts, U too
             st_[i].dac.assign(x.kind == Kind::DAC ? x.analog.size() : 0, -1e300);
         }
     }
@@ -275,27 +275,34 @@ private:
         case Kind::TRI: out(0, in[0], in[1] == L1 ? SS : in[1] == L0 ? SZ : SU, 0); break;
         case Kind::PULLUP: out(0, L1, SR, 0); break;
         case Kind::PULLDOWN: out(0, L0, SR, 0); break;
-        case Kind::DFF: {
-            // ngspice d_dff: a set or reset change acts at once; otherwise a rising clock (to 1 from 0 or U)
-            // with set and reset at 0 takes the data. Set and reset at U keep an output that agrees.
-            const Lv d = in[0], clk = in[1], set = in[2], rst = in[3];
+        case Kind::DFF: case Kind::JKFF: case Kind::TFF: case Kind::SRFF: {
+            // ngspice d_dff / d_jkff / d_tff / d_srff (one set / reset logic): a set or reset change acts at once;
+            // otherwise a rising clock (to 1 from 0 or U) with neither set nor reset at 1 takes the next state.
+            // Set and reset at U keep an output that agrees.
+            const size_t nd = x.kind == Kind::JKFF || x.kind == Kind::SRFF ? 2 : 1;
+            const Lv clk = in[nd], set = in[nd + 1], rst = in[nd + 2];
             const Lv old = s.last[0].v;
             Lv q = old;
             double base = 0.0;
             if (dc) q = set == L1 && rst == L1 ? LU : set == L1 ? L1 : rst == L1 ? L0 : x.ic;
-            else if (set != s.prev[2]) {
+            else if (set != s.prev[nd + 1]) {
                 base = x.set;
                 if (set == L1) q = rst == L1 ? LU : L1;
                 else if (set == L0) q = rst == L1 ? L0 : old;
                 else q = rst == L1 ? (old == L0 ? L0 : LU) : (old == L1 ? L1 : LU);
-            } else if (rst != s.prev[3]) {
+            } else if (rst != s.prev[nd + 2]) {
                 base = x.reset;
                 if (rst == L1) q = set == L1 ? LU : L0;
                 else if (rst == L0) q = set == L1 ? L1 : old;
                 else q = set == L1 ? (old == L1 ? L1 : LU) : (old == L0 ? L0 : LU);
-            } else if (clk != s.prev[1] && clk == L1 && set == L0 && rst == L0) {
+            } else if (clk != s.prev[nd] && clk == L1 && set != L1 && rst != L1) {
                 base = x.clk;
-                q = d;
+                const Lv a = in[0], b = nd > 1 ? in[1] : LU;
+                if (x.kind == Kind::DFF) q = a;
+                else if (x.kind == Kind::TFF) q = a == L1 ? invert(old) : a == L0 ? old : LU;
+                else if (a == LU || b == LU) q = LU;                       // cm_eval_jk_result / cm_eval_sr_result
+                else if (a == L0) q = b == L0 ? old : L0;
+                else q = b == L0 ? L1 : x.kind == Kind::JKFF ? invert(old) : LU;
             }
             out(0, q, SS, base);
             out(1, invert(q), SS, base);

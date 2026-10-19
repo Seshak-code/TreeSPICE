@@ -2578,6 +2578,7 @@ void SPICEParser::resolveXspice(int& at) {
         {"D_BUFFER", Kind::BUF}, {"D_INVERTER", Kind::INV}, {"D_AND", Kind::AND}, {"D_NAND", Kind::NAND},
         {"D_OR", Kind::OR}, {"D_NOR", Kind::NOR}, {"D_XOR", Kind::XOR}, {"D_XNOR", Kind::XNOR},
         {"D_TRISTATE", Kind::TRI}, {"D_PULLUP", Kind::PULLUP}, {"D_PULLDOWN", Kind::PULLDOWN}, {"D_DFF", Kind::DFF},
+        {"D_JKFF", Kind::JKFF}, {"D_TFF", Kind::TFF}, {"D_SRFF", Kind::SRFF},
         {"ADC_BRIDGE", Kind::ADC}, {"DAC_BRIDGE", Kind::DAC}};
     auto net = std::make_shared<xspice::Net>();
     std::map<std::string, int> dnode;  // upper-case name -> digital node
@@ -2620,7 +2621,7 @@ void SPICEParser::resolveXspice(int& at) {
         const auto mc = modelCards_.find(toUpper(a.model));
         if (mc == modelCards_.end()) throw std::runtime_error(a.name + ": no .model card " + a.model);
         const ModelCard* c = &mc->second;
-        static const std::set<std::string> analogKinds = {"GAIN", "SUMMER", "MULT", "DIVIDE", "LIMIT", "CLIMIT", "PWL", "ASWITCH", "INT", "D_DT", "S_XFER", "SLEW", "HYST", "SINE", "TRIANGLE", "SQUARE"};
+        static const std::set<std::string> analogKinds = {"GAIN", "SUMMER", "MULT", "DIVIDE", "LIMIT", "CLIMIT", "PWL", "ASWITCH", "INT", "D_DT", "S_XFER", "SLEW", "HYST", "SINE", "TRIANGLE", "SQUARE", "ZENER"};
         if (analogKinds.count(c->type)) { resolveXspiceAnalog(a, *c, analogNode); continue; }
         const auto k = kinds.find(c->type);
         if (k == kinds.end()) throw std::runtime_error(a.name + ": XSPICE model type " + c->type + " is not supported yet");
@@ -2663,13 +2664,17 @@ void SPICEParser::resolveXspice(int& at) {
             x.out = {digital(single(0), a.name, false)};
             allowed = {"LOAD"};
             break;
-        case Kind::DFF:
-            need(6);
-            x.in = {digital(single(0), a.name, false), digital(single(1), a.name, false),
-                    digital(single(2), a.name, true), digital(single(3), a.name, true)};
-            x.out = {digital(single(4), a.name, true), digital(single(5), a.name, true)};
-            allowed = {"CLK_DELAY", "SET_DELAY", "RESET_DELAY", "IC", "RISE_DELAY", "FALL_DELAY", "DATA_LOAD", "CLK_LOAD", "SET_LOAD", "RESET_LOAD"};
+        case Kind::DFF: case Kind::JKFF: case Kind::TFF: case Kind::SRFF: {
+            const size_t nd = x.kind == Kind::JKFF || x.kind == Kind::SRFF ? 2 : 1;  // data inputs, then clk set reset out Nout
+            need(nd + 5);
+            for (size_t k = 0; k <= nd; ++k) x.in.push_back(digital(single(k), a.name, false));
+            x.in.push_back(digital(single(nd + 1), a.name, true));
+            x.in.push_back(digital(single(nd + 2), a.name, true));
+            x.out = {digital(single(nd + 3), a.name, true), digital(single(nd + 4), a.name, true)};
+            allowed = {"CLK_DELAY", "SET_DELAY", "RESET_DELAY", "IC", "RISE_DELAY", "FALL_DELAY", "CLK_LOAD", "SET_LOAD", "RESET_LOAD",
+                       x.kind == Kind::DFF ? "DATA_LOAD" : x.kind == Kind::JKFF ? "JK_LOAD" : x.kind == Kind::TFF ? "T_LOAD" : "SR_LOAD"};
             break;
+        }
         case Kind::ADC: case Kind::DAC: {
             need(2);
             const bool adc = x.kind == Kind::ADC;
@@ -2751,7 +2756,8 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         {"HYST", {AKind::HYST, {{'i', "v", false}, {'o', "v", false}}}},
         {"SINE", {AKind::SINE, {{'i', "v", false}, {'o', "v", false}}}},
         {"TRIANGLE", {AKind::TRIANGLE, {{'i', "v", false}, {'o', "v", false}}}},
-        {"SQUARE", {AKind::SQUARE, {{'i', "v", false}, {'o', "v", false}}}}};
+        {"SQUARE", {AKind::SQUARE, {{'i', "v", false}, {'o', "v", false}}}},
+        {"ZENER", {AKind::ZENER, {{'b', "gd", false}}}}};
     const auto& [kind, specs] = table.at(c.type);
     struct Port { std::string type; int n1 = 0, n2 = 0; std::string vname; };
     std::vector<std::vector<Port>> ports;  // per spec, its elements
@@ -2911,6 +2917,16 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         if (!(m->duty > 0.0 && m->duty < 1.0)) throw std::runtime_error("model " + c.name + ": duty_cycle must be in (0, 1)");
         break;
     }
+    case AKind::ZENER:
+        allowed.insert("V_BREAKDOWN");
+        if (!c.params.count("V_BREAKDOWN")) throw std::runtime_error("model " + c.name + ": zener needs v_breakdown");
+        m->vBreak = c.params.at("V_BREAKDOWN");
+        m->iBreak = num("I_BREAKDOWN", 2e-2); m->rBreak = num("R_BREAKDOWN", 1.0); m->iRev = num("I_REV", 1e-6);
+        m->iSat = num("I_SAT", 1e-12); m->nFwd = num("N_FORWARD", 1.0);
+        num("LIMIT_SWITCH", 0.0);  // ngspice's input limiting: the iteration path only
+        if (!(m->vBreak > 0.0 && m->iBreak > 0.0 && m->rBreak > 0.0 && m->iSat > 0.0 && m->nFwd > 0.0))
+            throw std::runtime_error("model " + c.name + ": zener needs v_breakdown, i_breakdown, r_breakdown, i_sat, n_forward > 0");
+        break;
     case AKind::HYST:
         m->inLow = num("IN_LOW", 0.0); m->inHigh = num("IN_HIGH", 1.0); m->hyst = num("HYST", 0.1);
         m->lo = num("OUT_LOWER_LIMIT", 0.0); m->hi = num("OUT_UPPER_LIMIT", 1.0);
