@@ -597,6 +597,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                             else env.gear = m == "GEAR";
                             continue;
                         }
+                        if (k == "HIER") { flatten_ = kv ? v == 0.0 : false; if (kv) ++i; continue; }  // S3: the quotient circuit
                         if (!kv) { if (k != "SCALE" && k != "GMINSTEPS") std::cerr << "Warning: .options " << k << " is ignored\n"; continue; }
                         ++i;
                         if (k == "GMINSTEPS") env.gmin_stepping = v != 0.0;

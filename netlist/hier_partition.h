@@ -94,6 +94,8 @@ template <class B, class F> void forEachElement(B& b, F&& f) {
 struct Quotient {
     TensorNetlist nl;              // flat: the global block only
     std::map<int, int> node;       // net color -> quotient node (1-based; ground's color: none)
+    std::map<std::string, int> vsource;  // a top-level V source's name -> its class's (global block index)
+    std::map<std::string, double> topCount;  // a top-level R / V / I's name (upper case) -> its class's members
     size_t elementClasses = 0;
 };
 
@@ -156,6 +158,7 @@ public:
         }
         TensorBlock& qb = q.nl.globalBlock;
         std::map<char, std::vector<std::pair<size_t, size_t>>> src;  // per kind, per quotient element: (context, its index)
+        std::map<int, int> vIndex;  // V source class -> its quotient index
         for (int col : order) {
             const auto& ec = classes.at(col);
             const auto& b = block(p.ctx[ec.ctx]);
@@ -170,7 +173,14 @@ public:
             case 'R': { auto x = b.resistors[i]; x.resistance_ohms /= m; if (!std::isnan(x.ac_ohms)) x.ac_ohms /= m; qb.resistors.push_back(x); break; }
             case 'C': { auto x = b.capacitors[i]; x.capacitance_farads *= m; qb.capacitors.push_back(x); break; }
             case 'L': single("an inductor"); qb.inductors.push_back(b.inductors[i]); break;
-            case 'V': { auto x = b.voltageSources[i]; x.m = m; qb.voltageSources.push_back(x); break; }
+            case 'V': {
+                auto x = b.voltageSources[i];
+                x.m = m;
+                if (ec.ctx != 0) x.name = p.ctx[ec.ctx].def + "." + x.name;  // a body's: named by its definition
+                vIndex[col] = (int)qb.voltageSources.size();
+                qb.voltageSources.push_back(x);
+                break;
+            }
             case 'I': single("a current source"); qb.currentSources.push_back(b.currentSources[i]); break;
             case 'D': {
                 auto x = b.diodes[i];
@@ -202,6 +212,18 @@ public:
             src[el.kind].push_back({ec.ctx, i});
         }
         q.elementClasses = order.size();
+        auto up = [](std::string x) { for (auto& ch : x) ch = (char)std::toupper((unsigned char)ch); return x; };
+        for (size_t e = 0; e < els[0].size(); ++e) {  // the top level's by name (identical ones share a class)
+            const auto& el = els[0][e];
+            const double members = classes.at(p.ctx[0].elem[e]).count;
+            if (el.kind == 'V') {
+                const auto& name = nl_.globalBlock.voltageSources[el.index].name;
+                q.vsource[name] = vIndex.at(p.ctx[0].elem[e]);
+                q.topCount[up(name)] = members;
+            }
+            if (el.kind == 'I') q.topCount[up(nl_.globalBlock.currentSources[el.index].name)] = members;
+            if (el.kind == 'R') q.topCount[up(nl_.globalBlock.resistors[el.index].name)] = members;
+        }
         forEachElement(qb, [&](char kind, size_t i, const std::vector<int*>& t) {  // terminals: local nodes -> classes
             const auto& c = p.ctx[src.at(kind)[i].first];
             for (int* n : t)

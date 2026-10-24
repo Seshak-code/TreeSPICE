@@ -36,6 +36,12 @@ struct OutputRequest { char kind; std::string analysis; std::vector<std::string>
 struct SPICEParseResult {
     TensorNetlist netlist;
     std::map<std::string, int> nodeIndex;  // top-level node name (upper case) -> index
+    // S3 (.options hier): netlist is the quotient circuit of the unflattened parse; nodeIndex maps the top-level
+    // names (and the hierarchical ones the outputs name) to its nodes, sourceIndex the top-level V sources to its
+    // (identical nets and sources share one)
+    bool          hierarchical = false;
+    std::map<std::string, int> sourceIndex;
+    std::map<std::string, double> elementCount;  // a top-level R / V / I name (upper case) -> the identical ones its class stands for
     bool          success = true;
     std::string   errorMessage;
     int           errorLine = -1;

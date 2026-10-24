@@ -875,6 +875,120 @@ int main() {
             check(hb.success && err.find("not supported unflattened") != std::string::npos,
                   "S3.1: a coupling the refinement does not model is refused (" + err + ")");
         }
+        {   // S3.2 transient: a 6T SRAM writes a 0 into bank 0's row 0 (its word line pulses, its bit lines driven), every
+            // cell initialised to 1 by the body's .ic; the quotient circuit runs the flat one's transient, node for
+            // node at the same accepted steps
+            std::string t = "* sram write\n.subckt cell bl blb wl vdd\nM1 q qb 0 0 nm W=1u L=0.18u\nM2 q qb vdd vdd pm W=1u L=0.18u\n"
+                            "M3 qb q 0 0 nm W=1u L=0.18u\nM4 qb q vdd vdd pm W=1u L=0.18u\nM5 bl wl q 0 nm W=1u L=0.18u\n"
+                            "M6 blb wl qb 0 nm W=1u L=0.18u\nCq q 0 2f\nCqb qb 0 2f\n.ic v(q)=1.8 v(qb)=0\n.ends\n"
+                            ".subckt row bl blb wl vdd\nXC0 bl blb wl vdd cell\nXC1 bl blb wl vdd cell\nXC2 bl blb wl vdd cell\n.ends\n"
+                            ".subckt bank bl blb vdd\nXR0 bl blb wl0 vdd row\nXR1 bl blb wl1 vdd row\nXR2 bl blb wl2 vdd row\n"
+                            "V0 wl0 0 0\nV1 wl1 0 0\nV2 wl2 0 0\n.ends\n"
+                            ".subckt bankw bl blb vdd\nXR0 bl blb wl0 vdd row\nXR1 bl blb wl1 vdd row\nXR2 bl blb wl2 vdd row\n"
+                            "V0 wl0 0 PULSE(0 1.8 0.2n 0.05n 0.05n 1n 4n)\nV1 wl1 0 0\nV2 wl2 0 0\n.ends\n"
+                            ".model nm nmos level=1 vto=0.5 kp=200u cgso=1e-10 cgdo=1e-10\n.model pm pmos level=1 vto=-0.5 kp=80u cgso=1e-10 cgdo=1e-10\n"
+                            "VDD vdd 0 1.8\nVBL bl0 0 0\nVBLB blb0 0 1.8\nXB0 bl0 blb0 vdd bankw\n";
+            for (int i = 1; i < 3; ++i)
+                t += "VBL" + std::to_string(i) + " bl" + std::to_string(i) + " 0 1.8\nVBLB" + std::to_string(i) + " blb" + std::to_string(i) +
+                     " 0 1.8\nXB" + std::to_string(i) + " bl" + std::to_string(i) + " blb" + std::to_string(i) + " vdd bank\n";
+            t += ".tran 0.02n 1.5n\n.end\n";
+            auto steps = [](TensorNetlist& nl, std::vector<std::pair<double, std::vector<double>>>& out) {
+                CircuitSim sim;
+                return sim.runTransient(nl, 0.02e-9, 1.5e-9, false, [&](const SolverStep& st) {
+                    out.push_back({st.time, st.nodeVoltages});
+                    return true;
+                });
+            };
+            auto flatP = SPICEParser().parse(t);
+            SPICEParser hp;
+            hp.setFlatten(false);
+            auto hierP = hp.parse(t);
+            std::vector<std::pair<double, std::vector<double>>> fw, qw;
+            std::string fe = flatP.success ? steps(flatP.netlist, fw) : flatP.errorMessage, qe = "parse";
+            hierpart::Partition tp;
+            hierpart::Quotient tq;
+            if (hierP.success) {
+                tq = hierpart::quotient(hierP.netlist, &tp);
+                qe = steps(tq.nl, qw);
+            }
+            // flat node -> quotient node, by name
+            std::vector<int> qOf(flatP.netlist.numGlobalNodes + 1, -1);
+            for (const auto& [name, idx] : flatP.nodeIndex)
+                if (idx >= 1 && idx <= flatP.netlist.numGlobalNodes) qOf[idx] = hierpart::nodeFor(hierP.netlist, hierP.nodeIndex, tp, tq, name);
+            // the same accepted steps: step k of each at one time (to roundoff: the step control sees roundoff-level
+            // differences in the voltages)
+            double worst = 0.0, swing = 0.0, dt = 0.0;
+            size_t common = 0;
+            for (size_t k = 0; k < fw.size() && k < qw.size() && fe.empty() && qe.empty(); ++k) {
+                dt = std::max(dt, std::abs(fw[k].first - qw[k].first) / std::max(fw[k].first, 1e-30));
+                ++common;
+                for (int n = 1; n <= flatP.netlist.numGlobalNodes; ++n)
+                    if (qOf[n] > 0) {
+                        worst = std::max(worst, std::abs(fw[k].second[n - 1] - qw[k].second[qOf[n] - 1]));
+                        swing = std::max(swing, std::abs(fw[k].second[n - 1]));
+                    }
+            }
+            char msg[256];
+            std::snprintf(msg, sizeof msg, "S3.2 transient: the SRAM write's quotient (%d nodes for %d) runs flat's %zu steps (%zu; "
+                          "times within %.2g), worst %.3g V", tq.nl.numGlobalNodes, flatP.netlist.numGlobalNodes, fw.size(), qw.size(), dt, worst);
+            check(fe.empty() && qe.empty() && common == fw.size() && fw.size() == qw.size() && fw.size() > 20 && dt < 1e-12 && worst < 1e-9 && swing > 1.0,
+                  std::string(msg) + (fe.empty() ? "" : " flat: " + fe) + (qe.empty() ? "" : " quotient: " + qe));
+            // the same through the session: .options hier runs the quotient, its columns named by the outputs (a
+            // hierarchical internal node and top-level ones); .op and .tran, flat against hierarchical
+            auto session = [&](const std::string& net, bool tran) {
+                auto engine = ISimulationEngine::create();
+                SimulationRequestDTO q;
+                q.source.payload = net;
+                EngineCallbacks c;
+                if (!tran) return engine->createSession()->runDC(q, c);
+                q.transient.stepSizeS = 0.02e-9;
+                q.transient.stopTimeS = 1.5e-9;
+                return engine->createSession()->runTransient(q, c, nullptr);
+            };
+            const std::string saves = ".save v(bl0) v(blb1) v(xb0.xr0.xc0.q) v(xb2.xr1.xc2.qb) i(vbl1)\n";
+            std::string flatNet = t, hierNet = t;
+            flatNet.insert(flatNet.rfind(".tran"), saves);
+            hierNet.insert(hierNet.rfind(".tran"), saves + ".options hier\n");
+            for (bool tran : {false, true}) {
+                const auto f = session(flatNet, tran), h = session(hierNet, tran);
+                bool same = f.converged && h.converged && f.waveformPoints.size() == h.waveformPoints.size() && !f.waveformPoints.empty() &&
+                            f.nodeNames.size() == 4 && f.branchNames.size() == 1;
+                double w = 0.0;
+                for (size_t c = 0; same && c < f.nodeNames.size(); ++c) {
+                    const auto it = std::find(h.nodeNames.begin(), h.nodeNames.end(), f.nodeNames[c]);
+                    same = it != h.nodeNames.end();
+                    for (size_t k = 0; same && k < f.waveformPoints.size(); ++k)
+                        w = std::max(w, std::abs(f.waveformPoints[k].nodeVoltages[c] - h.waveformPoints[k].nodeVoltages[it - h.nodeNames.begin()]));
+                }
+                same = same && h.branchNames == f.branchNames;
+                for (size_t k = 0; same && k < f.waveformPoints.size(); ++k)
+                    w = std::max(w, std::abs(f.waveformPoints[k].branchCurrents[0] - h.waveformPoints[k].branchCurrents[0]) * 1e3);
+                check(same && w < 1e-9, std::string("S3.2 session: .options hier ") + (tran ? ".tran" : ".op") +
+                          " reports the flat run's saved vectors (" + std::to_string(f.waveformPoints.size()) + " points, worst " +
+                          [&] { char b2[32]; std::snprintf(b2, 32, "%.3g", w); return std::string(b2); }() + ")" + (h.converged ? "" : ": " + h.errorDetail));
+            }
+            {   // refused on the hierarchical path: AC (not yet), sweeping a source its class shares (vbl1 = vbl2)
+                std::string acNet = hierNet;
+                acNet.replace(acNet.rfind(".tran"), std::string::npos, ".ac lin 1 1k 1k\n.end\n");
+                auto engine = ISimulationEngine::create();
+                SimulationRequestDTO q;
+                q.source.payload = acNet;
+                EngineCallbacks c;
+                const auto ra = engine->createSession()->runAC(q, c);
+                std::string dcNet = hierNet;
+                dcNet.replace(dcNet.rfind(".tran"), std::string::npos, ".dc VBL1 0 1.8 0.9\n.end\n");
+                q.source.payload = dcNet;
+                const auto rd = engine->createSession()->runDC(q, c);
+                std::string okNet = hierNet;
+                okNet.replace(okNet.rfind(".tran"), std::string::npos, ".dc VDD 1.6 1.8 0.1\n.end\n");
+                q.source.payload = okNet;
+                const auto ro = engine->createSession()->runDC(q, c);
+                check(!ra.converged && ra.errorDetail.find("hierarchical path") != std::string::npos && !rd.converged &&
+                          rd.errorDetail.find("stands for identical") != std::string::npos && ro.converged && ro.waveformPoints.size() == 3,
+                      "S3.2 session: AC and a shared source's sweep are refused, a unique source's .dc runs (" + ra.errorDetail + " | " +
+                          rd.errorDetail + ")");
+            }
+        }
         {   // .save narrows what a run stores to the vectors .save, .print and .meas name (ngspice saves only those);
             // .save all, or none, keeps every node and branch
             auto tr = [&](const char* save) {
