@@ -564,14 +564,15 @@ class Expander {
 public:
     Expander(int &errLine, const std::map<std::string, double> &overrides) : errLine_(errLine), overrides_(overrides) {}
 
-    Lines run(const Lines &in) {
+    Lines run(Lines &in) {
         Lines top;
-        for (size_t i = 0; i < in.size(); ++i) {  // collect .subckt bodies; the rest is the top level
+        for (size_t i = 0; i < in.size(); ++i) {  // collect .subckt bodies; the rest is the top level (both move out of in)
             errLine_ = in[i].first;
             const auto w = words(in[i].second);
-            if (in[i].first == 1 || w.empty() || upper(w[0]) != ".SUBCKT") { top.push_back(in[i]); continue; }
+            if (in[i].first == 1 || w.empty() || upper(w[0]) != ".SUBCKT") { top.push_back(std::move(in[i])); continue; }
             readSubckt(in, i, subckts_, nullptr);
         }
+        Lines().swap(in);
         for (const auto &[n, l] : top) { errLine_ = n; collectParams(l, global_, n); }
         for (const auto &[name, v] : overrides_) { global_.raw[name] = num(v); global_.line.emplace(name, 0); }  // .step param
         Lines out = walk(top, global_, "", nullptr, nullptr, "");
@@ -587,7 +588,8 @@ public:
             if (const auto w = words(out[i].second); i && !w.empty() && upper(w[0]) == ".END") { end = i; break; }
         out.insert(out.begin() + (long)std::min<size_t>(1, out.size()), params.begin(), params.end());
         end += params.size();
-        out.insert(out.begin() + (long)end, defs_.begin(), defs_.end());
+        out.insert(out.begin() + (long)end, std::make_move_iterator(defs_.begin()), std::make_move_iterator(defs_.end()));
+        Lines().swap(defs_);
         return out;
     }
 
@@ -596,7 +598,7 @@ private:
     const std::map<std::string, double> &overrides_;
     std::map<std::string, Subckt> subckts_;
     // The .subckt at in[i] up to its .ends, nested definitions into its kids; i ends on the .ends
-    void readSubckt(const Lines &in, size_t &i, std::map<std::string, Subckt> &into, const Subckt *parent) {
+    void readSubckt(Lines &in, size_t &i, std::map<std::string, Subckt> &into, const Subckt *parent) {
         const std::string &card = in[i].second;
         const std::string hdr = card.substr(card.find(words(card)[0]) + 7);
         const auto hw = headWords(hdr);
@@ -614,7 +616,7 @@ private:
             if (k == ".ENDS") return;
             errLine_ = in[i].first;
             if (k == ".SUBCKT") readSubckt(in, i, s.kids, &s);
-            else s.body.push_back(in[i]);
+            else s.body.push_back(std::move(in[i]));
         }
         throw std::runtime_error(".subckt " + s.name + " has no .ends");
     }
@@ -814,10 +816,10 @@ std::string text(const Expr &e) {
     return out;
 }
 
-std::vector<std::pair<int, std::string>> expand(const std::vector<std::pair<int, std::string>> &lines, int &errLine, double tempC,
+std::vector<std::pair<int, std::string>> expand(std::vector<std::pair<int, std::string>> lines, int &errLine, double tempC,
                                                 const std::map<std::string, double> &overrides) {
     temperC = tempC;
-    return Expander(errLine, overrides).run(lines);
+    return Expander(errLine, overrides).run(lines);  // run moves the lines into the top level and the bodies
 }
 
 }}  // namespace acutesim::numparam

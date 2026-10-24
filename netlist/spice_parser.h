@@ -127,7 +127,7 @@ private:
     // ── Line Pre-Processing ───────────────────────────────────────────
     /// Merge continuation lines ('+' prefix), strip comments.
     // Splice .include files and .lib sections into the lines (recursively).
-    std::vector<std::pair<int, std::string>> expandIncludes(const std::vector<std::pair<int, std::string>>& lines,
+    std::vector<std::pair<int, std::string>> expandIncludes(std::vector<std::pair<int, std::string>> lines,
                                                             const std::string& dir, int depth, int& errLine);
     static std::vector<std::pair<int, std::string>> preprocessLines(
         const std::string& text);

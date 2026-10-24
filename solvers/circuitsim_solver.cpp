@@ -1099,9 +1099,10 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
       if (std::isnan(r.ac_ohms)) continue;
       const double dg = 1.0 / r.ac_ohms - 1.0 / r.resistance_ohms;
       const int a = sl.map(r.nodeTerminal1), b = sl.map(r.nodeTerminal2);
-      if (a > 0) matrixBuilder.add(a - 1, a - 1, dg);
-      if (b > 0) matrixBuilder.add(b - 1, b - 1, dg);
-      if (a > 0 && b > 0) { matrixBuilder.add(a - 1, b - 1, -dg); matrixBuilder.add(b - 1, a - 1, -dg); }
+      const double ga = dg * netScale(netlist, a - 1), gb = dg * netScale(netlist, b - 1);
+      if (a > 0) matrixBuilder.add(a - 1, a - 1, ga);
+      if (b > 0) matrixBuilder.add(b - 1, b - 1, gb);
+      if (a > 0 && b > 0) { matrixBuilder.add(a - 1, b - 1, -ga); matrixBuilder.add(b - 1, a - 1, -gb); }
     }
   // BJT excess phase (ngspice bjtacld): the forward transfer conductance g = d((cbe - cbc)/qb)/dvbe' turns by
   // exp(-jw TD); it moves from G to a delayed entry
@@ -1118,7 +1119,7 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
     const int c = j.n[4] - 1, b = j.n[5] - 1, em = j.n[6] - 1;
     auto move = [&](int r, int col, double v) {
       if (r < 0 || col < 0) return;
-      matrixBuilder.add(r, col, -v);
+      matrixBuilder.add(r, col, -v * netScale(netlist, r));  // (the delayed entry is scaled with the rest below)
       sys.dr.push_back(r); sys.dc.push_back(col); sys.dv.push_back(v); sys.dtd.push_back(p.td);
     };
     move(c, b, g); move(c, em, -g); move(em, b, -g); move(em, em, g);
@@ -1241,6 +1242,12 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
       for (size_t b = 0; b < L; ++b)
         if (const double c = C[a * L + b]; c != 0.0) addC(r.n[a] - 1, r.n[b] - 1, c);
   });
+  if (!netlist.classSize.empty()) {  // S3 quotient: the reactive, delayed and f(w) rows to one net's KCL, as G's
+    for (size_t t = 0; t < sys.cv.size(); ++t) sys.cv[t] *= netScale(netlist, sys.cr[t]);
+    for (size_t t = 0; t < sys.dv.size(); ++t) sys.dv[t] *= netScale(netlist, sys.dr[t]);
+    for (size_t t = 0; t < sys.fv.size(); ++t)
+      if (const double k = netScale(netlist, sys.fr[t]); k != 1.0) sys.fv[t] = [f = sys.fv[t], k](double w) { return k * f(w); };
+  }
   return true;
 }
 
@@ -1291,10 +1298,10 @@ std::vector<std::complex<double>> CircuitSim::acExcitation(const TensorNetlist &
       e[sl.vs + i] += phasor(v.name, v.ac_mag, v.ac_phase);
     }
     for (const auto &cs : sl.blk->currentSources) {  // leaves n+ externally (as in DC)
-      const auto p = phasor(cs.name, cs.ac_mag, cs.ac_phase);
+      const auto p = cs.m * phasor(cs.name, cs.ac_mag, cs.ac_phase);
       const int a = sl.map(cs.nodePositive) - 1, b = sl.map(cs.nodeNegative) - 1;
-      if (a >= 0) e[a] -= p;
-      if (b >= 0) e[b] += p;
+      if (a >= 0) e[a] -= p * netScale(nl, a);
+      if (b >= 0) e[b] += p * netScale(nl, b);
     }
   }
   return found ? e : std::vector<std::complex<double>>{};
@@ -1453,12 +1460,14 @@ CircuitSim::NoiseResult CircuitSim::solveNoise(TensorNetlist &netlist, const std
     auto cx = [&](const std::vector<double> &x, int g) {
       return g > 0 ? std::complex<double>(x[g - 1], x[g - 1 + n]) : 0.0;
     };
+    // the transfer from a current into node g: its adjoint entry, times g's KCL row scale (S3 quotient: 1/class size)
+    auto zt = [&](int g) { return cx(z.solution, g) * netScale(netlist, g - 1); };
     const std::complex<double> H = cx(fw.solution, outNode) - cx(fw.solution, refNode);
     const double gainInv = 1.0 / std::max(std::norm(H), kMinLog), lnGainInv = std::log(gainInv);
     const double lnF = std::log(std::max(f, kMinLog));
     double S = 0.0;
     for (size_t g = 0; g < gens.size(); ++g) {
-      const double dens = std::norm(cx(z.solution, gens[g].a) - cx(z.solution, gens[g].b)) *
+      const double dens = std::norm(zt(gens[g].a) - zt(gens[g].b)) *
                           (gens[g].psdAt ? gens[g].psdAt(f) : gens[g].psd);
       const double lnD = std::log(std::max(dens, kMinLog));
       if (k > 0) {

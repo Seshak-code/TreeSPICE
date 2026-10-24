@@ -174,6 +174,7 @@ struct Inductor {
 
     bool   icGiven = false;       // IC= (initial current), used only with UIC
     double ic_A    = 0.0;
+    double m = 1.0;  // S3 quotient: identical inductors it stands for (its branch current enters KCL m times)
 };
 
 /*
@@ -273,6 +274,7 @@ struct CurrentSource {
     std::vector<double> wf;  // EXP / SFFM / AM arguments, as VoltageSource::wf
 
     std::string expression;  // Symbolic override for DC/main value
+    double m = 1.0;          // S3 quotient: identical sources it stands for (its current, m times, at every stamp)
 };
 
 /*
@@ -758,6 +760,7 @@ struct BJT {
         double td = 0.0;   // its delay PTF pi/180 TF, from the TNOM TF (ngspice bjttemp; TTF1/2 do not move it)
     } card;
     double area = 1.0;
+    double rep = 1.0;  // S3 quotient: identical devices it stands for (in area and m, and its junction GMIN)
     InstTemp inst;  // card, IS and betas are held at the instance temperature (resolved by the parser)
 
     double temperature_K = 300.15;
@@ -813,6 +816,7 @@ struct JFET {
         double alpha = 2.0;  // MESFET saturation voltage parameter (B is its doping tail)
     } card;
     double area = 1.0;
+    double rep = 1.0;  // S3 quotient: identical devices it stands for (in area and m, and its junction GMIN)
 
     double temperature_K = 300.15;
 };
@@ -1247,6 +1251,10 @@ struct Hierarchy {
     std::map<std::string, std::map<std::string, int>> nodeNames;     // definition -> local node name -> index
     struct Seed { int node; double value; bool nodeset; };           // a body's .ic / .nodeset (every instance's)
     std::map<std::string, std::vector<Seed>> seeds;
+    // .ic / .nodeset on X1.X2.N: the instances' indices level by level (top, then each definition's children), the
+    // node local to the last one's definition (one instance's; it beats a body's)
+    struct PathSeed { std::vector<int> path; Seed seed; };
+    std::vector<PathSeed> pathSeeds;
     // Instances in the expansion (every X at every level): a definition's count is computed once
     double expandedInstances() const {
         std::map<std::string, double> memo;

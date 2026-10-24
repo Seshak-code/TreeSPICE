@@ -217,6 +217,18 @@ then the two Roadmap sections it points to. Everything below was verified by run
   - **Also:** numparam memoises a definition's body `.param` scan (the 1e9 parse was 57 s → 1.9 s).
   - **Next (S3.3):** AC/noise/sens/tf/pz on the quotient; I/L/Q/J classes with more than one member; `.ic` on a
     hierarchical path; parser peak memory (line copies, ~18× the text); auto mode.
+- **Update 2026-10-24 (Claude Code, S3.3, branch `mac/s3.3`; #23 merged by the owner):** `.options hier` also runs
+  `.ac`, `.noise` and `.tf`. Details and the refused list in `docs/scale-s3.md` (S3.3 as built).
+  - **AC/noise:** the reactive/delayed/f(w) entries, AC= and the excitation take G's per-net row scale
+    (`CircuitSim::netScale`). Noise scales the adjoint by it. A noise or `.tf` output must be a class of one net
+    (`hierNet` in engine_impl refuses others); `.pz` and `.sens` stay refused.
+  - **Classes:** `CurrentSource::m`, `Inductor::m`, `BJT::rep`/`JFET::rep` (AREA and M × members, GMIN × rep).
+  - **`.ic`/`.nodeset` by path:** `Hierarchy::pathSeeds`, carried in the refiner's context key.
+  - **Metastable warning:** only for nets one element/child couples in different roles (a latch built from two
+    identical inverters); bit lines no longer warn.
+  - **Parser memory:** no port names stored for X cards on the hierarchical path, and lines move through
+    includes/FREQ/numparam. 1e9 gate: 2.2 s, 498 → 328 MB.
+  - **Not done:** an automatic hierarchical mode (it changes what a run without `.save` stores: owner's call).
 - **Status of the plan:** Roadmap Phase 1 (Foundations) is done. See `Roadmap.md` →
   "⚙️ ENGINE FEATURE LIST & VERIFIED SUPPORT STATUS" (what works, by device/analysis, with ✅/⚠️/❌/🚫/❓)
   and "🎯 END-TO-END GOAL & ENGINE SCALE PLAN" (phases and gates).
