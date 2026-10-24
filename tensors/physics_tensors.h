@@ -88,7 +88,9 @@ inline DiodeModel<P> diodeModel(const Diode& d, const devtemp::DiodeAt<P>& t, do
     p.gsw = t.rsw > 0.0 ? P(d.pj * d.mult) / t.rsw : P(0.0);
     // ngspice (probed): I(-BV) is IBV per parallel device, M scales it and AREA does not; xbv is solved with the
     // bottom and sidewall saturation currents together, and only the bottom one breaks down
-    if (p.breakdown) p.xbv = diode_breakdown_xbv(t.bv, P(c.ibv * d.mult), p.is + p.isw, p.vtb);
+    // (LEVEL 3: AREA scales IBV too)
+    if (p.breakdown) p.xbv = diode_breakdown_xbv(t.bv, P(c.ibv * (c.level3 ? d.area : d.mult)), p.is + p.isw, p.vtb);
+    p.cpar = c.cpar;
     return p;
 }
 

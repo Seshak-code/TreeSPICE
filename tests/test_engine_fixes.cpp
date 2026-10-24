@@ -441,6 +441,30 @@ int main() {
                   "diode self-heating AC with TT: v(tj) is ngspice's transient's (" +
                       (okt ? std::to_string(H(rt).real()) + std::to_string(H(rt).imag()) + "j" : rt.errorDetail) + ")");
         }
+        // Diode LEVEL 3: ngspice 47 multiplies M into the W/L AREA and PJ and again where they scale the device
+        // (M^2), and takes its XOM / XOI default 1e4 in metres (no overlap capacitance) where a given value is in
+        // Angstrom: here M=2 is two M=1 diodes in parallel, and the default is the 1e4 Angstrom of XOM=1e4
+        {
+            const std::string m3 = ".option scale=1e-6\n.model d3 D(LEVEL=3 IS=1e-4 JSW=1e-10 CJO=2e-4 LM=50 WM=40 XM=1e-7)\n";
+            req.source.payload = "* level3 m\nVB 1 0 DC 0.7 AC 1\nR1 1 2 100\nD1 2 0 d3 W=20 L=10 M=2\nR2 1 3 100\nD2 3 0 d3 W=20 L=10\n"
+                                 "D3 3 0 d3 W=20 L=10\n" + m3 + ".ac lin 1 100Meg 100Meg\n";
+            const auto rm = engine->createSession()->runAC(req, cb);
+            const bool okm = rm.converged && !rm.waveformPoints.empty();
+            const auto& pm = okm ? rm.waveformPoints[0] : WaveformDataPoint{};
+            check(okm && near(pm.nodeVoltages[1], pm.nodeVoltages[2], 1e-10) && near(pm.nodeVoltagesImag[1], pm.nodeVoltagesImag[2], 1e-10) && std::abs(pm.nodeVoltagesImag[1]) > 1e-4,
+                  "diode LEVEL 3: W/L with M=2 is two M=1 diodes in parallel (" +
+                      (okm ? std::to_string(pm.nodeVoltages[1]) + " vs " + std::to_string(pm.nodeVoltages[2]) : rm.errorDetail) + ")");
+            auto ac3 = [&](const char* xom) {
+                req.source.payload = "* level3 xom\nVB 1 0 DC -1 AC 1\nR1 1 2 1k\nD1 2 0 d3 W=20 L=10\n"
+                                     ".option scale=1e-6\n.model d3 D(LEVEL=3 IS=1e-4 LM=50 WM=40 " + std::string(xom) + ")\n.ac lin 1 1G 1G\n";
+                const auto r = engine->createSession()->runAC(req, cb);
+                return r.converged && !r.waveformPoints.empty() ? r.waveformPoints[0].nodeVoltagesImag[1] : NAN;
+            };
+            const double dflt = ac3(""), given = ac3("XOM=1e4"), none = ac3("XOM=1e4 LM=0");
+            check(near(dflt, given, 1e-15) && std::abs(dflt - none) > 1e-3,
+                  "diode LEVEL 3: the XOM default is 1e4 Angstrom (" + std::to_string(dflt) + ", " + std::to_string(given) +
+                      ", no overlap " + std::to_string(none) + ")");
+        }
         // XSPICE aswitch in AC is the resistance its control sets (ngspice 47's AC load negates the conductance:
         // a 1 V source over 1k and the switch read 1.46 V there): the same divider as a resistor of that value
         {

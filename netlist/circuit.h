@@ -624,10 +624,14 @@ struct Diode {
         double rsw = 0.0;            // RSW (at the temperature); given: the sidewall's own node A_sw
         bool rswGiven = false;
         bool qp() const { return vp != 0.0 && tt != 0.0; }
+        double cpar = 0.0;           // LEVEL 3: the metal and poly overlap capacitances, linear across A' - C
+        bool level3 = false;         // LEVEL 3: IBV scales by AREA
     } card;
     double area = 1.0;
     double pj = 0.0, mult = 1.0;  // PJ= (sidewall perimeter) and M= (the sidewall terms scale by M, not by AREA)
     bool areaGiven = false, pjGiven = false;  // else the model's AREA / PJ (ngspice diosetup)
+    double w = NAN, l = NAN;                  // W=, L= (LEVEL 3's geometry; either one: AREA 1, PJ 0 at any level)
+    double lm = NAN, lp = NAN, wm = NAN, wp = NAN;  // LEVEL 3 overlap capacitor geometry (NaN: the model's)
     InstTemp inst;  // card and saturation current are held at the instance temperature (resolved by the parser)
     // Self-heating (D a k tj model THERMAL, the model with RTH0): tj's voltage is the junction's rise over the
     // instance temperature T0 (ngspice dioload); the law gives the card at T0 + v(tj). thermal 0: none.

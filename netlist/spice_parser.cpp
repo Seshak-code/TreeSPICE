@@ -1396,6 +1396,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                           "JSW", "ISW", "NS", "CJSW", "MJSW", "PHP", "VJSW", "IKF", "IK", "IKR", "IKP", "KF", "AF", "ISR", "NR",
                           "NBV", "NZ", "CTA", "CTC", "CTP", "TPB", "TVJ", "TPHP", "TLEVC", "TLEV", "CJP", "FCS", "GAP1", "GAP2",
                           "JTUN", "JTUNSW", "NTUN", "XTITUN", "KEG", "AREA", "PJ", "TREF", "VP", "RSW",
+                          "LEVEL", "LM", "LP", "WM", "WP", "XOM", "XOI", "XM", "XP", "XW",
                           "FV_MAX", "BV_MAX", "ID_MAX", "TE_MAX", "PD_MAX",  // SOA: ngspice's warnings only
                           "RTH0", "CTH0"});  // self-heating: a THERMAL instance (D a k tj) uses them
             // Temperature selectors (probed on ngspice 47): TLEV 1 scales BV by (1 - TCV dT) where 0 subtracts TCV dT
@@ -1409,8 +1410,32 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             bounded(c, {"IS", "JS", "RS", "RSW", "CJO", "CJ0", "CJ", "M", "MJ", "TT", "JSW", "ISW", "CJSW", "MJSW", "IKF", "IK", "IKR",
                         "IKP", "KF", "ISR", "JTUN", "JTUNSW", "AREA", "PJ"},
                     {"N", "BV", "VB", "VRB", "VAR", "NS", "PHP", "VJSW", "NR", "NBV", "NZ", "NTUN"});  // ngspice: BV = 0 breaks down at 0 V
-            if (!d.areaGiven) d.area *= c->get("AREA", 1.0);  // diosetup: the model's AREA / PJ unless the instance gives one
-            if (!d.pjGiven) d.pj = c->get("PJ", 0.0);
+            // diosetup: the model's AREA / PJ unless the instance gives one, or gives W or L (then 1 and 0)
+            const double level = c->get("LEVEL", 1.0);
+            if (level != 1.0 && level != 3.0) throw std::runtime_error("model " + c->name + ": diode LEVEL other than 1 or 3 is not supported");
+            const bool wl = !std::isnan(d.w) || !std::isnan(d.l);
+            if (!d.areaGiven && !wl) d.area *= c->get("AREA", 1.0);
+            if (!d.pjGiven) d.pj = wl ? 0.0 : c->get("PJ", 0.0);
+            if (level == 3.0) {
+                // LEVEL 3 (ngspice diosetup): W and L give AREA = (W+XW)(L+XW) and PJ = 2(W+XW) + 2(L+XW) (.option
+                // scale on the lengths), and the metal / poly overlaps eps_SiO2/XOM (WM+XM)(LM+XM) M (XOI, WP, LP, XP)
+                // across the junction, XOM and XOI in Angstrom. Deliberate divergences: ngspice multiplies M into that
+                // AREA and PJ and then again where they scale the device (M^2), here M scales it once (d.area holds the
+                // instance's M); ngspice's XOM / XOI default 1e4 is taken in metres (no overlap capacitance), here the
+                // 1e4 Angstrom it documents
+                d.card.level3 = true;
+                const double xw = c->get("XW", 0.0), s = scale_;
+                if (!std::isnan(d.w) && !std::isnan(d.l)) {
+                    d.area = (d.w + xw) * (d.l + xw) * s * s * d.mult;  // in place of a given AREA
+                    d.pj = (2.0 * (d.w + xw) + 2.0 * (d.l + xw)) * s;
+                }
+                const double epsOx = 3.9 / (4e-7 * M_PI * 299792458.0 * 299792458.0);  // ngspice CONSTepsSiO2
+                auto ov = [&](double inst, const char* key) { return std::isnan(inst) ? c->get(key, 0.0) : inst; };
+                const double xm = c->get("XM", 0.0), xp = c->get("XP", 0.0);
+                d.card.cpar = epsOx / (c->get("XOM", 1e4) * 1e-10) * d.mult * (ov(d.wm, "WM") * s + xm) * (ov(d.lm, "LM") * s + xm) +
+                              epsOx / (c->get("XOI", 1e4) * 1e-10) * d.mult * (ov(d.wp, "WP") * s + xp) * (ov(d.lp, "LP") * s + xp);
+            } else if (!std::isnan(d.lm) || !std::isnan(d.lp) || !std::isnan(d.wm) || !std::isnan(d.wp))
+                throw std::runtime_error(d.instanceName + ": LM, LP, WM, WP are LEVEL 3 parameters");
             d.saturationCurrent_I_S_A = first(c, {"IS", "JS"}, 1e-14);
             d.emissionCoefficient_N   = c->get("N", 1.0);
             auto& k = d.card;
@@ -2027,6 +2052,11 @@ void SPICEParser::parseDiode(const std::vector<std::string>& tok0, TensorBlock& 
     for (size_t i = 4; i < tok.size(); ++i) {
         const std::string k = toUpper(tok[i]);
         if (k == "THERMAL") { d.thermalFlag = true; continue; }
+        if ((k == "W" || k == "L" || k == "LM" || k == "LP" || k == "WM" || k == "WP") && i + 1 < tok.size() && isValue(tok[i + 1])) {
+            const double v = parseValue(tok[++i]);
+            (k == "W" ? d.w : k == "L" ? d.l : k == "LM" ? d.lm : k == "LP" ? d.lp : k == "WM" ? d.wm : d.wp) = v;
+            continue;
+        }
         if (k == "PJ" && i + 1 < tok.size() && isValue(tok[i + 1])) { d.pj = parseValue(tok[++i]); d.pjGiven = true; continue; }
         if (k == "AREA" || (i == 4 && isValue(tok[i]))) d.areaGiven = true;
         if (k == "M" && i + 1 < tok.size() && isValue(tok[i + 1])) d.mult = parseValue(tok[i + 1]);

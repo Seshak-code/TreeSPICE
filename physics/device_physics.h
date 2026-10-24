@@ -533,6 +533,7 @@ struct DiodeModel {
     P fcs = 0.5, ikp = 0.0;                                // sidewall FC, knee current (IKP*PJ*M; 0: none)
     P itun = 0.0, itunsw = 0.0, vtt = 30.0 * PhysicsConstants::V_THERMAL_NOM;  // tunnelling: JTUN*AREA, JTUNSW*PJ, NTUN*Vt
     bool swSep = false; P gsw = 0.0;                       // RSW given: the sidewall's own node A_sw, through PJ*M/RSW
+    P cpar = 0.0;                                          // LEVEL 3's linear overlap capacitance
 };
 
 // Breakdown voltage xbv such that the reverse current at -BV is IBV (ngspice
@@ -603,7 +604,7 @@ inline std::pair<T, T> diode_iq(T vd, const DiodeModel<P>& p)
     const auto [cdb, cdsw] = diode_junction(vd, vd, p);
     const T cd = cdb + (p.swSep ? T(0.0) : cdsw) + p.gmin * vd;
     // the transit-time charge follows the junction current with its GMIN (ngspice: TT*GMIN of capacitance at any bias)
-    T q = depletion_charge(vd, p.cjo, p.m, p.vj, p.fc) + p.tt * cd;
+    T q = depletion_charge(vd, p.cjo, p.m, p.vj, p.fc) + p.tt * cd + p.cpar * vd;
     if (!p.swSep) q = q + depletion_charge(vd, p.cjsw, p.mjsw, p.vjsw, p.fcs);
     return {cd, q};
 }

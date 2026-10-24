@@ -994,7 +994,8 @@ public:
     return 5;
   }
   static bool junctionHasCharge(const Junction &j) {
-    if (j.d) return j.d->card.cjo > 0.0 || j.d->card.cjsw > 0.0 || j.d->card.tt > 0.0 || (j.d->heat && j.d->heat->cth0 > 0.0);
+    if (j.d) return j.d->card.cjo > 0.0 || j.d->card.cjsw > 0.0 || j.d->card.tt > 0.0 || j.d->card.cpar > 0.0 ||
+                    (j.d->heat && j.d->heat->cth0 > 0.0);
     if (j.f) return j.f->card.cgs > 0.0 || j.f->card.cgd > 0.0;
     const auto &c = j.q->card;
     return c.cje > 0.0 || c.cjc > 0.0 || c.cjs > 0.0 || c.tf > 0.0 || c.tr > 0.0 || (c.rco > 0.0 && c.qco > 0.0);
