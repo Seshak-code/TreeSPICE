@@ -561,6 +561,7 @@ struct SimulationEnvironment {
     double reltol = 1e-3, abstol = 1e-12, vntol = 1e-6, trtol = 7.0, gmin = 1e-12, rshunt = 0.0;
     int itl1 = 100, itl2 = 50, itl4 = 0, maxord = 2;
     bool gear = false;                 // .options method=gear
+    bool bypass = true;                // .options bypass=0: no device bypass, and no per-device copy of its last evaluation
     
     // Noise Profile
     bool thermal_noise_enabled = false;
@@ -1318,7 +1319,7 @@ public:
     // Create the OSDI runtime instance of every OSDI device (global block and
     // every placed instance) whose state slot is empty; tempK is the device
     // temperature handed to setup_instance. Throws on model errors.
-    void instantiateOsdi(double tempK);
+    void instantiateOsdi(double tempK, bool keepEval);  // keepEval: OSDI device bypass (.options bypass)
     
     // Hierarchical Support
     std::vector<std::pair<std::string, std::string>> probes; // Name, GlobalNodeString

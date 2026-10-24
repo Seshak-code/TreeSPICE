@@ -750,6 +750,45 @@ int main() {
             check(w.size() == 2 && w[0].nodeVoltages[1] == w[1].nodeVoltages[1] && std::abs(w[0].nodeVoltages[1] - 5.0) > 1e-6,
                   "Monte Carlo variation survives the .dc TEMP re-parse");
         }
+        {   // .save narrows what a run stores to the vectors .save, .print and .meas name (ngspice saves only those);
+            // .save all, or none, keeps every node and branch
+            auto tr = [&](const char* save) {
+                auto engine = ISimulationEngine::create();
+                SimulationRequestDTO q;
+                q.source.payload = std::string("save\nV1 a 0 PULSE(0 1 0 1u 1u 5u 20u)\nR1 a b 1k\nR2 b out 1k\nC1 out 0 1n\n"
+                                               "R3 out 0 10k\n.meas tran vb max v(b)\n") + save + "\n.tran 0.5u 10u\n.end\n";
+                q.transient.stepSizeS = 0.5e-6;
+                q.transient.stopTimeS = 1e-5;
+                EngineCallbacks c;
+                return engine->createSession()->runTransient(q, c, nullptr);
+            };
+            const auto full = tr(""), sel = tr(".save v(out) i(v1)"), all = tr(".save all v(out)");
+            const bool ok = full.converged && sel.converged && all.converged && !sel.waveformPoints.empty() &&
+                            sel.waveformPoints.size() == full.waveformPoints.size();
+            const auto& p = ok ? sel.waveformPoints.back() : WaveformDataPoint{};
+            const auto& f = ok ? full.waveformPoints.back() : WaveformDataPoint{};
+            // full columns: a b out / v1; .save v(out) i(v1) keeps out (and b, which .meas reads), v1
+            check(ok && sel.nodeNames == std::vector<std::string>{"b", "out"} && sel.branchNames == std::vector<std::string>{"v1"} &&
+                      p.nodeVoltages.size() == 2 && p.nodeVoltages[1] == f.nodeVoltages[2] && p.branchCurrents[0] == f.branchCurrents[0] &&
+                      all.nodeNames.size() == 3 && !sel.measures.empty() && !full.measures.empty() &&
+                      sel.measures[0].value == full.measures[0].value,
+                  ".save keeps the vectors .save, .print and .meas name; .save all keeps every one");
+        }
+        {   // OSDI devices with the same model and parameters share one setup; .options bypass=0 (memory mode)
+            // keeps no copy of each device's last evaluation and evaluates always: the same transient, to
+            // within bypass's extrapolation (RELTOL 1e-3 of the step's voltage change)
+            auto inv = [&](const char* opt) {
+                const std::string n = std::string("osdi share\nVDD vdd 0 1.8\nVIN in 0 PULSE(0 1.8 0.2n 0.1n 0.1n 1n 2.4n)\n"
+                                      "M1 o1 in 0 0 nm W=1u L=0.18u\nM2 o1 in vdd vdd pm W=2u L=0.18u\n"
+                                      "M3 o2 o1 0 0 nm W=1u L=0.18u\nM4 o2 o1 vdd vdd pm W=2u L=0.18u\nC1 o2 0 5f\n"
+                                      ".model nm nmos level=54 version=4.8\n.model pm pmos level=54 version=4.8\n") + opt + "\n.tran 0.02n 0.3n\n.end\n";
+                const auto r = run(PrecisionMode::Native_F64, n, 0.02e-9, 0.3e-9);
+                return r.converged && !r.waveformPoints.empty() ? V(r, 4) : NAN;  // o2, mid-rise
+            };
+            const double dflt = inv(""), mem = inv(".options bypass=0");
+            check(dflt > 0.1 && dflt < 1.0 && near(dflt, mem, 2e-3),
+                  "OSDI memory mode (.options bypass=0) runs the default's transient (" + std::to_string(dflt) + " vs " + std::to_string(mem) + " V)");
+        }
         {   // HICUM/L2 (BJT LEVEL 8, OSDI): a PNP mirrors the NPN. ngspice 47's native HICUM PNP cannot be the
             // reference: its temperature limiter gets NaN and the operating point fails (the OSDI model in ngspice agrees).
             const char* card = "c10=2e-30 qp0=2e-14 ich=1e-2 hfe=100 hfc=10 cjei0=1e-14 vdei=0.9 zei=0.5 rbi0=10 rbx=5 rcx=5 re=2 "

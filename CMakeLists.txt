@@ -226,6 +226,12 @@ if(TREESPICE_STANDALONE)
     # OSDI-backed models (HICUM) load from datasets/osdi, which tests/build_osdi.sh fills
     set_tests_properties(test_engine_fixes PROPERTIES ENVIRONMENT "TREESPICE_OSDI_PATH=${CMAKE_CURRENT_SOURCE_DIR}/datasets/osdi")
 
+    # Scale track: live heap per device after parse and the operating point (macOS malloc zones)
+    if(APPLE)
+        add_executable(scale_probe bench/scale_probe.cpp)
+        target_link_libraries(scale_probe PRIVATE acutesim_engine)
+    endif()
+
     # Solver benchmark vs SuiteSparse KLU (bench/klu_bench.py); built only if KLU is installed
     # (plain find_*: Homebrew's SuiteSparse CMake package demands OpenMP, which Apple clang lacks)
     find_path(KLU_INCLUDE_DIR klu.h PATH_SUFFIXES suitesparse)

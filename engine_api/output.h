@@ -46,5 +46,9 @@ ENGINE_API void writeTable(std::ostream& os, const OutputTable& t, const std::st
 
 // One plot of an ngspice raw file; call again to append another plot to the same stream.
 ENGINE_API void writeRaw(std::ostream& os, const OutputTable& t, const std::string& title, bool ascii);
+// writeRaw in parts, for rows that stream: the header of t's columns (their names and types; values unused) for
+// `points` rows, then each row k (the scale value first when t has one)
+ENGINE_API void writeRawHeader(std::ostream& os, const OutputTable& t, size_t points, const std::string& title, bool ascii);
+ENGINE_API void writeRawRow(std::ostream& os, size_t k, const std::vector<std::complex<double>>& row, bool complexData, bool ascii);
 
 }  // namespace acutesim

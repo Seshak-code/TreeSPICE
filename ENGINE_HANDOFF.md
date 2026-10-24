@@ -182,6 +182,27 @@ then the two Roadmap sections it points to. Everything below was verified by run
     - Device evaluation on the GPU: OSDI models are host machine code, so evaluation stays on CPU threads.
     - Isomorphism reuse beyond what bypass gives.
     - Multirate integration.
+- **Update 2026-10-24 (Claude Code, scale track S1, branch `mac/scale`, PR #21 stacked on #20 → #19):** memory
+  per device, measured by `bench/scale_probe <netlist> [tran <step> <stop>]` (live heap per device; tran samples
+  the peak, `SCALE_PROBE_PAUSE=<s>` holds it for `malloc_history -callTree`). 6T SRAM arrays:
+  - **OSDI setup sharing:** identical devices (model, instance parameters, terminal count) share one
+    `osdi::Setup`. BSIM4's module block is 4.3 KB; each evaluation runs on a per-thread copy. Per device:
+    charge history plus, for bypass, a compact copy of the last evaluation. `.options bypass=0` (or
+    `TREESPICE_BYPASS=0`) is memory mode, with no copy. BSIM4 netlist: 7.5 → 1.0 KB/device (0.49 KB).
+  - **Contraction singles:** diagonal-only variables (BSIM4's collapsed zero-volt body branches, 2 per device)
+    are solved as b/a outside the tree. A BSIM4 SRAM had 112k fronts for 112k unknowns; now 16k.
+  - **CSR slot lookup:** binary search, not a hash map (60 B/entry, a lookup per stamp). OSDI solver caches
+    are flat.
+  - **Outputs:** `.save` narrows what a run stores (ngspice: the vectors `.save`, `.print`, `.meas` name).
+    `treespice -r` streams a `.tran` with every vector to the raw file (`TransientConfigDTO::keepPoints`).
+    Stored waveforms (nodes × steps) dominated long runs.
+  - **Results:** BSIM4 transient peak ~13 → 3.5 KB/device; MOS1 1.5 KB/device (1.26 with `.save`). BSIM4 op
+    0.34 → 0.15 s at 48k devices. run_diff identical except one AC case at 1e-16. Scale ladder (BSIM4
+    chains, `tests/scale_ladder.py`): 1e3 stages 1.46 s (3.5x faster than ngspice; was 1.9x), 1e4 stages
+    13.0 s (was 28 s; ngspice fails), the 50 % crossing 1.1 ps from ngspice's as before.
+  - **Next:** stamp triplets as slot-indexed values (~0.4 KB/device BSIM4); per-iteration CSR pattern copies;
+    then **S3** (1e9 arrays): a hierarchical contraction plan per cell type, factors shared across identical
+    cell inputs, class-compressed instance state (copy-on-write). At 1e9, any per-instance record is too much.
 - **Status of the plan:** Roadmap Phase 1 (Foundations) is done. See `Roadmap.md` →
   "⚙️ ENGINE FEATURE LIST & VERIFIED SUPPORT STATUS" (what works, by device/analysis, with ✅/⚠️/❌/🚫/❓)
   and "🎯 END-TO-END GOAL & ENGINE SCALE PLAN" (phases and gates).

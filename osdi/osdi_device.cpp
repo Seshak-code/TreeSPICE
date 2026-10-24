@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <tuple>
 
 #if defined(_WIN32)
 #  include <windows.h>
@@ -160,28 +161,39 @@ Model::Model(const Descriptor *desc, const std::string &cardName, const std::map
 
 Model::~Model() { std::free(data); }
 
-Instance::Instance(std::shared_ptr<Model> model, const std::string &name,
-                   const std::vector<std::pair<std::string, double>> &params, uint32_t connected, double tempK)
-    : model_(std::move(model)), name_(name), connected_(connected) {
-    const Descriptor *d = model_->d;
-    if (connected > d->num_terminals || connected == 0)
+Setup::Setup(std::shared_ptr<Model> m, const std::string &name,
+             const std::vector<std::pair<std::string, double>> &params, uint32_t conn, double tempK)
+    : model(std::move(m)), connected(conn) {
+    const Descriptor *d = model->d;
+    if (conn > d->num_terminals || conn == 0)
         throw std::runtime_error(name + ": " + d->name + " has " + std::to_string(d->num_terminals) + " terminals");
     data_ = std::calloc(1, std::max<uint32_t>(d->instance_size, 1));
+    try {
+        init(name, params, tempK);
+    } catch (...) {
+        std::free(data_);
+        throw;
+    }
+}
+
+void Setup::init(const std::string &name, const std::vector<std::pair<std::string, double>> &params, double tempK) {
+    const Descriptor *d = model->d;
+    const uint32_t conn = connected;
     for (const auto &[k, v] : params) {
         const uint32_t id = findParam(d, k);
         if (id == NONE && lower(k) == "m") {  // the simulator's device multiplier, as in ngspice
             if (!(v > 0.0)) throw std::runtime_error(name + ": m must be > 0");
-            mult_ = v;
+            mult = v;
             continue;
         }
         if (id == NONE || (d->param_opvar[id].flags & PARA_KIND_MASK) != PARA_KIND_INST)
             throw std::runtime_error(name + ": " + k + " is not an instance parameter of " + d->name);
-        writeParam(d, data_, model_->data, id, v, ACCESS_FLAG_INSTANCE, name);
+        writeParam(d, data_, model->data, id, v, ACCESS_FLAG_INSTANCE, name);
     }
     double gminVal = 1e-12;  // setup sees the default; evaluate() gets the run's gmin
     SimParas sp = simParas(&gminVal);
     InitInfo r{0, 0, nullptr};
-    d->setup_instance((void *)name_.c_str(), data_, model_->data, tempK, connected, &sp, &r);
+    d->setup_instance((void *)name.c_str(), data_, model->data, tempK, conn, &sp, &r);
     checkInit(d, r, name);
 
     // Node collapsing, as OpenVAF's reference simulator does it: each collapsed
@@ -200,89 +212,132 @@ Instance::Instance(std::shared_ptr<Model> model, const std::string &name,
         toGnd = toGnd || to == NONE;
         if (from == NONE && !toGnd) { from = to; toGnd = true; }  // its partner is already ground
         if (from == NONE || from == to) continue;
-        if (from < connected && (toGnd || to < connected)) continue;  // terminals cannot be collapsed
+        if (from < conn && (toGnd || to < conn)) continue;  // terminals cannot be collapsed
         if (!toGnd && from < to) std::swap(from, to);
-        for (auto &m : map) {
-            if (m == from) m = toGnd ? NONE : to;
-            else if (m != NONE && m > from) --m;
+        for (auto &mm : map) {
+            if (mm == from) mm = toGnd ? NONE : to;
+            else if (mm != NONE && mm > from) --mm;
         }
     }
-    numLocal_ = 0;
-    local_.assign(N, -1);
+    local.assign(N, -1);
     for (uint32_t i = 0; i < N; ++i)
-        if (map[i] != NONE) { local_[i] = (int)map[i]; numLocal_ = std::max(numLocal_, map[i] + 1); }
-    flow_.assign(numLocal_, false);  // unknowns that are branch currents (V(a,b) <+ ... branches)
+        if (map[i] != NONE) { local[i] = (int)map[i]; numLocal = std::max(numLocal, map[i] + 1); }
+    flow.assign(numLocal, false);  // unknowns that are branch currents (V(a,b) <+ ... branches)
     for (uint32_t i = 0; i < N; ++i)
-        if (local_[i] >= 0 && d->nodes[i].is_flow) flow_[local_[i]] = true;
+        if (local[i] >= 0 && d->nodes[i].is_flow) flow[local[i]] = true;
 
-    // OSDI-facing numbering: slot 0 = ground, local node k = slot k + 1. The
-    // Jacobian pointers address dense (numLocal+1)^2 buffers in that numbering.
+    // OSDI-facing numbering: slot 0 = ground, local node k = slot k + 1. The Jacobian pointers address dense
+    // (numLocal+1)^2 buffers in that numbering (set per evaluation, on the thread's buffers); slot / numSlots
+    // index the distinct local positions for a compact copy.
     uint32_t *nodeMap = (uint32_t *)((char *)data_ + d->node_mapping_offset);
-    for (uint32_t i = 0; i < N; ++i) nodeMap[i] = local_[i] < 0 ? 0 : (uint32_t)local_[i] + 1;
-    const size_t L1 = numLocal_ + 1;
-    G_.assign(L1 * L1, 0.0);
-    C_.assign(L1 * L1, 0.0);
-    double **resistPtr = (double **)((char *)data_ + d->jacobian_ptr_resist_offset);
+    for (uint32_t i = 0; i < N; ++i) nodeMap[i] = local[i] < 0 ? 0 : (uint32_t)local[i] + 1;
+    const size_t L1 = numLocal + 1;
+    slot.assign(numLocal * numLocal, -1);
     for (uint32_t e = 0; e < d->num_jacobian_entries; ++e) {
         const JacobianEntry &je = d->jacobian_entries[e];
-        const size_t at = nodeMap[je.nodes.node_1] * L1 + nodeMap[je.nodes.node_2];
-        resistPtr[e] = &G_[at];
-        if (je.react_ptr_off != NONE) *(double **)((char *)data_ + je.react_ptr_off) = &C_[at];
+        const uint32_t a = nodeMap[je.nodes.node_1], b = nodeMap[je.nodes.node_2];
+        entryAt.push_back((uint32_t)(a * L1 + b));
+        if (a > 0 && b > 0 && slot[(a - 1) * numLocal + b - 1] < 0) slot[(a - 1) * numLocal + b - 1] = (int)numSlots++;
     }
-    solve_.assign(L1, 0.0);
-    fBuf_.assign(L1, 0.0);
-    qBuf_.assign(L1, 0.0);
-    f_.assign(numLocal_, 0.0);
-    q_.assign(numLocal_, 0.0);
-    qPrev.assign(numLocal_, 0.0);
-    iPrev.assign(numLocal_, 0.0);
-    for (auto &h : vHist) h.assign(numLocal_, 0.0);
-    noiseBuf_.assign(d->num_noise_src, 0.0);
 }
 
-Instance::~Instance() { std::free(data_); }
+Setup::~Setup() { std::free(data_); }
 
-bool Instance::evaluate(const double *v, uint32_t analysisFlags, double abstime) {
-    const Descriptor *d = model_->d;
-    solve_[0] = 0.0;
-    for (uint32_t k = 0; k < numLocal_; ++k) solve_[k + 1] = v[k];
-    std::fill(fBuf_.begin(), fBuf_.end(), 0.0);
-    std::fill(qBuf_.begin(), qBuf_.end(), 0.0);
-    std::fill(G_.begin(), G_.end(), 0.0);
-    std::fill(C_.begin(), C_.end(), 0.0);
-    double gminVal = gmin;
-    SimInfo info{simParas(&gminVal), abstime, solve_.data(), nullptr, nullptr,
-                 analysisFlags | CALC_RESIST_RESIDUAL | CALC_REACT_RESIDUAL | CALC_RESIST_JACOBIAN |
-                     CALC_REACT_JACOBIAN};
-    const uint32_t ret = d->eval((void *)name_.c_str(), data_, model_->data, &info);
-    d->load_residual_resist(data_, model_->data, fBuf_.data());
-    d->load_residual_react(data_, model_->data, qBuf_.data());
-    d->load_jacobian_resist(data_, model_->data);
-    d->load_jacobian_react(data_, model_->data, 1.0);
-    if (mult_ != 1.0) {  // m parallel devices: every current, charge and derivative scales
-        for (auto &x : fBuf_) x *= mult_;
-        for (auto &x : qBuf_) x *= mult_;
-        for (auto &x : G_) x *= mult_;
-        for (auto &x : C_) x *= mult_;
+namespace {
+// One thread's evaluation buffers: the instance block copied from a Setup, and the OSDI-facing (ground at 0)
+// solution, residuals and dense Jacobians it writes
+struct Scratch {
+    std::vector<std::max_align_t> block;
+    std::vector<double> solve, f, q, G, C, noise;
+};
+thread_local Scratch scratch;
+
+// Run eval and the loads on this thread's copy of the setup at v; s holds the results (multiplier applied)
+uint32_t evalOn(const Setup &st, const std::string &name, const double *v, uint32_t flags, double abstime, double gmin) {
+    const Descriptor *d = st.model->d;
+    Scratch &s = scratch;
+    const size_t L1 = st.numLocal + 1, words = (d->instance_size + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t);
+    if (s.block.size() < std::max<size_t>(words, 1)) s.block.resize(std::max<size_t>(words, 1));
+    std::memcpy(s.block.data(), st.block(), d->instance_size);
+    char *blk = (char *)s.block.data();
+    s.solve.assign(L1, 0.0);
+    s.f.assign(L1, 0.0);
+    s.q.assign(L1, 0.0);
+    s.G.assign(L1 * L1, 0.0);
+    s.C.assign(L1 * L1, 0.0);
+    double **resistPtr = (double **)(blk + d->jacobian_ptr_resist_offset);
+    for (uint32_t e = 0; e < d->num_jacobian_entries; ++e) {
+        resistPtr[e] = &s.G[st.entryAt[e]];
+        const uint32_t off = d->jacobian_entries[e].react_ptr_off;
+        if (off != NONE) *(double **)(blk + off) = &s.C[st.entryAt[e]];
     }
-    for (uint32_t k = 0; k < numLocal_; ++k) { f_[k] = fBuf_[k + 1]; q_[k] = qBuf_[k + 1]; }
-    if (ret & EVAL_RET_FLAG_FATAL) { error_ = lastError.empty() ? "fatal model error" : lastError; evalFlags = 0; return false; }
-    evalAt.assign(v, v + numLocal_);
-    evalFlags = analysisFlags;
+    for (uint32_t k = 0; k < st.numLocal; ++k) s.solve[k + 1] = v[k];
+    double gminVal = gmin;
+    SimInfo info{simParas(&gminVal), abstime, s.solve.data(), nullptr, nullptr,
+                 flags | CALC_RESIST_RESIDUAL | CALC_REACT_RESIDUAL | CALC_RESIST_JACOBIAN | CALC_REACT_JACOBIAN};
+    const uint32_t ret = d->eval((void *)name.c_str(), blk, st.model->data, &info);
+    d->load_residual_resist(blk, st.model->data, s.f.data());
+    d->load_residual_react(blk, st.model->data, s.q.data());
+    d->load_jacobian_resist(blk, st.model->data);
+    d->load_jacobian_react(blk, st.model->data, 1.0);
+    if (st.mult != 1.0) {  // m parallel devices: every current, charge and derivative scales
+        for (auto *b : {&s.f, &s.q, &s.G, &s.C})
+            for (auto &x : *b) x *= st.mult;
+    }
+    return ret;
+}
+}  // namespace
+
+Instance::Instance(std::shared_ptr<const Setup> setup, std::string name, bool keepEval)
+    : setup_(std::move(setup)), name_(std::move(name)), keep_(keepEval) {
+    s_.assign((keep_ ? 8 * numLocal() + 2 * setup_->numSlots : 5 * numLocal()), 0.0);
+}
+
+const std::string &Instance::error() { return lastError; }
+
+bool Instance::evaluate(const double *v, uint32_t analysisFlags, double abstime, Eval &out) {
+    const Setup &st = *setup_;
+    const uint32_t L = st.numLocal, L1 = L + 1;
+    lastError.clear();
+    const uint32_t ret = evalOn(st, name_, v, analysisFlags, abstime, gmin);
+    const Scratch &s = scratch;
+    out.f.resize(L); out.q.resize(L); out.G.resize(L * L); out.C.resize(L * L);
+    for (uint32_t a = 0; a < L; ++a) {
+        out.f[a] = s.f[a + 1];
+        out.q[a] = s.q[a + 1];
+        for (uint32_t b = 0; b < L; ++b) { out.G[a * L + b] = s.G[(a + 1) * L1 + b + 1]; out.C[a * L + b] = s.C[(a + 1) * L1 + b + 1]; }
+    }
+    if (ret & EVAL_RET_FLAG_FATAL) {
+        if (lastError.empty()) lastError = "fatal model error";
+        evalFlags_ = 0;
+        return false;
+    }
+    if (keep_) {
+        std::copy(v, v + L, &s_[5 * L]);
+        std::copy(out.f.begin(), out.f.end(), &s_[6 * L]);
+        std::copy(out.q.begin(), out.q.end(), &s_[7 * L]);
+        double *g = &s_[8 * L], *c = g + st.numSlots;
+        for (uint32_t k = 0; k < L * L; ++k)
+            if (st.slot[k] >= 0) { g[st.slot[k]] = out.G[k]; c[st.slot[k]] = out.C[k]; }
+    }
+    evalFlags_ = analysisFlags;
     return true;
 }
 
-std::vector<Instance::NoiseGen> Instance::noise(double freq) {
-    const Descriptor *d = model_->d;
+std::vector<Instance::NoiseGen> Instance::noise(const double *v, double freq) {
+    const Setup &st = *setup_;
+    const Descriptor *d = st.model->d;
     std::vector<NoiseGen> out;
     if (!d->num_noise_src) return out;
-    std::fill(noiseBuf_.begin(), noiseBuf_.end(), 0.0);
-    d->load_noise(data_, model_->data, freq, noiseBuf_.data());
-    for (uint32_t s = 0; s < d->num_noise_src; ++s) {
-        const NodePair &np = d->noise_sources[s].nodes;
-        const int a = np.node_1 == NONE ? -1 : local_[np.node_1];
-        const int b = np.node_2 == NONE ? -1 : local_[np.node_2];
-        if (a != b) out.push_back({a, b, mult_ * noiseBuf_[s]});
+    evalOn(st, name_, v, ANALYSIS_NOISE | CALC_NOISE, 0.0, gmin);  // the noise load reads this evaluation
+    Scratch &s = scratch;
+    s.noise.assign(d->num_noise_src, 0.0);
+    d->load_noise(s.block.data(), st.model->data, freq, s.noise.data());
+    for (uint32_t k = 0; k < d->num_noise_src; ++k) {
+        const NodePair &np = d->noise_sources[k].nodes;
+        const int a = np.node_1 == NONE ? -1 : st.local[np.node_1];
+        const int b = np.node_2 == NONE ? -1 : st.local[np.node_2];
+        if (a != b) out.push_back({a, b, st.mult * s.noise[k]});
     }
     return out;
 }
@@ -294,14 +349,19 @@ std::vector<Instance::NoiseGen> Instance::noise(double freq) {
 // ---------------------------------------------------------------------------
 #include "../netlist/circuit.h"
 
-void TensorNetlist::instantiateOsdi(double tempK) {
+void TensorNetlist::instantiateOsdi(double tempK, bool keepEval) {
+    // one Setup per model, instance parameters and terminal count (tempK is one per call)
+    std::map<std::tuple<const osdi::Model *, std::vector<std::pair<std::string, double>>, uint32_t>,
+             std::shared_ptr<const osdi::Setup>> setups;
     auto make = [&](const TensorBlock &blk, BlockState &st, const std::string &prefix) {
         st.osdiState.resize(blk.osdiDevices.size());
         for (size_t i = 0; i < blk.osdiDevices.size(); ++i) {
             const OsdiDevice &dev = blk.osdiDevices[i];
             if (st.osdiState[i] || !dev.model) continue;
-            st.osdiState[i] = std::make_shared<osdi::Instance>(dev.model, prefix + dev.instanceName, dev.params,
-                                                               (uint32_t)dev.nodes.size(), tempK);
+            auto &su = setups[{dev.model.get(), dev.params, (uint32_t)dev.nodes.size()}];
+            if (!su) su = std::make_shared<const osdi::Setup>(dev.model, prefix + dev.instanceName, dev.params,
+                                                              (uint32_t)dev.nodes.size(), tempK);
+            st.osdiState[i] = std::make_shared<osdi::Instance>(su, prefix + dev.instanceName, keepEval);
         }
     };
     make(globalBlock, globalState, "");

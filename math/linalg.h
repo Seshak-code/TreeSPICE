@@ -71,36 +71,22 @@ struct Triplet {
 /**
  * CachedCsrPattern
  *
- * Stores the frozen sparsity pattern (row_pointer + col_indices) produced by a
- * one-time symbolic assembly pass and provides O(1) lookup of the CSR value
- * index for any (row,col) pair.  Subsequent NR iterations use assembleFast()
- * to scatter stamps directly into a pre-allocated values array, avoiding the
- * full sort+dedup path of createCsr().
+ * The frozen sparsity pattern (row_pointer + col_indices, columns sorted within a row) of a one-time
+ * symbolic assembly pass, and the CSR value index of any (row, col): later Newton iterations scatter
+ * their stamps through assembleFast() instead of createCsr()'s sort + dedup.
  */
 struct CachedCsrPattern {
     std::vector<int> row_pointer;
     std::vector<int> col_indices;
     int rows = 0, cols = 0, nnz = 0;
 
-    // hash(row,col) → index into values[]
-    std::unordered_map<int64_t, int> position_map;
-
-    // Build position_map from row_pointer + col_indices (call after constructing)
-    void buildPositionMap() {
-        position_map.reserve(static_cast<size_t>(nnz) * 2);
-        for (int r = 0; r < rows; ++r) {
-            for (int p = row_pointer[r]; p < row_pointer[r+1]; ++p) {
-                int64_t key = (int64_t(r) << 32) | int64_t(unsigned(col_indices[p]));
-                position_map[key] = p;
-            }
-        }
-    }
-
-    // Returns the CSR value index for (row, col), or -1 if not in pattern.
+    // The CSR value index for (row, col), or -1 if not in the pattern: a binary search of the row (a hash map
+    // here was 60 bytes per entry, a quarter of a BSIM4 SRAM array's solver memory)
     int indexOf(int row, int col) const {
-        int64_t key = (int64_t(row) << 32) | int64_t(unsigned(col));
-        auto it = position_map.find(key);
-        return (it != position_map.end()) ? it->second : -1;
+        if (row < 0 || row >= rows) return -1;
+        const auto b = col_indices.begin() + row_pointer[row], e = col_indices.begin() + row_pointer[row + 1];
+        const auto it = std::lower_bound(b, e, col);
+        return it != e && *it == col ? (int)(it - col_indices.begin()) : -1;
     }
 };
 
@@ -216,7 +202,7 @@ public:
    * buildPattern()
    *
    * Performs a full createCsr() pass and extracts the frozen sparsity pattern
-   * (row_pointer + col_indices) plus a position_map for O(1) stamp lookups.
+   * (row_pointer + col_indices) for assembleFast's lookups.
    * Call once per topology change.  The returned pattern can then be handed to
    * assembleFast() on every subsequent NR iteration.
    */
@@ -228,7 +214,6 @@ public:
       pat.nnz         = csr.nnz;
       pat.row_pointer = csr.row_pointer;
       pat.col_indices = csr.col_indices;
-      pat.buildPositionMap();
       return pat;
   }
 
