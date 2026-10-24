@@ -16,6 +16,7 @@
 
 #include <array>
 #include <cmath>
+#include <complex>
 #include <cstdio>
 #include <string>
 #include <filesystem>
@@ -359,6 +360,111 @@ int main() {
         ok = r.converged && r.waveformPoints.size() == 1;
         check(ok && near(r.waveformPoints[0].nodeVoltages[2], slope, 1e-6 * std::abs(slope)) && std::abs(slope) > 1.0,
               "MOS LEVEL 6: 10 Hz AC gain equals the DC slope dv(3)/dVG");
+        // BJT quasi-saturation in AC: ngspice 47's Irci partial in vbc takes d ln((1+Kbci)/(1+Kbcx)) as
+        // Kbci'(1+Kbcx)/(1+Kbci)^2 (not Kbci'/(1+Kbci)), so its AC gain (-4.141 here) is not its own DC slope
+        // (-4.0175); the oracle is the DC slope: the 10 Hz gain equals the central difference of v(c) over VIN
+        {
+            const auto qs = [](double vin, const char* an) {
+                return "* bjt qs ac\nvin in 0 DC " + std::to_string(vin) + " AC 1\nrb in b 100\nvcc vcc 0 DC 3\nrl vcc c 500\n"
+                       "q1 c b 0 qs\n.model qs npn is=1e-15 bf=150 br=3 vaf=80 rb=20 rc=2 re=0.5 rco=80 vo=1.5 gamma=1e-9 "
+                       "qco=5e-12 cjc=1p cje=2p tf=0.2n tr=2n\n" + std::string(an);
+            };
+            req.source.payload = qs(0.79, ".ac lin 1 10 10\n");
+            const auto ra = engine->createSession()->runAC(req, cb);
+            const double hq = 1e-5, sq = (V(run(mode, qs(0.79 + hq, "")), 4) - V(run(mode, qs(0.79 - hq, "")), 4)) / (2 * hq);
+            const bool okq = ra.converged && ra.waveformPoints.size() == 1;
+            check(okq && near(ra.waveformPoints[0].nodeVoltages[3], sq, 1e-5 * std::abs(sq)) && near(sq, -4.0175, 2e-3),
+                  "BJT quasi-saturation: 10 Hz AC gain equals the DC slope dv(c)/dVIN (" +
+                      (okq ? std::to_string(ra.waveformPoints[0].nodeVoltages[3]) : ra.errorDetail) + " vs " + std::to_string(sq) + ")");
+        }
+        // Diode RSW: the separate sidewall's transient charge is its depletion charge (ngspice 47 stores the
+        // capacitance as that charge, so its sidewall current is d(C)/dt: 10 pF behind 1 ohm nearly vanishes, v(2)
+        // -4.02 V at 3 ns): a microohm RSW follows the common sidewall's -0.6965 V (ngspice's own, without RSW)
+        {
+            const auto d = [](const char* rsw) {
+                return "* diode rsw tran\nV1 1 0 PULSE(0 -5 1n 1n 1n 50n 100n)\nR1 1 2 1k\nD1 2 0 ds PJ=1\nR2 1 3 1k\nD2 3 0 dc PJ=1\n"
+                       ".model ds D(IS=1e-14 CJSW=10p MJSW=0.01 JSW=1e-15 " + std::string(rsw) + ")\n"
+                       ".model dc D(IS=1e-14 CJSW=10p MJSW=0.01 JSW=1e-15)\n.tran 0.1n 3n\n";
+            };
+            const auto rt = run(mode, d("RSW=1e-6"), 1e-10, 3e-9);
+            check(rt.converged && near(V(rt, 2), V(rt, 3), 1e-4) && near(V(rt, 3), -0.6965, 5e-3),
+                  "diode RSW: the sidewall's transient charge is its depletion charge (" + std::to_string(V(rt, 2)) + " vs " +
+                      std::to_string(V(rt, 3)) + " V)");
+        }
+        // Diode RSW with the bottom's characteristic in AC: the sidewall current follows the bottom's vd, which
+        // ngspice 47's AC load stamps as a conductance at A_sw behind RSW (0.295 here against its own DC slope
+        // 0.205): the 10 Hz gain equals the central difference of v(2) over VB
+        {
+            const auto dr = [](double vb, const char* an) {
+                return "* diode rsw ac\nVB 1 0 DC " + std::to_string(vb) + " AC 1\nR3 1 2 300\nD3 2 0 dc PJ=50u\n"
+                       ".model dc D(IS=1e-14 CJO=1p JSW=1e-9 CJSW=3e-7 RSW=100)\n" + std::string(an);
+            };
+            req.source.payload = dr(0.68, ".ac lin 1 10 10\n");
+            const auto ra = engine->createSession()->runAC(req, cb);
+            const double hd = 1e-5, sd = (V(run(mode, dr(0.68 + hd, "")), 2) - V(run(mode, dr(0.68 - hd, "")), 2)) / (2 * hd);
+            const bool okd = ra.converged && ra.waveformPoints.size() == 1;
+            check(okd && near(ra.waveformPoints[0].nodeVoltages[1], sd, 1e-5 * std::abs(sd)) && near(sd, 0.205, 2e-3),
+                  "diode RSW (bottom characteristic): 10 Hz AC gain equals the DC slope dv(2)/dVB (" +
+                      (okd ? std::to_string(ra.waveformPoints[0].nodeVoltages[1]) : ra.errorDetail) + " vs " + std::to_string(sd) + ")");
+        }
+        // Diode self-heating in AC. ngspice 47's AC leaves CTH0 out (dioacld stamps the thermal capacitor's
+        // operating-point current, 0) and the power's charge-current term its transient has, and its dI/dT misses
+        // the IKF knee (0.0396 against its DC slope 0.0426 here): (1) without junction charge the thermal loop is
+        // one pole, H0 / H(f) - 1 = j f / fp, H0 the 1 mHz gain = the DC slope of v(tj), IKF in;
+        // (2) with TT, v(tj) at 25.1 kHz is ngspice's own transient's 17.1606 - 0.00029j (a 1 mV sine, fitted),
+        // where its AC gives +0.0075j
+        {
+            const auto dh = [](double vd, const char* tt, const char* an) {
+                return "* diode heat ac\nVD a 0 DC " + std::to_string(vd) + " AC 1\nR1 a k 10\nD1 k 0 tj DH PJ=1 THERMAL\n"
+                       ".model DH D(IS=1e-12 N=1.2 RS=0.5 RTH0=200 TRS1=3e-3 JSW=1e-12 " + std::string(tt) + ")\n" + std::string(an);
+            };
+            auto ac = [&](const std::string& nl) {
+                req.source.payload = nl;
+                return engine->createSession()->runAC(req, cb);
+            };
+            const auto r1 = ac(dh(2.5, "CTH0=1e-5 IKF=0.5", ".ac lin 1 100 100\n")), r4 = ac(dh(2.5, "CTH0=1e-5 IKF=0.5", ".ac lin 1 400 400\n"));
+            const auto r0 = ac(dh(2.5, "CTH0=1e-5 IKF=0.5", ".ac lin 1 1e-3 1e-3\n"));
+            const double hv = 1e-5, sh = (V(run(mode, dh(2.5 + hv, "CTH0=1e-5 IKF=0.5", "")), 3) - V(run(mode, dh(2.5 - hv, "CTH0=1e-5 IKF=0.5", "")), 3)) / (2 * hv);
+            const bool okh = r0.converged && r1.converged && r4.converged && !r0.waveformPoints.empty() &&
+                             !r1.waveformPoints.empty() && !r4.waveformPoints.empty();
+            auto H = [](const SimulationResponseDTO& r) {
+                return std::complex<double>(r.waveformPoints[0].nodeVoltages[2], r.waveformPoints[0].nodeVoltagesImag[2]);
+            };
+            const std::complex<double> h0 = okh ? H(r0) : NAN, e1 = okh ? h0 / H(r1) - 1.0 : NAN, e4 = okh ? h0 / H(r4) - 1.0 : NAN;
+            check(okh && near(h0.real(), sh, 1e-5 * std::abs(sh)) && std::abs(e1.real()) < 1e-4 * std::abs(e1) &&
+                      near(e4.imag() / e1.imag(), 4.0, 1e-4) && e1.imag() > 0.0,
+                  "diode self-heating AC: the thermal loop's one pole at RTH0 || CTH0 (fp " +
+                      (okh ? std::to_string(100.0 / e1.imag()) : std::string("?")) + " Hz), its DC slope " + std::to_string(sh));
+            const auto rt = ac(dh(2.5, "CTH0=1e-13 TT=5n", ".ac lin 1 25118.9 25118.9\n"));
+            const bool okt = rt.converged && !rt.waveformPoints.empty();
+            check(okt && near(H(rt).real(), 17.16060, 2e-5) && near(H(rt).imag(), -2.8999e-4, 2e-6),
+                  "diode self-heating AC with TT: v(tj) is ngspice's transient's (" +
+                      (okt ? std::to_string(H(rt).real()) + std::to_string(H(rt).imag()) + "j" : rt.errorDetail) + ")");
+        }
+        // Diode LEVEL 3: ngspice 47 multiplies M into the W/L AREA and PJ and again where they scale the device
+        // (M^2), and takes its XOM / XOI default 1e4 in metres (no overlap capacitance) where a given value is in
+        // Angstrom: here M=2 is two M=1 diodes in parallel, and the default is the 1e4 Angstrom of XOM=1e4
+        {
+            const std::string m3 = ".option scale=1e-6\n.model d3 D(LEVEL=3 IS=1e-4 JSW=1e-10 CJO=2e-4 LM=50 WM=40 XM=1e-7)\n";
+            req.source.payload = "* level3 m\nVB 1 0 DC 0.7 AC 1\nR1 1 2 100\nD1 2 0 d3 W=20 L=10 M=2\nR2 1 3 100\nD2 3 0 d3 W=20 L=10\n"
+                                 "D3 3 0 d3 W=20 L=10\n" + m3 + ".ac lin 1 100Meg 100Meg\n";
+            const auto rm = engine->createSession()->runAC(req, cb);
+            const bool okm = rm.converged && !rm.waveformPoints.empty();
+            const auto& pm = okm ? rm.waveformPoints[0] : WaveformDataPoint{};
+            check(okm && near(pm.nodeVoltages[1], pm.nodeVoltages[2], 1e-10) && near(pm.nodeVoltagesImag[1], pm.nodeVoltagesImag[2], 1e-10) && std::abs(pm.nodeVoltagesImag[1]) > 1e-4,
+                  "diode LEVEL 3: W/L with M=2 is two M=1 diodes in parallel (" +
+                      (okm ? std::to_string(pm.nodeVoltages[1]) + " vs " + std::to_string(pm.nodeVoltages[2]) : rm.errorDetail) + ")");
+            auto ac3 = [&](const char* xom) {
+                req.source.payload = "* level3 xom\nVB 1 0 DC -1 AC 1\nR1 1 2 1k\nD1 2 0 d3 W=20 L=10\n"
+                                     ".option scale=1e-6\n.model d3 D(LEVEL=3 IS=1e-4 LM=50 WM=40 " + std::string(xom) + ")\n.ac lin 1 1G 1G\n";
+                const auto r = engine->createSession()->runAC(req, cb);
+                return r.converged && !r.waveformPoints.empty() ? r.waveformPoints[0].nodeVoltagesImag[1] : NAN;
+            };
+            const double dflt = ac3(""), given = ac3("XOM=1e4"), none = ac3("XOM=1e4 LM=0");
+            check(near(dflt, given, 1e-15) && std::abs(dflt - none) > 1e-3,
+                  "diode LEVEL 3: the XOM default is 1e4 Angstrom (" + std::to_string(dflt) + ", " + std::to_string(given) +
+                      ", no overlap " + std::to_string(none) + ")");
+        }
         // XSPICE aswitch in AC is the resistance its control sets (ngspice 47's AC load negates the conductance:
         // a 1 V source over 1k and the switch read 1.46 V there): the same divider as a resistor of that value
         {
@@ -371,6 +477,40 @@ int main() {
             check(ok2 && near(ra.waveformPoints[0].nodeVoltages[1], ra.waveformPoints[0].nodeVoltages[3], 1e-9) &&
                       near(ra.waveformPoints[0].nodeVoltages[1], 0.7597469, 1e-6),
                   "XSPICE aswitch in AC is its resistance (" + (ok2 ? std::to_string(ra.waveformPoints[0].nodeVoltages[1]) : ra.errorDetail) + " V)");
+        }
+        // XSPICE pswitch in AC is its resistance too (ngspice 47 stamps -1/r, as aswitch, and leaves out the control
+        // port's own): log, mid-way between cntl_off and cntl_on, r = sqrt(r_on r_off), the aswitch case's divider
+        {
+            req.source.payload = "* pswitch ac\nVS s 0 DC 1 AC 1\nR1 s x 1k\nVC c 0 DC 0.5\na1 %g c %gd(x 0) sw\n"
+                                 ".model sw pswitch(cntl_off=0 cntl_on=1 r_off=100k r_on=100)\n.ac lin 1 1k 1k\n";
+            const auto ra = engine->createSession()->runAC(req, cb);
+            const bool ok2 = ra.converged && ra.waveformPoints.size() == 1;
+            check(ok2 && near(ra.waveformPoints[0].nodeVoltages[1], 0.7597469, 1e-6),
+                  "XSPICE pswitch in AC is its resistance (" + (ok2 ? std::to_string(ra.waveformPoints[0].nodeVoltages[1]) : ra.errorDetail) + " V)");
+        }
+        // XSPICE lcouple on a linear core in AC is the inductor N^2 mu A / length = 100 uH it is in a transient
+        // (ngspice 47's winding gain is +jwN against its transient's -N d/dt on the core current: a negative
+        // inductor in AC): re jwl/(1+jwl) = 0.283043 at 1 kHz over 1 ohm, as the L element beside it
+        {
+            req.source.payload = "* lcouple ac\nVS s 0 DC 0 AC 1\nR1 s x 1\na1 x 0 mm 0 lc\n.model lc lcouple(num_turns=10)\n"
+                                 "a2 mm 0 cr\n.model cr core(h_array=[-1000 1000] b_array=[-1 1] area=1e-4 length=0.1)\n"
+                                 "R2 s y 1\nL2 y 0 1e-4\n.ac lin 1 1k 1k\n";
+            const auto ra = engine->createSession()->runAC(req, cb);
+            const bool ok2 = ra.converged && ra.waveformPoints.size() == 1;
+            check(ok2 && near(ra.waveformPoints[0].nodeVoltages[1], ra.waveformPoints[0].nodeVoltages[2], 1e-9) &&
+                      near(ra.waveformPoints[0].nodeVoltages[1], 0.283043, 1e-5),
+                  "XSPICE lcouple in AC is its inductor (" + (ok2 ? std::to_string(ra.waveformPoints[0].nodeVoltages[1]) : ra.errorDetail) + " V)");
+        }
+        // XSPICE inductoric in AC is an inductor's admittance 1/(jwl) (ngspice 47 gives jwl: a shunt one read as the
+        // series divider, 0.8467 V here): the same as an L element, re jwl/(1+jwl) = 0.283043 at 100 kHz over 1 ohm
+        {
+            req.source.payload = "* inductoric ac\nVS s 0 DC 0 AC 1\nR1 s x 1\na1 x 0 ind1\n.model ind1 inductoric(l=1u)\n"
+                                 "R2 s y 1\nL2 y 0 1u\n.ac lin 1 100k 100k\n";
+            const auto ra = engine->createSession()->runAC(req, cb);
+            const bool ok2 = ra.converged && ra.waveformPoints.size() == 1;
+            check(ok2 && near(ra.waveformPoints[0].nodeVoltages[1], ra.waveformPoints[0].nodeVoltages[2], 1e-9) &&
+                      near(ra.waveformPoints[0].nodeVoltages[1], 0.283043, 1e-5),
+                  "XSPICE inductoric in AC is an inductor (" + (ok2 ? std::to_string(ra.waveformPoints[0].nodeVoltages[1]) : ra.errorDetail) + " V)");
         }
         req.source.payload = mos6(1.3, ".noise v(3) VG lin 1 10 10\n");
         r = engine->createSession()->runNoise(req, cb);
@@ -476,7 +616,10 @@ int main() {
             {"V1 1 0 DC 1\nR1 1 2 1k\nQ1 2 2 0 NM\n.model NM NMOS\n", "is NMOS, not a NPN/PNP model"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 NM W=10u\n.model NM NMOS\n", "expected 4 nodes"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 y inv\n.model inv d_inverter\n", "supported in .tran only"},
-            {"V1 1 0 DC 1\nR1 1 0 1k\na1 j k c NULL NULL q qb jk\n.model jk d_jkff\n", "D_JKFF is not supported yet"},
+            {"V1 1 0 DC 1\nR1 1 0 1k\na1 1 2 sg\n.model sg seegen\n", "SEEGEN is not supported yet"},
+            {"V1 1 0 DC 1\nR1 1 2 1k\nD1 2 0 DV\n.model DV D(TT=1n VP=0.5 RSW=10)\n", "VP with RSW is not supported yet"},
+            {"V1 1 0 DC 1\nR1 1 0 1k\na1 [q] src\n.model src d_source(input_file=\"no_such_dsource.txt\")\n", "cannot open d_source input_file"},
+            {"V1 1 0 DC 1\nR1 1 0 1k\na1 [i] c NULL [q] sm\n.model sm d_state(state_file=\"no_such_state.txt\")\n", "cannot open d_state state_file"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 d2 d3 tri\n.model tri d_tristate(inertial_delay=true)\n", "inertial_delay on a d_tristate is not supported yet"},
             {"V1 1 0 DC 1\nR1 1 0 1k\na1 d1 y inv\n.model inv d_inverter(delay=1n)\n", "DELAY is not a D_INVERTER parameter"},
             {"V1 1 0 DC 1\nR1 1 2 1k\nM1 2 2 0 0 0 NM\n.model NM NMOS\n", "expected 4 nodes (d g s b) for a LEVEL 1"},
@@ -488,6 +631,22 @@ int main() {
             {".if (1)\nV1 1 0 DC 1\nR1 1 0 1k\n", ".if without .endif"},
             {".subckt rr a b r=1k\nR1 a b {r}\n.ends\nV1 1 0 DC 1\nX1 1 0 rr q=2\n", "has no parameter Q"},
         };
+        {  // Gummel-Poon AREA scales both junctions once: ngspice 47 takes the BC diode's IS times AREA twice (bjttemp:
+           // tSatCur already holds AREA, then *= AREAB, which defaults to AREA; its IBC path and ISC scale once), so
+           // in saturation its AREA = 2 collector current is -50.76 mA where twice AREA = 1's is -52.46 mA
+            const std::string q = "* bjt area\nvb b 0 0.8\nvc c 0 0.1\nq1 c b 0 qm area=2\nq2 c2 b 0 qm\nvc2 c2 0 0.1\n"
+                                  ".model qm npn is=1e-15 bf=100 br=2\n";
+            const auto a = run(mode, q + ".op\n");
+            bool ok = a.converged && !a.waveformPoints.empty() && a.waveformPoints.back().branchCurrents.size() >= 3;
+            const double i1 = ok ? a.waveformPoints.back().branchCurrents[1] : 0.0, i2 = ok ? a.waveformPoints.back().branchCurrents[2] : 0.0;
+            check(ok && near(i1, 2.0 * i2, 1e-9 * std::abs(i2)) && near(i2, -0.0262321676, 1e-6),
+                  "BJT AREA = 2 is twice AREA = 1 in saturation (" + std::to_string(i1) + " vs " + std::to_string(i2) + " A)");
+        }
+        {  // ngspice's xfer warns in a transient and gives its DC gain: an error here
+            const auto t = run(mode, "* xfer tran\nV1 1 0 DC 1\na1 1 2 xf\n.model xf xfer(table=[0 0 0 1k -3 -45])\nR1 2 0 1k\n", 1e-6, 1e-5);
+            check(!t.converged && t.errorDetail.find("xfer code model has no transient") != std::string::npos,
+                  "explicit error 'xfer code model has no transient' (" + t.errorDetail + ")");
+        }
         for (const auto &[net, want] : bad) {
             r = run(mode, std::string("* bad\n") + net + ".op\n");
             check(!r.converged && r.errorDetail.find(want) != std::string::npos,
@@ -590,6 +749,45 @@ int main() {
             const auto w = session->runDC(req).waveformPoints;
             check(w.size() == 2 && w[0].nodeVoltages[1] == w[1].nodeVoltages[1] && std::abs(w[0].nodeVoltages[1] - 5.0) > 1e-6,
                   "Monte Carlo variation survives the .dc TEMP re-parse");
+        }
+        {   // .save narrows what a run stores to the vectors .save, .print and .meas name (ngspice saves only those);
+            // .save all, or none, keeps every node and branch
+            auto tr = [&](const char* save) {
+                auto engine = ISimulationEngine::create();
+                SimulationRequestDTO q;
+                q.source.payload = std::string("save\nV1 a 0 PULSE(0 1 0 1u 1u 5u 20u)\nR1 a b 1k\nR2 b out 1k\nC1 out 0 1n\n"
+                                               "R3 out 0 10k\n.meas tran vb max v(b)\n") + save + "\n.tran 0.5u 10u\n.end\n";
+                q.transient.stepSizeS = 0.5e-6;
+                q.transient.stopTimeS = 1e-5;
+                EngineCallbacks c;
+                return engine->createSession()->runTransient(q, c, nullptr);
+            };
+            const auto full = tr(""), sel = tr(".save v(out) i(v1)"), all = tr(".save all v(out)");
+            const bool ok = full.converged && sel.converged && all.converged && !sel.waveformPoints.empty() &&
+                            sel.waveformPoints.size() == full.waveformPoints.size();
+            const auto& p = ok ? sel.waveformPoints.back() : WaveformDataPoint{};
+            const auto& f = ok ? full.waveformPoints.back() : WaveformDataPoint{};
+            // full columns: a b out / v1; .save v(out) i(v1) keeps out (and b, which .meas reads), v1
+            check(ok && sel.nodeNames == std::vector<std::string>{"b", "out"} && sel.branchNames == std::vector<std::string>{"v1"} &&
+                      p.nodeVoltages.size() == 2 && p.nodeVoltages[1] == f.nodeVoltages[2] && p.branchCurrents[0] == f.branchCurrents[0] &&
+                      all.nodeNames.size() == 3 && !sel.measures.empty() && !full.measures.empty() &&
+                      sel.measures[0].value == full.measures[0].value,
+                  ".save keeps the vectors .save, .print and .meas name; .save all keeps every one");
+        }
+        {   // OSDI devices with the same model and parameters share one setup; .options bypass=0 (memory mode)
+            // keeps no copy of each device's last evaluation and evaluates always: the same transient, to
+            // within bypass's extrapolation (RELTOL 1e-3 of the step's voltage change)
+            auto inv = [&](const char* opt) {
+                const std::string n = std::string("osdi share\nVDD vdd 0 1.8\nVIN in 0 PULSE(0 1.8 0.2n 0.1n 0.1n 1n 2.4n)\n"
+                                      "M1 o1 in 0 0 nm W=1u L=0.18u\nM2 o1 in vdd vdd pm W=2u L=0.18u\n"
+                                      "M3 o2 o1 0 0 nm W=1u L=0.18u\nM4 o2 o1 vdd vdd pm W=2u L=0.18u\nC1 o2 0 5f\n"
+                                      ".model nm nmos level=54 version=4.8\n.model pm pmos level=54 version=4.8\n") + opt + "\n.tran 0.02n 0.3n\n.end\n";
+                const auto r = run(PrecisionMode::Native_F64, n, 0.02e-9, 0.3e-9);
+                return r.converged && !r.waveformPoints.empty() ? V(r, 4) : NAN;  // o2, mid-rise
+            };
+            const double dflt = inv(""), mem = inv(".options bypass=0");
+            check(dflt > 0.1 && dflt < 1.0 && near(dflt, mem, 2e-3),
+                  "OSDI memory mode (.options bypass=0) runs the default's transient (" + std::to_string(dflt) + " vs " + std::to_string(mem) + " V)");
         }
         {   // HICUM/L2 (BJT LEVEL 8, OSDI): a PNP mirrors the NPN. ngspice 47's native HICUM PNP cannot be the
             // reference: its temperature limiter gets NaN and the operating point fails (the OSDI model in ngspice agrees).

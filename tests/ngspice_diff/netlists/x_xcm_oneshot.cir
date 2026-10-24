@@ -1,0 +1,17 @@
+* XSPICE oneshot: rising-edge triggered pulses whose width follows the control (pw_array, extended below the table
+* and held at 0), a retriggerable one stretched by a second edge, a falling-edge one, and a clear pulse. Each clock
+* edge crosses clk_trig at a PWL corner (the trigger is the first accepted point past it, which steps decide)
+vclk clk 0 pwl(0 0 10n 0 10.001n 1 30n 1 30.001n 0 50n 0 50.001n 1 55n 1 55.001n 0 58n 0 58.001n 1 90n 1 90.001n 0 120n 0 120.001n 1 140n 1 140.001n 0)
+vc c 0 pwl(0 0.2 60n 0.2 60.1n 0.8 100n 0.8 100.1n -1)
+vclr clr 0 pwl(0 0 125n 0 125.001n 1 127n 1 127.001n 0)
+a1 clk c NULL o1 os1
+.model os1 oneshot(cntl_array=[0 1] pw_array=[5n 25n] clk_trig=0.999 rise_time=1n fall_time=2n rise_delay=0.5n fall_delay=1n)
+a2 clk NULL NULL o2 os2
+.model os2 oneshot(pw_array=[8n 8n] clk_trig=0.999 retrig=true out_low=-1 out_high=2)
+a3 clk c clr o3 os3
+.model os3 oneshot(cntl_array=[0 1] pw_array=[5n 25n] clk_trig=0.001 pos_edge_trig=false)
+r1 o1 0 1k
+r2 o2 0 1k
+r3 o3 0 1k
+.tran 0.1n 160n
+.end

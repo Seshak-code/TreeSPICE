@@ -1,0 +1,10 @@
+* Diode self-heating small-signal: the thermal loop's conductances (dI/dT, dIth/dV through RTH0). ngspice 47's AC
+* leaves CTH0 and the junction charges' part of the power out, and its dI/dT misses the IKF knee (test_engine_fixes
+* checks them): no junction charge or IKF here, and CTH0's pole far above the sweep
+VD a 0 DC 2.5 AC 1
+R1 a k 10
+D1 k 0 tj DH PJ=1 THERMAL
+.model DH D(IS=1e-12 N=1.2 RS=0.5 RTH0=200 CTH0=1e-16 TRS1=3e-3 JSW=1e-12)
+.options reltol=1e-7 abstol=1e-15 vntol=1e-12
+.ac dec 10 0.1 10Meg
+.end

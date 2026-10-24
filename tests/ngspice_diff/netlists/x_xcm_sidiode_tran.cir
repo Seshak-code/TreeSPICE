@@ -1,0 +1,11 @@
+* XSPICE sidiode, transient: plain on / off / reverse conductances, then quadratic overlaps (epsilon, revepsilon) with tanh
+* current limits, swept through every region
+v1 a 0 sin(-2 6 20meg)
+a1 a 0 d1
+.model d1 sidiode(ron=10 roff=100k vfwd=0.6 vrev=5 rrev=50)
+r1 a b 100
+a2 b 0 d2
+.model d2 sidiode(ron=2 roff=1meg rrev=20 vfwd=0.7 vrev=3 ilimit=20m revilimit=30m epsilon=0.2 revepsilon=0.3)
+.tran 0.2n 100n
+.print tran i(v1) v(b)
+.end

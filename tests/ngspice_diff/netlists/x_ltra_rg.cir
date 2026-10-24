@@ -1,0 +1,8 @@
+* LTRA RG line (leaky resistive line: its DC two-port at every time), DC sweep
+v1 a 0 DC 0
+rs a in 10
+o1 in 0 out 0 rgline
+rl out 0 100
+.model rgline ltra r=50 g=0.02 len=2
+.dc v1 -1 1 0.5
+.end

@@ -1,0 +1,18 @@
+* XSPICE multi_input_pwl: and / nand / or / nor (default vd ports), the reversed tables a staircase as ngspice's;
+* the outputs drive resistors
+va a 0 sin(0.5 0.6 10meg)
+vb b 0 sin(0.5 0.6 7meg)
+a1 [a 0 b 0] o1 0 and1
+.model and1 multi_input_pwl(x=[0 0.3 0.7 1] y=[0 0.2 0.9 1] model="and")
+a2 [a 0 b 0] o2 0 nand1
+.model nand1 multi_input_pwl(x=[0 0.3 0.7 1] y=[0 0.2 0.9 1] model="nand")
+a3 [a 0 b 0] o3 0 or1
+.model or1 multi_input_pwl(x=[0 0.3 0.7 1] y=[0 0.2 0.9 1] model="or")
+a4 [a 0 b 0] o4 0 nor1
+.model nor1 multi_input_pwl(x=[0 0.3 0.7 1] y=[0 0.2 0.9 1] model="nor")
+r1 o1 0 1k
+r2 o2 0 1k
+r3 o3 0 1k
+r4 o4 0 1k
+.tran 1n 300n
+.end

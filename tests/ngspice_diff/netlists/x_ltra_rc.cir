@@ -1,0 +1,9 @@
+* LTRA RC line (distributed RC): a step through 1 k into 1 meg, and a second RC line in series
+v1 a 0 pulse(0 1 1n 0.5n 0.5n 50n 100n)
+rs a in 1k
+o1 in 0 mid 0 rcline
+o2 mid 0 out 0 rcline
+rl out 0 1meg
+.model rcline ltra r=10k c=10p len=1
+.tran 0.2n 200n
+.end

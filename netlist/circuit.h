@@ -10,7 +10,9 @@
 #include <cassert>
 #include <iostream>
 #include "../physics/xspice.h"
+#include "../physics/ltra.h"
 #include "../physics/physics_constants.h"
+#include "../physics/device_temp.h"
 #include "graph_canonical.h"
 #include "numparam.h"
 
@@ -50,6 +52,7 @@ struct ModelCard {
     int level = 1;           // Model level (1 = Shichman-Hodges, 4 = BSIM4, etc.)
     std::map<std::string, double> params;  // Key-value: "KP"->200e-6, "VTO"->0.7, etc.
     std::map<std::string, std::vector<double>> vectors;  // KEY=[v1 v2 ...] (XSPICE code models' vector parameters)
+    std::map<std::string, std::string> strings;          // KEY="text" (XSPICE code models' string parameters, unquoted)
 
     double get(const std::string& key, double defaultVal) const {
         auto it = params.find(key);
@@ -108,7 +111,8 @@ struct Resistor {
 /*
  * Switch (S voltage-controlled, W current-controlled): a resistor of RON or ROFF with ngspice's
  * hysteresis. The state is decided from the control value of the Newton iterate against the
- * last accepted state (BlockState::swPrev): on above VT+VH, off below VT-VH, else unchanged.
+ * last accepted state (BlockState::swPrev): on above VT+VH, off below VT-VH, else unchanged
+ * (negative VH: CircuitSim::switchState).
  */
 struct Switch {
     std::string name;
@@ -224,7 +228,7 @@ struct VoltageSource {
     std::vector<double> pwl_t, pwl_v;
     double pwl_td = 0.0, pwl_r = -1.0;  // r < 0: no repeat
 
-    // EXP v1 v2 td1 tau1 td2 tau2 | SFFM vo va fc mdi fs | AM vo vmo vma fm fc td (ngspice order)
+    // EXP v1 v2 td1 tau1 td2 tau2 | SFFM vo va fc mdi fm td phasem phasec | AM vo vmo vma fm fc td (ngspice order)
     std::vector<double> wf;
 
     std::string expression;  // Symbolic override for DC/main value
@@ -319,10 +323,10 @@ inline double waveformValue(const Src& s, double dcValue, double t) {
         const double a = w[0] + (w[1] - w[0]) * (1.0 - std::exp(-(t - w[2]) / w[3]));
         return t <= w[4] ? a : a + (w[0] - w[1]) * (1.0 - std::exp(-(t - w[4]) / w[5]));
     }
-    if (s.type == "SFFM") {
+    if (s.type == "SFFM") {  // ngspice 47: 0 until TD, then VO + VA sin(2 pi FC t' + PHASEC + MDI sin(2 pi FM t' + PHASEM))
         const auto& w = s.wf;
-        const double kTwoPi = 6.283185307179586;
-        return w[0] + w[1] * std::sin(kTwoPi * w[2] * t + w[3] * std::sin(kTwoPi * w[4] * t));
+        const double kTwoPi = 6.283185307179586, tt = t - w[5], deg = kTwoPi / 360.0;
+        return tt <= 0.0 ? 0.0 : w[0] + w[1] * std::sin(kTwoPi * w[2] * tt + w[7] * deg + w[3] * std::sin(kTwoPi * w[4] * tt + w[6] * deg));
     }
     if (s.type == "AM") {
         const auto& w = s.wf;
@@ -424,7 +428,7 @@ struct CCCS {
  * a branch current, or a current from + through the source to -) is expr over node voltages and branch
  * currents; refs[k] binds expr->refs[k].
  */
-namespace xspice { struct AnalogModel; }  // physics/xspice_analog.h
+namespace xspice { struct AnalogModel; struct AnalogState; }  // physics/xspice_analog.h
 
 struct Behavioural {
     struct Ref {
@@ -438,6 +442,8 @@ struct Behavioural {
     std::shared_ptr<const acutesim::numparam::Expr> expr;
     std::vector<Ref> refs;
     std::shared_ptr<const xspice::AnalogModel> cm;  // an XSPICE analog code model's output over refs, in place of expr
+    std::shared_ptr<xspice::AnalogState> cmState;   // its state at the last accepted time point (int, d_dt)
+    mutable std::vector<double> cmLast;             // its inputs at the last Newton iteration (XSPICE convergence limiting)
 };
 
 // ============================================================================
@@ -555,6 +561,7 @@ struct SimulationEnvironment {
     double reltol = 1e-3, abstol = 1e-12, vntol = 1e-6, trtol = 7.0, gmin = 1e-12, rshunt = 0.0;
     int itl1 = 100, itl2 = 50, itl4 = 0, maxord = 2;
     bool gear = false;                 // .options method=gear
+    bool bypass = true;                // .options bypass=0: no device bypass, and no per-device copy of its last evaluation
     
     // Noise Profile
     bool thermal_noise_enabled = false;
@@ -614,11 +621,25 @@ struct Diode {
         bool nsGiven = false;        // NS given: the sidewall has its own characteristic (else N's)
         double fcs = 0.5, ikp = 0.0; // sidewall FC and knee current
         double jtun = 0.0, jtunsw = 0.0, ntun = 30.0;  // tunnelling (at the temperature)
+        double vp = 0.0;             // soft reverse recovery (VP; with TT the diode gets the qp node)
+        double rsw = 0.0;            // RSW (at the temperature); given: the sidewall's own node A_sw
+        bool rswGiven = false;
+        bool qp() const { return vp != 0.0 && tt != 0.0; }
+        double cpar = 0.0;           // LEVEL 3: the metal and poly overlap capacitances, linear across A' - C
+        bool level3 = false;         // LEVEL 3: IBV scales by AREA
     } card;
     double area = 1.0;
     double pj = 0.0, mult = 1.0;  // PJ= (sidewall perimeter) and M= (the sidewall terms scale by M, not by AREA)
     bool areaGiven = false, pjGiven = false;  // else the model's AREA / PJ (ngspice diosetup)
+    double w = NAN, l = NAN;                  // W=, L= (LEVEL 3's geometry; either one: AREA 1, PJ 0 at any level)
+    double lm = NAN, lp = NAN, wm = NAN, wp = NAN;  // LEVEL 3 overlap capacitor geometry (NaN: the model's)
     InstTemp inst;  // card and saturation current are held at the instance temperature (resolved by the parser)
+    // Self-heating (D a k tj model THERMAL, the model with RTH0): tj's voltage is the junction's rise over the
+    // instance temperature T0 (ngspice dioload); the law gives the card at T0 + v(tj). thermal 0: none.
+    int thermal = 0;
+    bool thermalFlag = false;
+    struct Heat { devtemp::DiodeLaw law; double t0 = 300.15, rth0 = 0.0, cth0 = 0.0; };
+    std::shared_ptr<const Heat> heat;  // null: no self-heating
 };
 
 struct Mosfet {
@@ -722,6 +743,11 @@ struct BJT {
         double cje = 0.0, vje = 0.75, mje = 0.33, cjc = 0.0, vjc = 0.75, mjc = 0.33, xcjc = 1.0;
         double cjs = 0.0, vjs = 0.75, mjs = 0.0, fc = 0.5;
         double iss = 0.0, ns = 1.0;                        // substrate junction
+        double ibe = 0.0, ibc = 0.0;  // IBE, IBC (both given): the BE / BC diodes' saturation currents in place of IS
+        // Kull quasi-saturation (RCO given; 0: off): intrinsic collector resistance, epi drift saturation voltage,
+        // epi doping, epi charge, at the instance temperature (not AREA-scaled, as ngspice)
+        double rco = 0.0, vo = 10.0, gamma = 1e-11, qco = 0.0;
+        bool ibeIbc = false;
         bool lateral = false;  // SUBS = -1: substrate junction on the base, not the collector (PNP default)
         double tf = 0.0, xtf = 0.0, vtf = 0.0, itf = 0.0, tr = 0.0;
         double ptf = 0.0;  // excess phase [degrees] at 1/(2 pi TF)
@@ -808,6 +834,18 @@ struct TransmissionLine {
 };
 
 /*
+ * Lossy transmission line (O, ngspice LTRA): port 1 (p1, n1), port 2 (p2, n2), branch currents i1, i2 into the +
+ * terminals (two unknowns per line, as TransmissionLine's); the model resolved by the parser (physics/ltra.h).
+ */
+struct LossyLine {
+    std::string name, modelName;
+    int p1 = 0, n1 = 0, p2 = 0, n2 = 0;
+    bool icGiven = false;  // IC=v1,i1,v2,i2 (or V1 / I1 / V2 / I2): the line's state under UIC
+    double ic[4] = {0, 0, 0, 0};
+    ltra::Model m;
+};
+
+/*
  * Probe (Measurement Tool)
  * Does not affect physics (infinite impedance).
  * Used to request V(pos) - V(neg) for plotting/GUI.
@@ -879,6 +917,7 @@ struct TensorBlock {
     
     // Interconnects
     std::vector<TransmissionLine> transmissionLines;
+    std::vector<LossyLine> lossyLines;
     
     // Aux
     std::vector<Probe> probes;
@@ -1219,10 +1258,12 @@ struct BlockState {
         // Diode / BJT junction limiting (ngspice state0): the limited junction
         // voltages of the last Newton iteration (diode vd; BJT vbe, vbc).
         // jvState 0: none yet -> start at vcrit (ngspice MODEINITJCT).
-        double jv[2] = {};
+        double jv[3] = {};  // [2]: a self-heating diode's temperature rise
         int jvState = 0;
         // BJT excess phase (PTF): the filtered transfer current of the last two accepted steps, the last step
         double xf[2] = {}, hPrev = 0.0;
+        // BJT quasi-saturation: whether its epi charges were on (vrci > 0) at the last accepted point; -1: not yet
+        int qsOn = -1;
     };
 
     std::vector<History> capacitorState;
@@ -1233,6 +1274,7 @@ struct BlockState {
     // read back TD later; breaks: where a kink in w reaches the far port (the transient lands on them)
     struct LineHistory { std::vector<double> t, w1, w2; std::set<double> breaks; };
     std::vector<LineHistory> lineState;
+    std::vector<ltra::History> ltraState;  // per LossyLine: its accepted history
     std::vector<std::shared_ptr<osdi::Instance>> osdiState;  // per OsdiDevice (TensorNetlist::instantiateOsdi)
     std::vector<std::vector<BusProbe::DigitalSample>> busProbeState; 
     // Future: BJT OP, etc.
@@ -1255,6 +1297,7 @@ struct BlockState {
         osdiState.resize(block.osdiDevices.size());
         busProbeState.resize(block.busProbes.size());
         lineState.resize(block.transmissionLines.size());
+        ltraState.resize(block.lossyLines.size());
     }
 };
 
@@ -1276,7 +1319,7 @@ public:
     // Create the OSDI runtime instance of every OSDI device (global block and
     // every placed instance) whose state slot is empty; tempK is the device
     // temperature handed to setup_instance. Throws on model errors.
-    void instantiateOsdi(double tempK);
+    void instantiateOsdi(double tempK, bool keepEval);  // keepEval: OSDI device bypass (.options bypass)
     
     // Hierarchical Support
     std::vector<std::pair<std::string, std::string>> probes; // Name, GlobalNodeString

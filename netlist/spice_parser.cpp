@@ -296,6 +296,91 @@ std::vector<std::pair<int, std::string>> SPICEParser::preprocessLines(
 // `.lib <section>` and `.endl` of <file> (PDK corners: .lib models.lib tt). Paths
 // are relative to the including file. Spliced lines carry the including card's
 // line number, which is also reported (errLine) when a file or section is missing.
+// ngspice inpcom replace_freq: E/G n1 [n2] FREQ {expr} [=] [MAG|DB] [RAD|DEG] [R_I] values becomes an xfer
+// code model (A_GEN<name>) driven by the input node, v(a[, b]), or a B source (B_GEN<name>) for any other
+// expression, and .model GEN_MODEL<name> xfer table = [values]; <name> drops the type letter, as ngspice. A line
+// the rewrite does not take (ngspice's: a value word over 3 characters in place of a keyword ...) stays as is.
+static std::vector<std::pair<int, std::string>> replaceFreq(const std::vector<std::pair<int, std::string>>& lines) {
+    std::vector<std::pair<int, std::string>> out;
+    auto ws = [](char c) { return c == ' ' || c == '\t'; };
+    auto low = [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); };
+    for (const auto& [num, line] : lines) {
+        const char t = low(line.empty() ? ' ' : line[0]);
+        auto keep = [&]() { out.push_back({num, line}); };
+        if (t != 'e' && t != 'g') { keep(); continue; }
+        const std::string l = [&] { std::string s; for (char c : line) s += low(c); return s; }();
+        const size_t n = l.size();
+        auto skipWs = [&](size_t i) { while (i < n && ws(l[i])) ++i; return i; };
+        auto skipNon = [&](size_t i) { while (i < n && !ws(l[i])) ++i; return i; };
+        const size_t e = 1, eE = skipNon(e), n1 = skipWs(eE), n1E = skipNon(n1);
+        const size_t fq = l.find("freq", n1E);
+        if (fq == std::string::npos || !ws(l[fq - 1]) || fq + 4 >= n || !ws(l[fq + 4])) { keep(); continue; }
+        size_t n2 = skipWs(n1E), n2E = 0;
+        if (n2 == fq) n2 = std::string::npos;
+        else {
+            n2E = skipNon(n2);
+            if (fq != skipWs(n2E)) { keep(); continue; }
+        }
+        size_t ex = skipWs(fq + 4);
+        if (ex >= n || l[ex] != '{') { keep(); continue; }
+        ex = skipWs(ex + 1);
+        size_t exE = l.find('}', ex);
+        if (exE == std::string::npos) { keep(); continue; }
+        while (exE > ex && ws(l[exE - 1])) --exE;
+        // the input: a plain name, or v(node) / v(n1, n2)
+        size_t in = std::string::npos, inE = 0;
+        bool diff = false;
+        if (ex < exE && !(l[ex] >= '0' && l[ex] <= '9')) {
+            size_t k = ex;
+            while (k < exE && ((l[k] >= '0' && l[k] <= '9') || (l[k] >= 'a' && l[k] <= 'z') || l[k] == '_')) ++k;
+            if (k == exE) { in = ex; inE = exE; }
+        }
+        if (exE - ex >= 3 && l[ex] == 'v' && l[ex + 1] == '(' && l[exE - 1] == ')') {
+            in = ex + 2; inE = exE - 1;
+            const size_t cm = l.find(',', in);
+            diff = cm != std::string::npos && cm < inE;
+        }
+        size_t kw = skipWs(exE + 1);
+        if (kw < n && l[kw] == '=') kw = skipWs(kw + 1);
+        bool db = true, rad = false, ri = false, gotKey, bad = false;
+        size_t list;
+        do {
+            list = kw;
+            if (kw < n && l[kw] == '{') ++kw;
+            std::string key;
+            while (kw < n && !ws(l[kw]) && l[kw] != '}' && key.size() < 3) key += l[kw++];
+            if (kw < n && l[kw] == '}') ++kw;
+            if (kw >= n || !ws(l[kw])) { bad = true; break; }
+            gotKey = true;
+            if (key == "mag") db = false;
+            else if (key == "db") db = true;
+            else if (key == "rad") rad = true;
+            else if (key == "deg") rad = false;
+            else if (key == "r_i") ri = true;
+            else gotKey = false;
+            if (gotKey) list = skipWs(kw);
+            kw = list;
+        } while (gotKey);
+        size_t listE = n;
+        while (listE > list && ws(l[listE - 1])) --listE;
+        if (bad || list >= n || listE <= list + 1) { keep(); continue; }
+        auto s = [&](size_t a, size_t b) { return line.substr(a, b - a); };  // the original case
+        const std::string name = s(e, eE), pt = t == 'e' ? "v" : "i";
+        const std::string outPort = n2 != std::string::npos ? "%" + pt + "d(" + s(n1, n1E) + " " + s(n2, n2E) + ")"
+                                                            : "%" + pt + "(" + s(n1, n1E) + ")";
+        if (in != std::string::npos) {
+            const std::string inPort = diff ? "%vd(" + s(in, inE) + ")" : s(in, inE);
+            out.push_back({num, "a_gen_" + name + " " + inPort + " " + outPort + " gen_model_" + name});
+        } else {
+            out.push_back({num, "b_gen_" + name + " gen_node_" + name + " 0 v=" + s(ex, exE)});
+            out.push_back({num, "a_gen_" + name + " gen_node_" + name + " " + outPort + " gen_model_" + name});
+        }
+        out.push_back({num, ".model gen_model_" + name + " xfer " + (ri ? "r_i=true" : rad ? "rad=true" : !db ? "db=false" : "") +
+                                " table = [" + s(list, listE) + "]"});
+    }
+    return out;
+}
+
 std::vector<std::pair<int, std::string>> SPICEParser::expandIncludes(
     const std::vector<std::pair<int, std::string>>& lines, const std::string& dir, int depth, int& errLine)
 {
@@ -363,6 +448,7 @@ std::vector<std::pair<int, std::string>> SPICEParser::expandIncludes(
 SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::string& baseDir, double tempC,
                                     const std::map<std::string, double>& paramOverrides, const SensParam* sens) {
     result_ = SPICEParseResult{};
+    baseDir_ = baseDir;
     sens_ = sens;
     tnomC_ = 27.0;
     nodeMap_.clear();
@@ -415,6 +501,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     int incLine = 0;
     try {
         lines = expandIncludes(lines, baseDir, 0, incLine);
+        lines = replaceFreq(lines);  // before numparam, as ngspice: the braces are FREQ's
         // .step and .meas are taken out before numparam sees them: their 'expr' and bare words are theirs
         lines.erase(std::remove_if(lines.begin(), lines.end(), [&](const std::pair<int, std::string>& nl) {
             if (nl.first == 1) return false;
@@ -525,6 +612,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                         else if (k == "ITL2") env.itl2 = (int)positive(k, v);
                         else if (k == "ITL4") env.itl4 = (int)positive(k, v);
                         else if (k == "MAXORD") env.maxord = (int)positive(k, v);
+                        else if (k == "BYPASS") env.bypass = v != 0.0;  // (TREESPICE_BYPASS=0 too, at instantiateOsdi)
                         else if (k != "SCALE") std::cerr << "Warning: .options " << k << " is ignored\n";
                     }
                     // ponytail: chgtol has no counterpart in the engine's LTE (an absolute bound scaled by RELTOL and TRTOL): warned, ignored
@@ -690,8 +778,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 case 'H': nonlinearForm(tok) ? parseBehav(line, tok, blk) : parseCCVS(tok, blk); break;
                 case 'F': nonlinearForm(tok) ? parseBehav(line, tok, blk) : parseCCCS(tok, blk); break;
                 case 'T': parseTLine(tok, blk);       break;
-                case 'O':
-                    throw std::runtime_error(tok[0] + ": lossy transmission lines (LTRA) are not supported yet");
+                case 'O': parseLossyLine(tok, blk); break;
                 case 'X': {
                     // X<name> <nodes...> <subcktName>; expanded after parsing
                     requireFields(tok, 3);
@@ -964,6 +1051,26 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     try {
         urcExpand(result_.netlist.globalBlock, true);
         for (auto& [name, blk] : result_.netlist.blockDefinitions) urcExpand(blk, false);
+        // O lines: their LTRA model (ngspice ltraset / ltratemp)
+        auto ltraResolve = [&](TensorBlock& blk) {
+            for (auto& o : blk.lossyLines) {
+                const ModelCard* c = card(o.modelName);
+                if (c->type != "LTRA") throw std::runtime_error(o.name + ": model " + c->name + " is " + c->type + ", not an LTRA model");
+                supported(c, {"R", "L", "G", "C", "LEN", "NOCONTROL", "STEPLIMIT", "NOSTEPLIMIT", "LININTERP", "QUADINTERP",
+                              "MIXEDINTERP", "TRUNCNR", "TRUNCDONTCUT", "COMPACTREL", "COMPACTABS"});
+                bounded(c, {"R", "L", "G", "C", "LEN", "COMPACTREL", "COMPACTABS"}, {});
+                auto& m = o.m;
+                m.R = c->get("R", 0.0); m.L = c->get("L", 0.0); m.G = c->get("G", 0.0); m.C = c->get("C", 0.0); m.len = c->get("LEN", 0.0);
+                m.interp = c->params.count("LININTERP") ? ltra::Interp::LIN : c->params.count("MIXEDINTERP") ? ltra::Interp::MIXED : ltra::Interp::QUAD;
+                m.stepLimit = !c->params.count("NOSTEPLIMIT");
+                m.truncDontCut = c->params.count("TRUNCDONTCUT") > 0;
+                const auto& env = result_.netlist.environment;
+                const double sr = c->get("COMPACTREL", 0.0), sa = c->get("COMPACTABS", 0.0);
+                ltra::setup(m, c->name, sr != 0.0 ? sr : env.reltol, sa != 0.0 ? sa : env.abstol);
+            }
+        };
+        ltraResolve(result_.netlist.globalBlock);
+        for (auto& [name, blk] : result_.netlist.blockDefinitions) ltraResolve(blk);
         mosSeries(result_.netlist.globalBlock, true);
         jfetSeries(result_.netlist.globalBlock, true);
         bjtThermal(result_.netlist.globalBlock, true);
@@ -1182,9 +1289,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (w) supported(c, {"IT", "IH", "RON", "ROFF"}); else supported(c, {"VT", "VH", "RON", "ROFF"});
             s.vt = c->get(w ? "IT" : "VT", 0.0); s.vh = c->get(w ? "IH" : "VH", 0.0);
             s.ron = c->get("RON", 1.0); s.roff = c->get("ROFF", 1e12);
-            // ponytail: ngspice also runs a negative hysteresis (it turns on at VT+VH and off at VT-VH); not modelled
-            if (!(s.vh >= 0.0 && s.ron > 0.0 && s.roff > 0.0))
-                throw std::runtime_error("model " + c->name + ": needs " + (w ? "IH" : "VH") + " >= 0 (negative is not supported yet) and RON, ROFF > 0");
+            if (!(s.ron > 0.0 && s.roff > 0.0)) throw std::runtime_error("model " + c->name + ": needs RON, ROFF > 0");
         }
         // Resistors (ngspice restemp): a model card gives the value from its sheet resistance and the
         // geometry, R = RSH (L - 2 SHORT) / (W - 2 NARROW), unless the instance gives it; TC1/TC2 (the
@@ -1377,7 +1482,10 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                           "IBV", "IB", "EG", "XTI", "TNOM", "TM1", "TM2", "TCV", "TBV1", "TTT1", "TTT2", "TRS", "TRS1", "TRS2",
                           "JSW", "ISW", "NS", "CJSW", "MJSW", "PHP", "VJSW", "IKF", "IK", "IKR", "IKP", "KF", "AF", "ISR", "NR",
                           "NBV", "NZ", "CTA", "CTC", "CTP", "TPB", "TVJ", "TPHP", "TLEVC", "TLEV", "CJP", "FCS", "GAP1", "GAP2",
-                          "JTUN", "JTUNSW", "NTUN", "XTITUN", "KEG", "AREA", "PJ"});
+                          "JTUN", "JTUNSW", "NTUN", "XTITUN", "KEG", "AREA", "PJ", "TREF", "VP", "RSW",
+                          "LEVEL", "LM", "LP", "WM", "WP", "XOM", "XOI", "XM", "XP", "XW",
+                          "FV_MAX", "BV_MAX", "ID_MAX", "TE_MAX", "PD_MAX",  // SOA: ngspice's warnings only
+                          "RTH0", "CTH0"});  // self-heating: a THERMAL instance (D a k tj) uses them
             // Temperature selectors (probed on ngspice 47): TLEV 1 scales BV by (1 - TCV dT) where 0 subtracts TCV dT
             // (IS follows the same law under both); TLEV 2 also takes the band gap EG - GAP1 T^2 / (T + GAP2) for the
             // saturation currents (exp(EG(Tn)/(N Vt(Tn)) - EG(T)/(N Vt) + XTI/N ln(T/Tn))) and the junction potentials;
@@ -1386,11 +1494,35 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             const double tlev = c->get("TLEV", 0.0), tlevc = c->get("TLEVC", 0.0);
             if ((tlev != 0.0 && tlev != 1.0 && tlev != 2.0) || (tlevc != 0.0 && tlevc != 1.0))
                 throw std::runtime_error("model " + c->name + ": TLEV other than 0-2 / TLEVC other than 0-1 is not supported yet");
-            bounded(c, {"IS", "JS", "RS", "CJO", "CJ0", "CJ", "M", "MJ", "TT", "JSW", "ISW", "CJSW", "MJSW", "IKF", "IK", "IKR",
+            bounded(c, {"IS", "JS", "RS", "RSW", "CJO", "CJ0", "CJ", "M", "MJ", "TT", "JSW", "ISW", "CJSW", "MJSW", "IKF", "IK", "IKR",
                         "IKP", "KF", "ISR", "JTUN", "JTUNSW", "AREA", "PJ"},
                     {"N", "BV", "VB", "VRB", "VAR", "NS", "PHP", "VJSW", "NR", "NBV", "NZ", "NTUN"});  // ngspice: BV = 0 breaks down at 0 V
-            if (!d.areaGiven) d.area *= c->get("AREA", 1.0);  // diosetup: the model's AREA / PJ unless the instance gives one
-            if (!d.pjGiven) d.pj = c->get("PJ", 0.0);
+            // diosetup: the model's AREA / PJ unless the instance gives one, or gives W or L (then 1 and 0)
+            const double level = c->get("LEVEL", 1.0);
+            if (level != 1.0 && level != 3.0) throw std::runtime_error("model " + c->name + ": diode LEVEL other than 1 or 3 is not supported");
+            const bool wl = !std::isnan(d.w) || !std::isnan(d.l);
+            if (!d.areaGiven && !wl) d.area *= c->get("AREA", 1.0);
+            if (!d.pjGiven) d.pj = wl ? 0.0 : c->get("PJ", 0.0);
+            if (level == 3.0) {
+                // LEVEL 3 (ngspice diosetup): W and L give AREA = (W+XW)(L+XW) and PJ = 2(W+XW) + 2(L+XW) (.option
+                // scale on the lengths), and the metal / poly overlaps eps_SiO2/XOM (WM+XM)(LM+XM) M (XOI, WP, LP, XP)
+                // across the junction, XOM and XOI in Angstrom. Deliberate divergences: ngspice multiplies M into that
+                // AREA and PJ and then again where they scale the device (M^2), here M scales it once (d.area holds the
+                // instance's M); ngspice's XOM / XOI default 1e4 is taken in metres (no overlap capacitance), here the
+                // 1e4 Angstrom it documents
+                d.card.level3 = true;
+                const double xw = c->get("XW", 0.0), s = scale_;
+                if (!std::isnan(d.w) && !std::isnan(d.l)) {
+                    d.area = (d.w + xw) * (d.l + xw) * s * s * d.mult;  // in place of a given AREA
+                    d.pj = (2.0 * (d.w + xw) + 2.0 * (d.l + xw)) * s;
+                }
+                const double epsOx = 3.9 / (4e-7 * M_PI * 299792458.0 * 299792458.0);  // ngspice CONSTepsSiO2
+                auto ov = [&](double inst, const char* key) { return std::isnan(inst) ? c->get(key, 0.0) : inst; };
+                const double xm = c->get("XM", 0.0), xp = c->get("XP", 0.0);
+                d.card.cpar = epsOx / (c->get("XOM", 1e4) * 1e-10) * d.mult * (ov(d.wm, "WM") * s + xm) * (ov(d.lm, "LM") * s + xm) +
+                              epsOx / (c->get("XOI", 1e4) * 1e-10) * d.mult * (ov(d.wp, "WP") * s + xp) * (ov(d.lp, "LP") * s + xp);
+            } else if (!std::isnan(d.lm) || !std::isnan(d.lp) || !std::isnan(d.wm) || !std::isnan(d.wp))
+                throw std::runtime_error(d.instanceName + ": LM, LP, WM, WP are LEVEL 3 parameters");
             d.saturationCurrent_I_S_A = first(c, {"IS", "JS"}, 1e-14);
             d.emissionCoefficient_N   = c->get("N", 1.0);
             auto& k = d.card;
@@ -1406,38 +1538,38 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             k.bv = first(c, {"BV", "VB", "VRB", "VAR"}, 0.0); k.ibv = first(c, {"IBV", "IB"}, 1e-3);
             k.isr = c->get("ISR", 0.0); k.nr = c->get("NR", 2.0); k.nbv = first(c, {"NBV", "NZ"}, NAN);
             k.jtun = c->get("JTUN", 0.0); k.jtunsw = c->get("JTUNSW", 0.0); k.ntun = c->get("NTUN", 30.0);
+            k.vp = c->get("VP", 0.0);
+            k.rswGiven = c->params.count("RSW") > 0; k.rsw = c->get("RSW", 0.0);
+            // ngspice lumps a separate sidewall's charge onto the bottom junction under soft recovery (dioload), whose
+            // small-signal capacitance then is not that charge's
+            if (k.rswGiven && k.qp()) throw std::runtime_error("model " + c->name + ": VP with RSW is not supported yet");
             if (!(k.m < 1.0 && k.mjsw < 1.0 && k.vj > 0.0 && k.fc < 1.0 && k.fcs < 1.0 && k.rs >= 0.0 && k.ibv > 0.0))
                 throw std::runtime_error("model " + c->name + ": needs M, MJSW < 1, VJ > 0, FC, FCS < 1, RS >= 0, IBV > 0");
-            using namespace devtemp;
-            const double Tn = c->get("TNOM", tnomC_) + 273.15, T = instK(d.inst), dt = T - Tn;
-            d.thermalVoltage_V_T_V = vt(T);
-            k.m = std::min(k.m * poly(c->get("TM1", 0.0), c->get("TM2", 0.0), dt), 0.9);
-            if (T != Tn) {
-                const double eg = std::max(c->get("EG", 1.11), 0.1), xti = c->get("XTI", 3.0);
-                const Gap gap = tlev == 2.0 ? Gap{eg, c->get("GAP1", 7.02e-4), c->get("GAP2", 1108.0)} : Gap{};
-                // saturation-current law for emission coefficient n, band gap scale keg and exponent x
-                auto law = [&](double n, double keg, double x) {
-                    if (tlev != 2.0) return isFactor(T, Tn, keg * eg, x, n);
-                    return std::exp(keg * egfet(Tn, gap) / (n * vt(Tn)) - keg * egfet(T, gap) / (n * vt(T)) + x / n * std::log(T / Tn));
-                };
-                d.saturationCurrent_I_S_A *= law(d.emissionCoefficient_N, 1.0, xti);
-                if (tlevc == 1.0) {
-                    k.cjo *= 1.0 + first(c, {"CTA", "CTC"}, 0.0) * dt; k.vj -= first(c, {"TPB", "TVJ"}, 0.0) * dt;
-                    k.cjsw *= 1.0 + c->get("CTP", 0.0) * dt; k.php -= c->get("TPHP", 0.0) * dt;
-                } else {
-                    k.cjo *= junctionAt(k.vj, k.m, Tn, T, gap);
-                    k.cjsw *= junctionAt(k.php, k.mjsw, Tn, T, gap);
-                }
-                k.jsw *= law(k.ns, 1.0, xti);
-                k.isr *= law(k.nr, 1.0, xti);  // probed: the NR law
-                const double ft = law(k.ntun, c->get("KEG", 1.0), c->get("XTITUN", 3.0));
-                k.jtun *= ft; k.jtunsw *= ft;
+            devtemp::DiodeLaw l;
+            l.tn = first(c, {"TNOM", "TREF"}, tnomC_) + 273.15;
+            l.eg = std::max(c->get("EG", 1.11), 0.1); l.xti = c->get("XTI", 3.0);
+            l.keg = c->get("KEG", 1.0); l.xtitun = c->get("XTITUN", 3.0);
+            l.tlev = (int)tlev; l.tlevc = (int)tlevc;
+            if (tlev == 2.0) l.gap = devtemp::Gap{l.eg, c->get("GAP1", 7.02e-4), c->get("GAP2", 1108.0)};
+            l.tm1 = c->get("TM1", 0.0); l.tm2 = c->get("TM2", 0.0); l.ttt1 = c->get("TTT1", 0.0); l.ttt2 = c->get("TTT2", 0.0);
+            l.trs1 = first(c, {"TRS1", "TRS"}, 0.0); l.trs2 = c->get("TRS2", 0.0); l.tcv = first(c, {"TCV", "TBV1"}, 0.0);
+            l.cta = first(c, {"CTA", "CTC"}, 0.0); l.tpb = first(c, {"TPB", "TVJ"}, 0.0); l.ctp = c->get("CTP", 0.0);
+            l.tphp = c->get("TPHP", 0.0);
+            l.n = d.emissionCoefficient_N; l.ns = k.ns; l.nr = k.nr; l.ntun = k.ntun; l.mjsw = k.mjsw; l.fc = k.fc;
+            l.bvGiven = k.bvGiven;
+            l.is = d.saturationCurrent_I_S_A; l.m = k.m; l.cjo = k.cjo; l.vj = k.vj; l.cjsw = k.cjsw; l.php = k.php;
+            l.jsw = k.jsw; l.isr = k.isr; l.jtun = k.jtun; l.jtunsw = k.jtunsw; l.tt = k.tt; l.rs = k.rs; l.rsw = k.rsw; l.bv = k.bv;
+            const double T = instK(d.inst);
+            const auto a = devtemp::diodeAt(l, T);
+            d.thermalVoltage_V_T_V = a.vt; d.saturationCurrent_I_S_A = a.is;
+            k.m = a.m; k.cjo = a.cjo; k.vj = a.vj; k.cjsw = a.cjsw; k.php = a.php; k.jsw = a.jsw; k.isr = a.isr;
+            k.jtun = a.jtun; k.jtunsw = a.jtunsw; k.tt = a.tt; k.rs = a.rs; k.rsw = a.rsw; k.bv = a.bv;
+            // self-heating (ngspice: a thermal node, THERMAL and the model's RTH0; else tj is left to its circuit)
+            if (d.thermal > 0 && d.thermalFlag && c->params.count("RTH0")) {
+                const double rth0 = c->get("RTH0", 0.0), cth0 = c->get("CTH0", 1e-5);
+                if (!(rth0 > 0.0) || cth0 < 0.0) throw std::runtime_error("model " + c->name + ": self-heating needs RTH0 > 0, CTH0 >= 0");
+                d.heat = std::make_shared<const Diode::Heat>(Diode::Heat{l, T, rth0, cth0});
             }
-            if (k.fc * k.vj > 1.0) k.vj = 1.0 / k.fc;  // diotemp: the depletion knee stays below 1 V
-            k.tt *= poly(c->get("TTT1", 0.0), c->get("TTT2", 0.0), dt);
-            k.rs *= poly(first(c, {"TRS1", "TRS"}, 0.0), c->get("TRS2", 0.0), dt);
-            const double tcv = first(c, {"TCV", "TBV1"}, 0.0);
-            if (k.bvGiven) k.bv = tlev != 0.0 ? k.bv * (1.0 - tcv * dt) : k.bv - tcv * dt;
         }
         // HICUM/L2 (LEVEL 8): OpenVAF's hicuml2.va 2.4.0, ngspice's native version (they agree to 4e-5 in ngspice),
         // through OSDI (hicum2.osdi from TREESPICE_OSDI_PATH); its parameter names are ngspice's.
@@ -1512,7 +1644,8 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                           "TNC1", "TNC2", "TNS1", "TNS2", "TITF1", "TITF2", "TTF1", "TTF2", "TTR1", "TTR2", "TMJE1", "TMJE2",
                           "TMJC1", "TMJC2", "TMJS1", "TMJS2", "TBF1", "TBF2", "TBR1", "TBR2", "TIS1", "TIS2", "TISE1", "TISE2",
                           "TISC1", "TISC2", "TISS1", "TISS2",
-                          "VBE_MAX", "VBC_MAX", "VCE_MAX", "IC_MAX", "IB_MAX", "PD_MAX", "TE_MAX"});  // SOA: ngspice's warnings only
+                          "IBE", "IBC", "RCO", "VO", "GAMMA", "QCO", "QUASIMOD", "VG", "CN", "D",
+                          "VBE_MAX", "VBC_MAX", "VCE_MAX", "IC_MAX", "IB_MAX", "PD_MAX", "TE_MAX", "RTH0"});  // SOA (RTH0 derates PD_MAX): ngspice's warnings only
             bounded(c, {"IS", "VAF", "VA", "VAR", "VB", "IKF", "IK", "IKR", "ISE", "C2", "ISC", "C4", "CJE", "CJC", "CJS", "CCS", "CSUB",
                         "MJE", "ME", "MJC", "MC", "MJS", "MS", "TF", "XTF", "VTF", "ITF", "TR", "ISS", "RBM", "IRB", "NK", "NKF", "KF"},
                     {"NE", "NC", "NS"});
@@ -1540,6 +1673,20 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             k.cjs = first(c, {"CJS", "CCS", "CSUB"}, 0.0); k.vjs = first(c, {"VJS", "PS"}, 0.75); k.mjs = first(c, {"MJS", "MS"}, 0.0);
             k.fc = c->get("FC", 0.5);
             k.iss = c->get("ISS", 0.0); k.ns = c->get("NS", 1.0);
+            // IBE / IBC: ngspice takes them only as a pair (one alone it ignores); here one alone is an error
+            if (c->params.count("IBE") != c->params.count("IBC"))
+                throw std::runtime_error("model " + c->name + ": IBE and IBC go together (ngspice ignores one alone)");
+            k.ibeIbc = c->params.count("IBE") > 0;
+            k.ibe = c->get("IBE", 0.0); k.ibc = c->get("IBC", 0.0);
+            if (k.ibeIbc && !(k.ibe > 0.0 && k.ibc > 0.0)) throw std::runtime_error("model " + c->name + ": IBE and IBC must be > 0");
+            // Kull quasi-saturation: on with RCO given (at least 0.01, as ngspice); QUASIMOD 1 adds its temperature laws
+            if (c->params.count("RCO")) {
+                k.rco = std::max(c->get("RCO", 0.01), 0.01);
+                k.vo = c->get("VO", 10.0); k.gamma = c->get("GAMMA", 1e-11); k.qco = c->get("QCO", 0.0);
+                if (!(k.vo > 0.0 && k.gamma >= 0.0 && k.qco >= 0.0)) throw std::runtime_error("model " + c->name + ": VO must be > 0, GAMMA and QCO >= 0");
+                // ngspice takes RCO and QCO per device, AREA aside, times M; AREA and M are one factor here
+                if (q.area != 1.0) throw std::runtime_error(q.instanceName + ": AREA / M with quasi-saturation (RCO) is not supported yet");
+            }
             // SUBS (ngspice): 1 vertical (substrate junction to C), -1 lateral (to B); default by polarity
             const double subs = c->get("SUBS", q.isNPN ? 1.0 : -1.0);
             if (subs != 1.0 && subs != -1.0) throw std::runtime_error("model " + c->name + ": SUBS must be 1 or -1");
@@ -1573,12 +1720,21 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                 const double xtb = c->get("XTB", 0.0), bfac = tlev == 0.0 ? std::exp(ratlog * xtb) : tlev == 1.0 ? 1.0 + xtb * dt : 1.0;
                 if (tlev == 3.0) {
                     q.saturationCurrent_I_S_A = std::pow(q.saturationCurrent_I_S_A, tc("TIS1", "TIS2"));
+                    k.ibe = std::pow(k.ibe, tc("TIS1", "TIS2")); k.ibc = std::pow(k.ibc, tc("TIS1", "TIS2"));
                     k.iss = std::pow(k.iss, tc("TISS1", "TISS2"));
                     k.ise = std::pow(k.ise, tc("TISE1", "TISE2")); k.isc = std::pow(k.isc, tc("TISC1", "TISC2"));
                 } else {
-                    const double fac = std::exp(factlog);
-                    q.saturationCurrent_I_S_A *= fac; k.iss *= fac;
+                    // IBE / IBC by their own emission coefficients (the card's NF, NR); ISS then takes IBC's factor
+                    const double fac = std::exp(factlog), fbc = std::exp(factlog / c->get("NR", 1.0));
+                    q.saturationCurrent_I_S_A *= fac; k.iss *= k.ibeIbc ? fbc : fac;
+                    k.ibe *= std::exp(factlog / c->get("NF", 1.0)); k.ibc *= fbc;
                     k.ise *= std::exp(factlog / ne0) / bfac; k.isc *= std::exp(factlog / nc0) / bfac;
+                }
+                if (k.rco > 0.0 && c->get("QUASIMOD", 0.0) == 1.0) {  // bjttemp: RCO, VO by powers of T / Tnom, GAMMA by XTI and VG
+                    const double rT = T / Tn;
+                    k.rco *= std::pow(rT, c->get("CN", q.isNPN ? 2.42 : 2.2));
+                    k.vo *= std::pow(rT, c->get("D", q.isNPN ? 0.87 : 0.52));
+                    k.gamma *= std::pow(rT, c->get("XTI", 3.0)) * std::exp(-c->get("VG", 1.206) * (1.0 - rT) / vt(T));
                 }
                 const bool tbf = c->params.count("TBF1") || c->params.count("TBF2"), tbr = c->params.count("TBR1") || c->params.count("TBR2");
                 q.betaF *= tbf ? tc("TBF1", "TBF2") : bfac;
@@ -1661,10 +1817,18 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         {
             const double ts = result_.tranStep;
             auto edges = [&](auto& s) {
+                auto dflt = [](double& x, double v) { if (std::isnan(x)) x = v; };
                 if (s.type == "EXP") {
                     auto& w = s.wf;
-                    auto dflt = [](double& x, double v) { if (std::isnan(x)) x = v; };
-                    if (s.type == "EXP") { dflt(w[2], ts); dflt(w[3], ts); dflt(w[4], w[2] + ts); dflt(w[5], ts); }
+                    dflt(w[2], ts); dflt(w[3], ts); dflt(w[4], w[2] + ts); dflt(w[5], ts);
+                }
+                // SFFM: ngspice's TSTOP defaults, then the index held to [0, FC/FM]
+                // ponytail: with no .tran card (a transient requested through the API) FC / FM stay NaN, as EXP's
+                if (s.type == "SFFM") {
+                    auto& w = s.wf;
+                    if (result_.tranStop > 0.0) { dflt(w[2], 5.0 / result_.tranStop); dflt(w[4], 500.0 / result_.tranStop); }
+                    dflt(w[3], 90.0);
+                    if (!std::isnan(w[2]) && !std::isnan(w[4])) w[3] = std::clamp(w[3], 0.0, w[2] / w[4]);
                 }
                 if (s.type != "PULSE" || !(ts > 0.0)) return;
                 if (s.pulse_tr <= 0.0) s.pulse_tr = ts;
@@ -1704,8 +1868,9 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         if (auto it = result_.netlist.blockDefinitions.find(result_.netlist.instances[k].blockName);
             it != result_.netlist.blockDefinitions.end())
             result_.netlist.instanceStates[k].initialize(it->second);
+    if (const char* b = std::getenv("TREESPICE_BYPASS"); b && std::atoi(b) == 0) result_.netlist.environment.bypass = false;
     try {  // OSDI instances: parameters, setup_instance, node collapsing
-        result_.netlist.instantiateOsdi(result_.netlist.environment.ambient_temp_K);
+        result_.netlist.instantiateOsdi(result_.netlist.environment.ambient_temp_K, result_.netlist.environment.bypass);
     } catch (const std::exception& e) {  // "<BLOCK>#<k>.<name>: ..." or "<name>: ...": the device's line
         const std::string what = e.what(), who = what.substr(0, what.find(':'));
         const size_t hash = who.find('#'), dot = who.rfind('.');
@@ -1880,23 +2045,20 @@ void SPICEParser::parseSourceSpec(const std::vector<std::string>& tok, Src& s, d
             // ngspice order. EXP's missing values are NaN until .tran is known (resolveBlock): TD1,
             // TAU1, TAU2 take TSTEP and TD2 TD1+TSTEP.
             // ponytail: with no .tran card (a transient requested through the API) they stay NaN.
-            const size_t lo = kw == "AM" ? 5 : kw == "SFFM" ? 5 : 2, hi = kw == "EXP" || kw == "AM" ? 6 : 5;
+            // SFFM (ngspice 47): VO VA [FC MDI FM TD PHASEM PHASEC]; FC, MDI, FM default 5/TSTOP, 90, 500/TSTOP (NaN until
+            // resolveBlock knows .tran; an FM of 0 is not given)
+            const size_t lo = kw == "AM" ? 5 : 2, hi = kw == "EXP" || kw == "AM" ? 6 : kw == "SFFM" ? 8 : 5;
             const double nan = std::nan("");
             s.wf = kw == "EXP" ? std::vector<double>{0, 0, nan, nan, nan, nan}
-                 : std::vector<double>(kw == "SFFM" ? 5 : 6, 0.0);
+                 : kw == "SFFM" ? std::vector<double>{0, 0, nan, nan, nan, 0, 0, 0}
+                 : std::vector<double>(6, 0.0);
             size_t n = 0;
             for (++i; i < tok.size() && n < hi && isValue(tok[i]); ++i, ++n) s.wf[n] = parseValue(tok[i]);
             if (n < lo) throw std::runtime_error(tok[0] + ": " + kw + " needs at least " + std::to_string(lo) + " values");
             if (i < tok.size()) throw std::runtime_error(tok[0] + ": " + kw + " takes at most " + std::to_string(hi) + " values");
             if (kw == "EXP")  // ngspice: a 0 TD1, TAU1, TD2 or TAU2 is "not given"
                 for (size_t k = 2; k < 6; ++k) if (s.wf[k] == 0.0) s.wf[k] = nan;
-            // ngspice limits the deviation to FC: the index is min(MDI, FC/FS). Its FC / FS defaults
-            // (1/TSTOP) did not match the documented sine, so they are not offered.
-            if (kw == "SFFM") {
-                if (!(s.wf[2] > 0.0 && s.wf[4] > 0.0 && s.wf[3] >= 0.0))
-                    throw std::runtime_error(tok[0] + ": SFFM needs FC > 0, MDI >= 0 and FS > 0 (defaults are not supported yet)");
-                s.wf[3] = std::min(s.wf[3], s.wf[2] / s.wf[4]);
-            }
+            if (kw == "SFFM" && s.wf[4] == 0.0) s.wf[4] = nan;
             if (!hasDC) { dc = kw == "EXP" ? s.wf[0] : 0.0; return; }  // ngspice's DC value of SFFM and AM is 0, not their t = 0 value
             break;
         } else {
@@ -1966,12 +2128,23 @@ void SPICEParser::parseCurrSrc(const std::vector<std::string>& tok, TensorBlock&
 }
 
 // D<name> <n+> <n-> <modelName> [area] [AREA=] [M=] [OFF] [IC=]   (params from .model in parse())
-void SPICEParser::parseDiode(const std::vector<std::string>& tok, TensorBlock& blk) {
-    requireFields(tok, 4);
+void SPICEParser::parseDiode(const std::vector<std::string>& tok0, TensorBlock& blk) {
+    requireFields(tok0, 4);
     Diode d;
+    std::vector<std::string> tok = tok0;  // D a k [tj] model ...: a third node before the model is the thermal one
+    if (tok.size() > 4 && !modelNames_.count(toUpper(tok[3])) && modelNames_.count(toUpper(tok[4]))) {
+        d.thermal = nodeIndex(tok[3]);
+        tok.erase(tok.begin() + 3);
+    }
     std::vector<std::string> rest(tok.begin(), tok.begin() + 4);  // PJ= is the sidewall perimeter; M= also scales it
     for (size_t i = 4; i < tok.size(); ++i) {
         const std::string k = toUpper(tok[i]);
+        if (k == "THERMAL") { d.thermalFlag = true; continue; }
+        if ((k == "W" || k == "L" || k == "LM" || k == "LP" || k == "WM" || k == "WP") && i + 1 < tok.size() && isValue(tok[i + 1])) {
+            const double v = parseValue(tok[++i]);
+            (k == "W" ? d.w : k == "L" ? d.l : k == "LM" ? d.lm : k == "LP" ? d.lp : k == "WM" ? d.wm : d.wp) = v;
+            continue;
+        }
         if (k == "PJ" && i + 1 < tok.size() && isValue(tok[i + 1])) { d.pj = parseValue(tok[++i]); d.pjGiven = true; continue; }
         if (k == "AREA" || (i == 4 && isValue(tok[i]))) d.areaGiven = true;
         if (k == "M" && i + 1 < tok.size() && isValue(tok[i + 1])) d.mult = parseValue(tok[i + 1]);
@@ -2114,6 +2287,29 @@ void SPICEParser::parseJFET(const std::vector<std::string>& tok, TensorBlock& bl
 }
 
 // U<name> <n1> <n2> <n3> <model> L=<length> [N=<lumps>]   (uniform distributed RC line, ngspice urc)
+// O<name> <p1> <n1> <p2> <n2> <model> [V1=v I1=i V2=v I2=i | IC=v1,i1,v2,i2]   (ngspice LTRA)
+void SPICEParser::parseLossyLine(const std::vector<std::string>& tok, TensorBlock& blk) {
+    requireFields(tok, 6);
+    LossyLine o;
+    o.name = tok[0];
+    o.p1 = nodeIndex(tok[1]); o.n1 = nodeIndex(tok[2]); o.p2 = nodeIndex(tok[3]); o.n2 = nodeIndex(tok[4]);
+    o.modelName = tok[5];
+    for (size_t i = 6; i < tok.size(); ++i) {
+        const std::string k = toUpper(tok[i]);
+        if (i + 1 >= tok.size()) throw std::runtime_error(tok[0] + ": parameter " + k + " has no value");
+        if (k == "IC") {
+            if (i + 4 >= tok.size()) throw std::runtime_error(tok[0] + ": IC takes v1, i1, v2, i2");
+            for (double& v : o.ic) v = parseValue(tok[++i]);
+        } else if (k == "V1") o.ic[0] = parseValue(tok[++i]);
+        else if (k == "I1") o.ic[1] = parseValue(tok[++i]);
+        else if (k == "V2") o.ic[2] = parseValue(tok[++i]);
+        else if (k == "I2") o.ic[3] = parseValue(tok[++i]);
+        else throw std::runtime_error(tok[0] + ": parameter " + k + " is not supported yet");
+        o.icGiven = true;
+    }
+    blk.lossyLines.push_back(o);
+}
+
 void SPICEParser::parseURC(const std::vector<std::string>& tok, TensorBlock& blk) {
     requireFields(tok, 5);
     TensorBlock::URC u;
@@ -2259,8 +2455,28 @@ void SPICEParser::parseModelCard(const std::vector<std::string>& tok) {
     }
 
     // Parse optional parameters (key=value pairs flattened by tokenizer)
+    // LTRA's flags are bare words (nosteplimit, lininterp, ...): each becomes key = 1
+    if (card.type == "LTRA") {
+        static const std::set<std::string> flags = {"LTRA", "NOCONTROL", "STEPLIMIT", "NOSTEPLIMIT", "LININTERP", "QUADINTERP",
+                                                    "MIXEDINTERP", "TRUNCNR", "TRUNCDONTCUT"};
+        std::vector<std::string> u(t.begin(), t.begin() + std::min<size_t>(3, t.size()));
+        for (size_t i = 3; i < t.size(); ++i) {
+            const std::string k = toUpper(t[i]);
+            if (flags.count(k) && (i + 1 >= t.size() || flags.count(toUpper(t[i + 1])) || !isValue(t[i + 1]))) { card.params[k] = 1.0; continue; }
+            u.push_back(t[i]);
+        }
+        t = u;
+    }
+    // the code models' string parameters (quotes optional, as ngspice)
+    static const std::map<std::string, std::string> stringKeys = {
+        {"D_LUT", "TABLE_VALUES"}, {"D_SOURCE", "INPUT_FILE"}, {"D_STATE", "STATE_FILE"}, {"MULTI_INPUT_PWL", "MODEL"}, {"FILESOURCE", "FILE"}, {"XFER", "FILE"}};
     for (size_t i = 3; i + 1 < t.size(); i += 2) {
         std::string key = toUpper(t[i]);
+        const std::string& raw = t[i + 1];
+        if (const auto sk = stringKeys.find(card.type); sk != stringKeys.end() && sk->second == key) {
+            card.strings[key] = raw.size() >= 2 && raw.front() == '"' && raw.back() == '"' ? raw.substr(1, raw.size() - 2) : raw;
+            continue;
+        }
         const std::string word = toUpper(t[i + 1]);  // XSPICE booleans (inertial_delay=false)
         double val = word == "TRUE" ? 1.0 : word == "FALSE" ? 0.0 : parseValue(t[i + 1]);
         card.params[key] = val;
@@ -2550,7 +2766,8 @@ namespace acutesim {
 // %d / %v before a port name its type (the model decides it anyway).
 void SPICEParser::parseXspice(const std::string& line, int lineNum) {
     std::string spaced;
-    for (char c : line) spaced += c == '[' || c == ']' ? std::string(" ") + c + " " : c == '(' || c == ')' ? std::string(" ") : std::string(1, c);
+    for (char c : line)  // commas separate as blanks do (ngspice INPgetNetTok): %vd(a, b), %vd(a,b)
+        spaced += c == '[' || c == ']' ? std::string(" ") + c + " " : c == '(' || c == ')' || c == ',' ? std::string(" ") : std::string(1, c);
     std::istringstream ss(spaced);
     std::vector<std::string> w;
     for (std::string t; ss >> t;) w.push_back(t);
@@ -2571,6 +2788,110 @@ void SPICEParser::parseXspice(const std::string& line, int lineNum) {
 
 // The A devices against their .model cards: ngspice 47's d_buffer ... d_dff, adc_bridge and dac_bridge
 // (parameters and defaults probed; see physics/xspice.h). A dac_bridge output becomes a voltage source.
+std::string SPICEParser::dataPath(const std::string& file) const {
+    const std::filesystem::path path(file);
+    if (path.is_relative() && !baseDir_.empty() && std::filesystem::is_regular_file(std::filesystem::path(baseDir_) / path))
+        return (std::filesystem::path(baseDir_) / path).string();
+    return file;
+}
+
+// ngspice d_source's vector file: rows "time state..." (one 12-state token per output, as 0s 1r Uz), lines starting
+// with * and blank lines skipped, tokens split at blanks = ( ) and commas. ngspice reports a bad file and holds the
+// outputs at U; here it is an error.
+void SPICEParser::readDigitalSource(::xspice::Inst& x, const std::string& file, const std::string& model) {
+    std::ifstream in(dataPath(file));
+    if (!in) throw std::runtime_error("model " + model + ": cannot open d_source input_file " + file);
+    static const std::string states[12] = {"0s", "1s", "Us", "0r", "1r", "Ur", "0z", "1z", "Uz", "0u", "1u", "Uu"};
+    std::string line;
+    for (int n = 1; std::getline(in, line); ++n) {
+        if (line.empty() || line[0] == '*') continue;
+        for (char& ch : line) if (ch == '=' || ch == '(' || ch == ')' || ch == ',') ch = ' ';
+        std::istringstream ss(line);
+        std::vector<std::string> tok;
+        for (std::string w; ss >> w;) tok.push_back(w);
+        if (tok.empty()) continue;
+        const std::string where = "model " + model + ": " + file + " line " + std::to_string(n) + ": ";
+        if (tok.size() != x.out.size() + 1)
+            throw std::runtime_error(where + "expected a time and " + std::to_string(x.out.size()) + " states");
+        const double t = parseValue(tok[0]);
+        if (!x.times.empty() && !(t > x.times.back())) throw std::runtime_error(where + "times must increase");
+        // ngspice queues each row 0.1 ns early and posts it with a 0.1 ns delay: a row in (0, 0.1 ns) lands before t = 0
+        if (t < 0.0 || (t > 0.0 && t < 1e-10)) throw std::runtime_error(where + "a time in (0, 0.1 ns) or below 0 is not supported");
+        std::vector<::xspice::Val> row;
+        for (size_t k = 1; k < tok.size(); ++k) {
+            const auto* hit = std::find(states, states + 12, tok[k]);
+            if (hit == states + 12) throw std::runtime_error(where + "unknown state " + tok[k]);
+            const int i = static_cast<int>(hit - states);
+            row.push_back({static_cast<::xspice::Lv>(i % 3), static_cast<::xspice::St>(i / 3)});
+        }
+        x.times.push_back(t);
+        x.rows.push_back(std::move(row));
+    }
+}
+
+// ngspice d_state's state table: a state's first row "state out... in... -> next" (12-state outputs, inputs 0 1 x),
+// then rows "in... -> next" for the same state; tokens and comments as d_source. ngspice falls back to row 0 for a
+// state it cannot find and stops at rows of one state split apart; both are errors here, as is a bad file.
+void SPICEParser::readDigitalState(::xspice::Inst& x, const std::string& file, const std::string& model) {
+    std::ifstream in(dataPath(file));
+    if (!in) throw std::runtime_error("model " + model + ": cannot open d_state state_file " + file);
+    static const std::string states[12] = {"0s", "1s", "Us", "0r", "1r", "Ur", "0z", "1z", "Uz", "0u", "1u", "Uu"};
+    const size_t ni = x.in.size() - 2, no = x.out.size();
+    auto integer = [&](const std::string& w, const std::string& where) {
+        const double v = parseValue(w);
+        if (v != std::floor(v) || std::abs(v) > 1e9) throw std::runtime_error(where + "state " + w + " is not an integer");
+        return static_cast<int>(v);
+    };
+    std::string line;
+    for (int n = 1; std::getline(in, line); ++n) {
+        if (line.empty() || line[0] == '*') continue;
+        for (char& ch : line) if (ch == '=' || ch == '(' || ch == ')' || ch == ',') ch = ' ';
+        std::istringstream ss(line);
+        std::vector<std::string> tok;
+        for (std::string w; ss >> w;) tok.push_back(w);
+        if (tok.empty()) continue;
+        const std::string where = "model " + model + ": " + file + " line " + std::to_string(n) + ": ";
+        const bool header = tok.size() == ni + no + 3;
+        if (!header && tok.size() != ni + 2)
+            throw std::runtime_error(where + "expected state, " + std::to_string(no) + " outputs, " + std::to_string(ni) +
+                                     " inputs, -> and the next state (or only the inputs, -> and the next state)");
+        if (!header && x.state.empty()) throw std::runtime_error(where + "the first row needs its state and outputs");
+        size_t k = 0;
+        if (header) {
+            x.state.push_back(integer(tok[k++], where));
+            std::vector<::xspice::Val> row;
+            for (size_t o = 0; o < no; ++o, ++k) {
+                const auto* hit = std::find(states, states + 12, tok[k]);
+                if (hit == states + 12) throw std::runtime_error(where + "unknown output state " + tok[k]);
+                const int i = static_cast<int>(hit - states);
+                row.push_back({static_cast<::xspice::Lv>(i % 3), static_cast<::xspice::St>(i / 3)});
+            }
+            x.rows.push_back(std::move(row));
+        } else {
+            x.state.push_back(x.state.back());
+            x.rows.push_back(x.rows.back());
+        }
+        std::vector<::xspice::Lv> m;
+        for (size_t j = 0; j < ni; ++j, ++k) {
+            const std::string& w = tok[k];
+            if (w != "0" && w != "1" && w != "x" && w != "X") throw std::runtime_error(where + "unknown input value " + w);
+            m.push_back(w == "0" ? ::xspice::L0 : w == "1" ? ::xspice::L1 : ::xspice::LU);
+        }
+        x.match.push_back(std::move(m));
+        if (tok[k++] != "->") throw std::runtime_error(where + "expected -> before the next state");
+        x.nextState.push_back(integer(tok[k], where));
+    }
+    if (x.state.empty()) throw std::runtime_error("model " + model + ": d_state state_file " + file + " has no states");
+    // ngspice keeps only a state's contiguous rows and takes its outputs from the first
+    for (size_t r = 1; r < x.state.size(); ++r)
+        if (x.state[r] != x.state[r - 1] && std::find(x.state.begin(), x.state.begin() + r, x.state[r]) != x.state.begin() + r)
+            throw std::runtime_error("model " + model + ": d_state state " + std::to_string(x.state[r]) + "'s rows are not contiguous");
+    auto known = [&](int st) { return std::find(x.state.begin(), x.state.end(), st) != x.state.end(); };
+    if (!known(x.icount)) throw std::runtime_error("model " + model + ": reset_state " + std::to_string(x.icount) + " is not in " + file);
+    for (int st : x.nextState)
+        if (!known(st)) throw std::runtime_error("model " + model + ": next state " + std::to_string(st) + " is not in " + file);
+}
+
 void SPICEParser::resolveXspice(int& at) {
     if (pendingA_.empty()) return;
     using xspice::Kind;
@@ -2578,6 +2899,9 @@ void SPICEParser::resolveXspice(int& at) {
         {"D_BUFFER", Kind::BUF}, {"D_INVERTER", Kind::INV}, {"D_AND", Kind::AND}, {"D_NAND", Kind::NAND},
         {"D_OR", Kind::OR}, {"D_NOR", Kind::NOR}, {"D_XOR", Kind::XOR}, {"D_XNOR", Kind::XNOR},
         {"D_TRISTATE", Kind::TRI}, {"D_PULLUP", Kind::PULLUP}, {"D_PULLDOWN", Kind::PULLDOWN}, {"D_DFF", Kind::DFF},
+        {"D_JKFF", Kind::JKFF}, {"D_TFF", Kind::TFF}, {"D_SRFF", Kind::SRFF},
+        {"D_DLATCH", Kind::DLATCH}, {"D_SRLATCH", Kind::SRLATCH}, {"D_OPEN_C", Kind::OPENC}, {"D_OPEN_E", Kind::OPENE},
+        {"D_FDIV", Kind::FDIV}, {"D_LUT", Kind::LUT}, {"D_SOURCE", Kind::SOURCE}, {"D_OSC", Kind::OSC}, {"D_PWM", Kind::PWM}, {"D_STATE", Kind::STATE}, {"D_RAM", Kind::RAM},
         {"ADC_BRIDGE", Kind::ADC}, {"DAC_BRIDGE", Kind::DAC}};
     auto net = std::make_shared<xspice::Net>();
     std::map<std::string, int> dnode;  // upper-case name -> digital node
@@ -2620,13 +2944,16 @@ void SPICEParser::resolveXspice(int& at) {
         const auto mc = modelCards_.find(toUpper(a.model));
         if (mc == modelCards_.end()) throw std::runtime_error(a.name + ": no .model card " + a.model);
         const ModelCard* c = &mc->second;
-        static const std::set<std::string> analogKinds = {"GAIN", "SUMMER", "MULT", "DIVIDE", "LIMIT", "CLIMIT", "PWL", "ASWITCH"};
+        static const std::set<std::string> analogKinds = {"GAIN", "SUMMER", "MULT", "DIVIDE", "LIMIT", "CLIMIT", "PWL", "ASWITCH", "INT", "D_DT", "S_XFER", "SLEW", "HYST", "SINE", "TRIANGLE", "SQUARE", "ZENER", "MULTI_INPUT_PWL", "OTA", "ILIMIT", "ONESHOT", "POTENTIOMETER", "CAPACITORIC", "INDUCTORIC", "SIDIODE", "PSWITCH", "MEMRISTOR", "FILESOURCE", "PWLTS", "XFER", "CORE", "LCOUPLE"};
         if (analogKinds.count(c->type)) { resolveXspiceAnalog(a, *c, analogNode); continue; }
         const auto k = kinds.find(c->type);
         if (k == kinds.end()) throw std::runtime_error(a.name + ": XSPICE model type " + c->type + " is not supported yet");
         for (const auto& w : a.raw)
             if (w[0] == '%' && w != "%d" && w != "%v") throw std::runtime_error(a.name + ": port type " + w + " is not supported yet");
-        if (!c->vectors.empty()) throw std::runtime_error("model " + c->name + ": parameter " + c->vectors.begin()->first + " is not a " + c->type + " parameter");
+        for (const auto& [key, v] : c->vectors)
+            if (!(k->second == Kind::OSC && (key == "CNTL_ARRAY" || key == "FREQ_ARRAY")) &&
+                !(k->second == Kind::PWM && (key == "CNTL_ARRAY" || key == "DC_ARRAY")))
+                throw std::runtime_error("model " + c->name + ": parameter " + key + " is not a " + c->type + " parameter");
         xspice::Inst x;
         x.name = a.name;
         x.kind = k->second;
@@ -2645,6 +2972,108 @@ void SPICEParser::resolveXspice(int& at) {
             x.out = {digital(single(1), a.name, false)};
             allowed = {"RISE_DELAY", "FALL_DELAY", "INPUT_LOAD", "INERTIAL_DELAY"};
             break;
+        case Kind::OPENC: case Kind::OPENE:
+            need(2);
+            x.in = {digital(single(0), a.name, false)};
+            x.out = {digital(single(1), a.name, false)};
+            allowed = {x.kind == Kind::OPENC ? "FALL_DELAY" : "RISE_DELAY", "OPEN_DELAY", "INPUT_LOAD", "INERTIAL_DELAY"};
+            break;
+        case Kind::FDIV: {
+            need(2);
+            x.in = {digital(single(0), a.name, false)};
+            x.out = {digital(single(1), a.name, false)};
+            allowed = {"DIV_FACTOR", "HIGH_CYCLES", "I_COUNT", "RISE_DELAY", "FALL_DELAY", "FREQ_IN_LOAD"};
+            auto integer = [&](const char* k, int dflt) {
+                const double v = c->get(k, dflt);
+                if (v != std::floor(v) || std::abs(v) > 1e9) throw std::runtime_error("model " + c->name + ": " + k + " must be an integer");
+                return static_cast<int>(v);
+            };
+            x.div = integer("DIV_FACTOR", 2); x.high = integer("HIGH_CYCLES", 1); x.icount = integer("I_COUNT", 0);
+            break;
+        }
+        case Kind::LUT: {
+            need(2);
+            for (const auto& n : a.groups[0]) x.in.push_back(digital(n, a.name, false));
+            if (x.in.empty() || x.in.size() > 20) throw std::runtime_error(a.name + ": d_lut takes 1 to 20 inputs");
+            x.out = {digital(single(1), a.name, false)};
+            allowed = {"RISE_DELAY", "FALL_DELAY", "INPUT_LOAD"};
+            const auto tv = c->strings.find("TABLE_VALUES");
+            if (tv == c->strings.end()) throw std::runtime_error("model " + c->name + ": d_lut needs table_values=\"...\" (quoted)");
+            // ngspice: '1' / '0' per entry, anything else U; a short table is padded with U, a long one cut
+            x.table.assign(size_t{1} << x.in.size(), xspice::LU);
+            for (size_t k = 0; k < x.table.size() && k < tv->second.size(); ++k)
+                x.table[k] = tv->second[k] == '1' ? xspice::L1 : tv->second[k] == '0' ? xspice::L0 : xspice::LU;
+            break;
+        }
+        case Kind::OSC: case Kind::PWM: {
+            const bool pwm = x.kind == Kind::PWM;
+            need(2);
+            const std::string cn = single(0);
+            if (dnode.count(toUpper(cn))) throw std::runtime_error(a.name + ": node " + cn + " is digital; cntl_in is analog");
+            x.analog = {analogNode(cn, a.name)};
+            x.out = {digital(single(1), a.name, false)};
+            // ngspice's d_osc and d_pwm never apply rise_delay / fall_delay
+            allowed = {pwm ? "FREQUENCY" : "DUTY_CYCLE", "INIT_PHASE", "RISE_DELAY", "FALL_DELAY"};
+            const char* tab = pwm ? "DC_ARRAY" : "FREQ_ARRAY";
+            x.ctl = c->vectors.count("CNTL_ARRAY") ? c->vectors.at("CNTL_ARRAY") : pwm ? std::vector<double>{-1.0, 1.0} : std::vector<double>{0.0, 1.0};
+            x.freq = c->vectors.count(tab) ? c->vectors.at(tab) : pwm ? std::vector<double>{0.0, 1.0} : std::vector<double>{1e6, 2e6};
+            if (x.ctl.size() < 2 || x.ctl.size() != x.freq.size())
+                throw std::runtime_error("model " + c->name + ": cntl_array and " + (pwm ? "dc_array" : "freq_array") + " need the same size, 2 or more");
+            for (size_t i = 0; i < x.ctl.size(); ++i) {
+                if (i && !(x.ctl[i] > x.ctl[i - 1])) throw std::runtime_error("model " + c->name + ": cntl_array must increase");
+                if (pwm) {  // ngspice: dc_array is limited to [0, 1], and 0 / 1 entries become 0.01 / 0.99 (its default [0 1] too)
+                    if (!(x.freq[i] >= 0.0 && x.freq[i] <= 1.0)) throw std::runtime_error("model " + c->name + ": dc_array values must be in [0, 1]");
+                    x.freq[i] = x.freq[i] <= 0.0 ? 0.01 : x.freq[i] >= 1.0 ? 0.99 : x.freq[i];
+                } else if (!(x.freq[i] > 0.0)) throw std::runtime_error("model " + c->name + ": freq_array values must be > 0");
+            }
+            x.period = 1.0 / c->get("FREQUENCY", 1e6);
+            if (pwm && !(c->get("FREQUENCY", 1e6) >= 1e-6)) throw std::runtime_error("model " + c->name + ": frequency must be >= 1e-6");
+            x.duty = c->get("DUTY_CYCLE", 0.5);
+            x.phase = c->get("INIT_PHASE", 0.0);
+            if (!(x.duty >= 1e-6 && x.duty <= 0.999999)) throw std::runtime_error("model " + c->name + ": duty_cycle must be in [1e-6, 0.999999]");
+            if (!(x.phase >= -180.0 && x.phase <= 360.0)) throw std::runtime_error("model " + c->name + ": init_phase must be in [-180, 360]");
+            break;
+        }
+        case Kind::RAM: {
+            need(5);  // [data_in] [data_out] [address] write_en [select]
+            for (const auto& n : a.groups[0]) x.in.push_back(digital(n, a.name, false));
+            for (const auto& n : a.groups[1]) x.out.push_back(digital(n, a.name, false));
+            if (x.in.empty() || x.in.size() != x.out.size()) throw std::runtime_error(a.name + ": data_in and data_out need the same width, 1 or more");
+            for (const auto& n : a.groups[2]) x.in.push_back(digital(n, a.name, false));
+            x.addr = static_cast<int>(a.groups[2].size());
+            // ponytail: the RAM is held as one Lv per bit (ngspice packs 4 per byte): 2^20 words is the bound kept
+            if (x.addr < 1 || x.addr > 20) throw std::runtime_error(a.name + ": d_ram takes 1 to 20 address lines");
+            x.in.push_back(digital(single(3), a.name, false));
+            if (a.groups[4].empty() || a.groups[4].size() > 16) throw std::runtime_error(a.name + ": d_ram takes 1 to 16 select lines");
+            for (const auto& n : a.groups[4]) x.in.push_back(digital(n, a.name, false));
+            allowed = {"SELECT_VALUE", "IC", "READ_DELAY", "DATA_LOAD", "ADDRESS_LOAD", "SELECT_LOAD", "ENABLE_LOAD"};
+            const double sv = c->get("SELECT_VALUE", 1.0);
+            if (sv != std::floor(sv) || sv < 0.0 || sv > 65535.0) throw std::runtime_error("model " + c->name + ": select_value must be an integer in [0, 65535]");
+            x.select = static_cast<int>(sv);
+            break;
+        }
+        case Kind::STATE: {
+            need(4);  // [in...] clk reset [out...]
+            for (const auto& n : a.groups[0]) if (toUpper(n) != "NULL") x.in.push_back(digital(n, a.name, false));
+            x.in.push_back(digital(single(1), a.name, false));
+            x.in.push_back(digital(single(2), a.name, true));
+            for (const auto& n : a.groups[3]) x.out.push_back(digital(n, a.name, false));
+            if (x.out.empty()) throw std::runtime_error(a.name + ": no outputs");
+            allowed = {"CLK_DELAY", "RESET_DELAY", "RESET_STATE", "INPUT_LOAD", "CLK_LOAD", "RESET_LOAD"};
+            const double rs = c->get("RESET_STATE", 0.0);
+            if (rs != std::floor(rs) || std::abs(rs) > 1e9) throw std::runtime_error("model " + c->name + ": reset_state must be an integer");
+            x.icount = static_cast<int>(rs);
+            readDigitalState(x, c->strings.count("STATE_FILE") ? c->strings.at("STATE_FILE") : "state.txt", c->name);
+            break;
+        }
+        case Kind::SOURCE: {
+            need(1);
+            for (const auto& n : a.groups[0]) x.out.push_back(digital(n, a.name, false));
+            if (x.out.empty()) throw std::runtime_error(a.name + ": no outputs");
+            allowed = {"INPUT_LOAD"};
+            readDigitalSource(x, c->strings.count("INPUT_FILE") ? c->strings.at("INPUT_FILE") : "source.txt", c->name);
+            break;
+        }
         case Kind::AND: case Kind::NAND: case Kind::OR: case Kind::NOR: case Kind::XOR: case Kind::XNOR:
             need(2);
             for (const auto& n : a.groups[0]) x.in.push_back(digital(n, a.name, false));
@@ -2663,13 +3092,22 @@ void SPICEParser::resolveXspice(int& at) {
             x.out = {digital(single(0), a.name, false)};
             allowed = {"LOAD"};
             break;
-        case Kind::DFF:
-            need(6);
-            x.in = {digital(single(0), a.name, false), digital(single(1), a.name, false),
-                    digital(single(2), a.name, true), digital(single(3), a.name, true)};
-            x.out = {digital(single(4), a.name, true), digital(single(5), a.name, true)};
-            allowed = {"CLK_DELAY", "SET_DELAY", "RESET_DELAY", "IC", "RISE_DELAY", "FALL_DELAY", "DATA_LOAD", "CLK_LOAD", "SET_LOAD", "RESET_LOAD"};
+        case Kind::DFF: case Kind::JKFF: case Kind::TFF: case Kind::SRFF: case Kind::DLATCH: case Kind::SRLATCH: {
+            // data inputs, then clk (latches: enable) set reset out Nout
+            const size_t nd = x.kind == Kind::JKFF || x.kind == Kind::SRFF || x.kind == Kind::SRLATCH ? 2 : 1;
+            need(nd + 5);
+            for (size_t k = 0; k <= nd; ++k) x.in.push_back(digital(single(k), a.name, false));
+            x.in.push_back(digital(single(nd + 1), a.name, true));
+            x.in.push_back(digital(single(nd + 2), a.name, true));
+            x.out = {digital(single(nd + 3), a.name, true), digital(single(nd + 4), a.name, true)};
+            if (x.kind == Kind::DLATCH || x.kind == Kind::SRLATCH)
+                allowed = {"ENABLE_DELAY", "SET_DELAY", "RESET_DELAY", "IC", "RISE_DELAY", "FALL_DELAY", "ENABLE_LOAD", "SET_LOAD", "RESET_LOAD",
+                           x.kind == Kind::DLATCH ? "DATA_DELAY" : "SR_DELAY", x.kind == Kind::DLATCH ? "DATA_LOAD" : "SR_LOAD"};
+            else
+                allowed = {"CLK_DELAY", "SET_DELAY", "RESET_DELAY", "IC", "RISE_DELAY", "FALL_DELAY", "CLK_LOAD", "SET_LOAD", "RESET_LOAD",
+                           x.kind == Kind::DFF ? "DATA_LOAD" : x.kind == Kind::JKFF ? "JK_LOAD" : x.kind == Kind::TFF ? "T_LOAD" : "SR_LOAD"};
             break;
+        }
         case Kind::ADC: case Kind::DAC: {
             need(2);
             const bool adc = x.kind == Kind::ADC;
@@ -2700,10 +3138,12 @@ void SPICEParser::resolveXspice(int& at) {
         if (x.inertial && x.kind == Kind::TRI)  // d_tristate's runs its state and strength as two inertial channels
             throw std::runtime_error("model " + c->name + ": inertial_delay on a d_tristate is not supported yet");
         const double d = c->get("DELAY", 1e-9);  // d_tristate
-        x.rise = x.kind == Kind::TRI ? d : c->get("RISE_DELAY", 1e-9);
-        x.fall = x.kind == Kind::TRI ? d : c->get("FALL_DELAY", 1e-9);
-        x.clk = c->get("CLK_DELAY", 1e-9); x.set = c->get("SET_DELAY", 1e-9); x.reset = c->get("RESET_DELAY", 1e-9);
-        const double ic = c->get("IC", 0.0);
+        x.rise = x.kind == Kind::TRI ? d : c->get(x.kind == Kind::OPENC ? "OPEN_DELAY" : "RISE_DELAY", 1e-9);
+        x.fall = x.kind == Kind::TRI ? d : c->get(x.kind == Kind::OPENE ? "OPEN_DELAY" : "FALL_DELAY", 1e-9);
+        x.clk = c->get(x.kind == Kind::DLATCH || x.kind == Kind::SRLATCH ? "ENABLE_DELAY" : "CLK_DELAY", 1e-9);
+        x.data = x.kind == Kind::RAM ? c->get("READ_DELAY", 100e-9) : c->get(x.kind == Kind::DLATCH ? "DATA_DELAY" : "SR_DELAY", 1e-9);
+        x.set = c->get("SET_DELAY", 1e-9); x.reset = c->get("RESET_DELAY", 1e-9);
+        const double ic = c->get("IC", x.kind == Kind::RAM ? 2.0 : 0.0);  // d_ram's ic defaults to U
         x.ic = ic == 1.0 ? xspice::L1 : ic == 0.0 ? xspice::L0 : xspice::LU;
         x.lo = c->get("IN_LOW", 0.1); x.hi = c->get("IN_HIGH", 0.9);
         x.vlo = c->get("OUT_LOW", 0.0); x.vhi = c->get("OUT_HIGH", 1.0);
@@ -2734,7 +3174,9 @@ void SPICEParser::resolveXspice(int& at) {
 void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
                                       const std::function<int(const std::string&, const std::string&)>& analogNode) {
     using xspice::AKind;
-    struct Spec { char dir; const char* def; bool vec; };  // dir: i(nput), o(utput), b(oth: a conductance port)
+    // dir: i(nput), o(utput), b(oth: a conductance port, g or gd), h (an hd port: a voltage output reading its own
+    // current); allow: a b port's types if more than def; nullOk: NULL allowed
+    struct Spec { char dir; const char* def; bool vec; const char* allow = nullptr; bool nullOk = false; };
     static const std::map<std::string, std::pair<AKind, std::vector<Spec>>> table = {
         {"GAIN", {AKind::GAIN, {{'i', "v", false}, {'o', "v", false}}}},
         {"SUMMER", {AKind::SUMMER, {{'i', "v", true}, {'o', "v", false}}}},
@@ -2743,7 +3185,31 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         {"LIMIT", {AKind::LIMIT, {{'i', "v", false}, {'o', "v", false}}}},
         {"CLIMIT", {AKind::CLIMIT, {{'i', "v", false}, {'i', "v", false}, {'i', "v", false}, {'o', "v", false}}}},
         {"PWL", {AKind::PWL, {{'i', "v", false}, {'o', "v", false}}}},
-        {"ASWITCH", {AKind::ASWITCH, {{'i', "v", false}, {'b', "gd", false}}}}};
+        {"ASWITCH", {AKind::ASWITCH, {{'i', "v", false}, {'b', "gd", false}}}},
+        {"INT", {AKind::INT, {{'i', "v", false}, {'o', "v", false}}}},
+        {"D_DT", {AKind::D_DT, {{'i', "v", false}, {'o', "v", false}}}},
+        {"S_XFER", {AKind::S_XFER, {{'i', "v", false}, {'o', "v", false}}}},
+        {"SLEW", {AKind::SLEW, {{'i', "v", false}, {'o', "v", false}}}},
+        {"HYST", {AKind::HYST, {{'i', "v", false}, {'o', "v", false}}}},
+        {"SINE", {AKind::SINE, {{'i', "v", false}, {'o', "v", false}}}},
+        {"TRIANGLE", {AKind::TRIANGLE, {{'i', "v", false}, {'o', "v", false}}}},
+        {"SQUARE", {AKind::SQUARE, {{'i', "v", false}, {'o', "v", false}}}},
+        {"ZENER", {AKind::ZENER, {{'b', "gd", false}}}},
+        {"MULTI_INPUT_PWL", {AKind::MIPWL, {{'i', "vd", true}, {'o', "vd", false}}}},
+        {"OTA", {AKind::OTA, {{'b', "gd", false}, {'b', "g", false}}}},
+        {"CORE", {AKind::CORE, {{'b', "gd", false, "g gd"}}}},
+        {"LCOUPLE", {AKind::LCOUPLE, {{'h', "hd", false, "h hd"}, {'h', "hd", false}}}},
+        {"XFER", {AKind::XFER, {{'i', "v", false}, {'o', "v", false}}}},
+        {"PWLTS", {AKind::PWLTS, {{'o', "v", false}}}},
+        {"FILESOURCE", {AKind::FILESRC, {{'o', "v", true}}}},
+        {"MEMRISTOR", {AKind::MEMRISTOR, {{'b', "gd", false}}}},
+        {"PSWITCH", {AKind::PSWITCH, {{'b', "gd", false, "g gd"}, {'b', "gd", false}}}},
+        {"SIDIODE", {AKind::SIDIODE, {{'b', "gd", false}}}},
+        {"CAPACITORIC", {AKind::CAPIC, {{'h', "hd", false}}}},
+        {"INDUCTORIC", {AKind::INDIC, {{'b', "gd", false}}}},
+        {"POTENTIOMETER", {AKind::POT, {{'b', "g", false}, {'b', "g", false}, {'b', "g", false}}}},
+        {"ONESHOT", {AKind::ONESHOT, {{'i', "v", false}, {'i', "v", false, nullptr, true}, {'i', "v", false, nullptr, true}, {'o', "v", false}}}},
+        {"ILIMIT", {AKind::ILIMIT, {{'i', "v", false}, {'b', "g", false, "g gd", true}, {'b', "g", false, "g gd", true}, {'b', "g", false, "g gd"}}}}};
     const auto& [kind, specs] = table.at(c.type);
     struct Port { std::string type; int n1 = 0, n2 = 0; std::string vname; };
     std::vector<std::vector<Port>> ports;  // per spec, its elements
@@ -2758,9 +3224,11 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
             ++p;
         }
         static const std::set<std::string> in = {"v", "vd", "i", "id", "vnam"}, out = {"v", "vd", "i", "id"};
-        if (!(sp.dir == 'b' ? pt.type == "gd" : (sp.dir == 'i' ? in : out).count(pt.type)))
+        if (sp.nullOk && p < w.size() && toUpper(w[p]) == "NULL") { ++p; pt.type = "null"; return pt; }
+        if (!(sp.dir == 'h' || sp.dir == 'b' ? (sp.allow ? (" " + std::string(sp.allow) + " ").find(" " + pt.type + " ") != std::string::npos : pt.type == sp.def)
+                            : (sp.dir == 'i' ? in : out).count(pt.type)))
             throw std::runtime_error(a.name + ": port type %" + pt.type + " is not allowed (or not supported yet) on this " + c.type + " port");
-        const bool diff = pt.type == "vd" || pt.type == "id" || pt.type == "gd";
+        const bool diff = pt.type == "vd" || pt.type == "id" || pt.type == "gd" || pt.type == "hd";
         auto node = [&]() {
             if (p >= w.size() || w[p] == "[" || w[p] == "]" || w[p][0] == '%') throw std::runtime_error(a.name + ": missing a node for " + c.type);
             const std::string n = w[p++];
@@ -2829,7 +3297,7 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
             if (m->fraction) { m->range *= m->hi - m->lo; m->fraction = false; }
         } else { m->upperDelta = num("UPPER_DELTA", 0.0); m->lowerDelta = num("LOWER_DELTA", 0.0); }
         break;
-    case AKind::PWL: {
+    case AKind::PWL: case AKind::PWLTS: {
         allowed.insert("X_ARRAY"); allowed.insert("Y_ARRAY");
         const auto xi = c.vectors.find("X_ARRAY"), yi = c.vectors.find("Y_ARRAY");
         if (xi == c.vectors.end() || yi == c.vectors.end() || xi->second.size() != yi->second.size() || xi->second.size() < 2)
@@ -2844,6 +3312,277 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         if (flag("LIMIT", false)) { m->y[0] = m->y[1]; m->y[n - 1] = m->y[n - 2]; }
         else { m->y[0] = 2 * m->y[1] - m->y[2]; m->y[n - 1] = 2 * m->y[n - 2] - m->y[n - 3]; }
         m->domain = num("INPUT_DOMAIN", 0.01); m->fraction = flag("FRACTION", true);
+        if (kind == AKind::PWLTS)  // ngspice cm_pwlts: breakpoints at each corner and either side of its smoothing (after t = 0)
+            for (size_t i = 1; i + 1 < n; ++i) {
+                const double dt = m->fraction ? std::min(m->x[i] - m->x[i - 1], m->x[i + 1] - m->x[i]) * m->domain : m->domain;
+                if (m->x[i] - dt <= 0.0) continue;
+                for (double b : {m->x[i] - dt, m->x[i], m->x[i] + dt}) m->bkpts.push_back(b);
+            }
+        std::sort(m->bkpts.begin(), m->bkpts.end());
+        break;
+    }
+    case AKind::INT: case AKind::D_DT:
+        m->gain = num("GAIN", 1.0);
+        if (kind == AKind::INT) { m->inOffset = num("IN_OFFSET", 0.0); m->outIc = num("OUT_IC", 0.0); }
+        else m->outOffset = num("OUT_OFFSET", 0.0);
+        m->range = num("LIMIT_RANGE", 1e-6);
+        allowed.insert("OUT_LOWER_LIMIT"); allowed.insert("OUT_UPPER_LIMIT");
+        if (!c.params.count("OUT_LOWER_LIMIT") || !c.params.count("OUT_UPPER_LIMIT"))  // ngspice: no defaults
+            throw std::runtime_error("model " + c.name + ": " + c.type + " needs out_lower_limit and out_upper_limit");
+        m->lo = c.params.at("OUT_LOWER_LIMIT"); m->hi = c.params.at("OUT_UPPER_LIMIT");
+        break;
+    case AKind::S_XFER: {
+        m->inOffset = num("IN_OFFSET", 0.0);
+        allowed.insert("NUM_COEFF"); allowed.insert("DEN_COEFF"); allowed.insert("INT_IC");
+        auto coeffs = [&](const char* k) {
+            const auto it = c.vectors.find(k);
+            if (it != c.vectors.end()) return it->second;
+            if (c.params.count(k)) return std::vector<double>{c.params.at(k)};
+            throw std::runtime_error("model " + c.name + ": s_xfer needs " + std::string(k));
+        };
+        const auto nc = coeffs("NUM_COEFF"), dc = coeffs("DEN_COEFF");  // highest power first
+        if (nc.size() > dc.size() || dc.size() < 2)
+            throw std::runtime_error("model " + c.name + ": s_xfer needs a denominator of order 1 at least, not below the numerator's");
+        const double f = num("DENORMALIZED_FREQ", 1.0);
+        for (size_t i = 0; i < nc.size(); ++i) m->num.push_back(nc[nc.size() - 1 - i] / std::pow(f, (double)i));
+        for (size_t i = 0; i < dc.size(); ++i) m->den.push_back(dc[dc.size() - 1 - i] / std::pow(f, (double)i));
+        const double top = m->den.back();
+        if (top == 0.0) throw std::runtime_error("model " + c.name + ": s_xfer's highest denominator coefficient is 0");
+        for (auto& d : m->den) d /= top;
+        m->gain = num("GAIN", 1.0) / top;
+        m->intIc.assign(dc.size(), 0.0);
+        if (const auto it = c.vectors.find("INT_IC"); it != c.vectors.end() || c.params.count("INT_IC")) {
+            const std::vector<double> ic = it != c.vectors.end() ? it->second : std::vector<double>{c.params.at("INT_IC")};
+            if (ic.size() != dc.size() - 1)
+                throw std::runtime_error("model " + c.name + ": s_xfer int_ic needs " + std::to_string(dc.size() - 1) + " values");
+            for (size_t i = 0; i + 1 < dc.size(); ++i) m->intIc[i] = ic[dc.size() - 2 - i];
+        }
+        break;
+    }
+    case AKind::SLEW:
+        m->riseSlope = num("RISE_SLOPE", 1e9); m->fallSlope = num("FALL_SLOPE", 1e9);
+        if (!(m->riseSlope > 0.0 && m->fallSlope > 0.0)) throw std::runtime_error("model " + c.name + ": slew slopes must be > 0");
+        break;
+    case AKind::SINE: case AKind::TRIANGLE: case AKind::SQUARE: {
+        auto arr = [&](const char* k, std::vector<double> def) {
+            allowed.insert(k);
+            const auto it = c.vectors.find(k);
+            return it != c.vectors.end() ? it->second : def;
+        };
+        m->cntl = arr("CNTL_ARRAY", {0.0, 1.0}); m->freq = arr("FREQ_ARRAY", {1e3, 2e3});
+        if (m->cntl.size() != m->freq.size() || m->cntl.size() < 2)
+            throw std::runtime_error("model " + c.name + ": cntl_array and freq_array need the same size, 2 at least");
+        m->outLow = num("OUT_LOW", -1.0); m->outHigh = num("OUT_HIGH", 1.0);
+        if (kind != AKind::SINE) m->duty = num("DUTY_CYCLE", 0.5);
+        if (kind == AKind::SQUARE) { m->tRise = num("RISE_TIME", 1e-9); m->tFall = num("FALL_TIME", 1e-9); }
+        if (!(m->duty > 0.0 && m->duty < 1.0)) throw std::runtime_error("model " + c.name + ": duty_cycle must be in (0, 1)");
+        break;
+    }
+    case AKind::ZENER:
+        allowed.insert("V_BREAKDOWN");
+        if (!c.params.count("V_BREAKDOWN")) throw std::runtime_error("model " + c.name + ": zener needs v_breakdown");
+        m->vBreak = c.params.at("V_BREAKDOWN");
+        m->iBreak = num("I_BREAKDOWN", 2e-2); m->rBreak = num("R_BREAKDOWN", 1.0); m->iRev = num("I_REV", 1e-6);
+        m->iSat = num("I_SAT", 1e-12); m->nFwd = num("N_FORWARD", 1.0);
+        num("LIMIT_SWITCH", 0.0);  // ngspice's input limiting: the iteration path only
+        if (!(m->vBreak > 0.0 && m->iBreak > 0.0 && m->rBreak > 0.0 && m->iSat > 0.0 && m->nFwd > 0.0))
+            throw std::runtime_error("model " + c.name + ": zener needs v_breakdown, i_breakdown, r_breakdown, i_sat, n_forward > 0");
+        break;
+    case AKind::HYST:
+        m->inLow = num("IN_LOW", 0.0); m->inHigh = num("IN_HIGH", 1.0); m->hyst = num("HYST", 0.1);
+        m->lo = num("OUT_LOWER_LIMIT", 0.0); m->hi = num("OUT_UPPER_LIMIT", 1.0);
+        m->domain = num("INPUT_DOMAIN", 0.01); m->fraction = flag("FRACTION", true);
+        if (!(m->inHigh > m->inLow)) throw std::runtime_error("model " + c.name + ": hyst needs in_high > in_low");
+        break;
+    case AKind::MIPWL: {
+        allowed.insert("X"); allowed.insert("Y");
+        const auto xi = c.vectors.find("X"), yi = c.vectors.find("Y");
+        if (xi == c.vectors.end() || yi == c.vectors.end() || xi->second.size() != yi->second.size() || xi->second.size() < 2)
+            throw std::runtime_error("model " + c.name + ": multi_input_pwl needs x and y of the same size, 2 at least");
+        m->x = xi->second; m->y = yi->second;
+        for (size_t i = 1; i < m->x.size(); ++i)
+            if (!(m->x[i] > m->x[i - 1])) throw std::runtime_error("model " + c.name + ": multi_input_pwl x must increase");
+        const std::string g = c.strings.count("MODEL") ? c.strings.at("MODEL") : "and";
+        static const std::vector<std::string> gates = {"and", "nand", "or", "nor"};
+        const auto gi = std::find(gates.begin(), gates.end(), g);
+        if (gi == gates.end()) throw std::runtime_error("model " + c.name + ": multi_input_pwl model " + g + " is not and, nand, or, nor");
+        m->gate = static_cast<int>(gi - gates.begin());
+        break;
+    }
+    case AKind::CORE: {
+        const double mode = num("MODE", 1.0);
+        m->coreHyst = mode == 2.0;
+        m->domain = num("INPUT_DOMAIN", 0.01); m->fraction = flag("FRACTION", true);
+        m->inLow = num("IN_LOW", 0.0); m->inHigh = num("IN_HIGH", 1.0); m->hyst = num("HYST", 0.1);
+        m->lo = num("OUT_LOWER_LIMIT", 0.0); m->hi = num("OUT_UPPER_LIMIT", 1.0);
+        allowed.insert("H_ARRAY"); allowed.insert("B_ARRAY"); allowed.insert("AREA"); allowed.insert("LENGTH");
+        const auto hi = c.vectors.find("H_ARRAY"), bi = c.vectors.find("B_ARRAY");
+        if (hi == c.vectors.end() || bi == c.vectors.end() || hi->second.size() != bi->second.size() || hi->second.size() < 2)
+            throw std::runtime_error("model " + c.name + ": core needs h_array and b_array of the same size, 2 points at least");
+        if (!c.params.count("AREA") || !c.params.count("LENGTH") || !(c.params.at("AREA") > 0.0) || !(c.params.at("LENGTH") > 0.0))
+            throw std::runtime_error("model " + c.name + ": core needs area > 0 and length > 0");
+        m->x = hi->second; m->y = bi->second; m->area = c.params.at("AREA"); m->length = c.params.at("LENGTH");
+        if (m->coreHyst) {  // ngspice requires the pwl parameters in hysteresis mode too, and ignores them
+            if (!(m->inHigh > m->inLow)) throw std::runtime_error("model " + c.name + ": core (hysteresis) needs in_high > in_low");
+            break;
+        }
+        for (size_t i = 1; i < m->x.size(); ++i) {
+            if (!(m->x[i] > m->x[i - 1])) throw std::runtime_error("model " + c.name + ": core h_array must increase");
+            if (!m->fraction && m->x[i] - m->x[i - 1] < 2.0 * m->domain)  // ngspice then gives no output at all
+                throw std::runtime_error("model " + c.name + ": core h_array steps must be at least 2 input_domain (fraction false)");
+        }
+        break;
+    }
+    case AKind::LCOUPLE:
+        m->gain = num("NUM_TURNS", 1.0);
+        break;
+    case AKind::XFER: {
+        // ngspice cm_xfer's table: span numbers per entry, the frequency [Hz] then a pair at offset (magnitude in dB
+        // and phase in degrees by default; r_i: real / imaginary; db false: magnitude; rad: phase in radians)
+        allowed.insert("TABLE");
+        if (c.strings.count("FILE") || c.params.count("FILE")) throw std::runtime_error("model " + c.name + ": xfer's Touchstone file is not supported yet");
+        const double spanD = num("SPAN", 3.0), offD = num("OFFSET", 1.0);
+        const bool ri = flag("R_I", false), db = flag("DB", true), rad = flag("RAD", false);
+        if (spanD != std::floor(spanD) || offD != std::floor(offD) || offD < 1.0 || spanD < offD + 2.0)
+            throw std::runtime_error("model " + c.name + ": xfer needs integer offset >= 1 and span >= offset + 2");
+        const size_t span = static_cast<size_t>(spanD), off = static_cast<size_t>(offD);
+        const auto ti = c.vectors.find("TABLE");
+        if (ti == c.vectors.end() || ti->second.empty() || ti->second.size() % span)
+            throw std::runtime_error("model " + c.name + ": xfer needs a table of whole entries (" + std::to_string(span) + " numbers each)");
+        const auto& tb = ti->second;
+        for (size_t i = 0; i < tb.size(); i += span) {
+            if (tb[i] < 0.0 || (i && tb[i] < tb[i - span])) throw std::runtime_error("model " + c.name + ": xfer frequencies must be >= 0 and not decrease");
+            double a = tb[i + off], b = tb[i + off + 1];
+            m->x.push_back(tb[i] * 2.0 * M_PI);
+            if (ri) { m->sx.push_back({a, b}); continue; }
+            if (db) a = std::pow(10.0, a / 20.0);
+            if (!rad) b *= 2.0 * M_PI / 360.0;
+            m->sx.push_back(std::polar(a, b));
+        }
+        break;
+    }
+    case AKind::FILESRC: {
+        // ngspice cm_filesource: rows "time value...", lines from * # ; skipped, values split at blanks and commas;
+        // times scaled, then offset (or each relative to the last); values scaled, then offset, per column.
+        // ngspice skips a bad time and keeps a short row; both are errors here.
+        allowed.insert("AMPLOFFSET"); allowed.insert("AMPLSCALE");
+        auto arr = [&](const char* k) {
+            if (c.vectors.count(k)) return c.vectors.at(k);
+            if (c.params.count(k)) return std::vector<double>{c.params.at(k)};
+            throw std::runtime_error("model " + c.name + ": filesource needs " + std::string(k == std::string("AMPLOFFSET") ? "amploffset" : "amplscale"));
+        };
+        const auto off = arr("AMPLOFFSET"), scale = arr("AMPLSCALE");
+        const double toff = num("TIMEOFFSET", 0.0), tscale = num("TIMESCALE", 1.0);
+        const bool rel = flag("TIMERELATIVE", false);
+        m->fraction = flag("AMPLSTEP", false);  // hold each row until the next
+        const size_t width = ports[0].size();
+        m->width = static_cast<int>(width);
+        const std::string file = c.strings.count("FILE") ? c.strings.at("FILE") : "filesource.txt";
+        std::ifstream in(dataPath(file));
+        if (!in) throw std::runtime_error("model " + c.name + ": cannot open filesource file " + file);
+        std::string line;
+        double tprev = toff;
+        for (int n = 1; std::getline(in, line); ++n) {
+            const size_t b = line.find_first_not_of(" \t\r");
+            if (b == std::string::npos || line[b] == '*' || line[b] == '#' || line[b] == ';') continue;
+            for (char& ch : line) if (ch == ',') ch = ' ';
+            std::istringstream ss(line);
+            std::vector<std::string> tok;
+            for (std::string w; ss >> w;) tok.push_back(w);
+            const std::string where = "model " + c.name + ": " + file + " line " + std::to_string(n) + ": ";
+            if (tok.size() < width + 1) throw std::runtime_error(where + "expected a time and " + std::to_string(width) + " values");
+            double t = parseValue(tok[0]) * tscale;
+            t = rel ? t + tprev : t + toff;
+            tprev = t;
+            if (!m->x.empty() && !(t > m->x.back())) throw std::runtime_error(where + "times must increase");
+            m->x.push_back(t);
+            for (size_t j = 0; j < width; ++j) {
+                double d = parseValue(tok[j + 1]);
+                if (j < scale.size()) d *= scale[j];
+                if (j < off.size()) d += off[j];
+                m->y.push_back(d);
+            }
+        }
+        if (m->x.size() < 2) throw std::runtime_error("model " + c.name + ": filesource file " + file + " needs 2 rows at least");
+        break;
+    }
+    case AKind::MEMRISTOR:
+        m->rMin = num("RMIN", 10.0); m->rMax = num("RMAX", 1e4); m->outIc = num("RINIT", 7000.0);
+        m->mAlpha = num("ALPHA", 0.0); m->mBeta = num("BETA", 1.0); m->mVt = num("VT", 0.0);
+        if (!(m->rMin > 0.0 && m->rMax > m->rMin && m->outIc > 0.0)) throw std::runtime_error("model " + c.name + ": memristor needs 0 < rmin < rmax and rinit > 0");
+        break;
+    case AKind::PSWITCH:
+        m->cntlOff = num("CNTL_OFF", 0.0); m->cntlOn = num("CNTL_ON", 1.0); m->logR = flag("LOG", true);
+        m->rOff = num("R_OFF", 1e12); m->rOn = num("R_ON", 1.0); m->rCntl = num("R_CNTL_IN", 1e12);
+        if (!(m->rOn > 0.0 && m->rOff > 0.0 && m->rCntl > 0.0)) throw std::runtime_error("model " + c.name + ": pswitch needs r_on, r_off, r_cntl_in > 0");
+        break;
+    case AKind::SIDIODE:
+        m->sRon = num("RON", 1.0); m->sRoff = num("ROFF", 1.0); m->sRrev = num("RREV", 0.0);
+        m->vFwd = num("VFWD", 0.0); m->vRev = num("VREV", 1e30); m->iLim = num("ILIMIT", 1e30); m->revILim = num("REVILIMIT", 1e30);
+        m->eps = num("EPSILON", 0.0); m->revEps = num("REVEPSILON", 0.0);
+        if (!(m->sRon > 0.0 && m->sRoff > 0.0 && m->sRrev >= 0.0 && m->iLim > 0.0 && m->revILim > 0.0 && m->eps >= 0.0 && m->revEps >= 0.0))
+            throw std::runtime_error("model " + c.name + ": sidiode needs ron, roff, ilimit, revilimit > 0 and rrev, epsilon, revepsilon >= 0");
+        break;
+    case AKind::CAPIC: case AKind::INDIC: {
+        const char* k = kind == AKind::CAPIC ? "C" : "L";
+        allowed.insert(k);
+        if (!c.params.count(k)) throw std::runtime_error("model " + c.name + ": " + c.type + " needs " + (kind == AKind::CAPIC ? "c" : "l"));
+        m->gain = c.params.at(k);
+        if (!(m->gain > 0.0)) throw std::runtime_error("model " + c.name + ": " + c.type + " needs " + (kind == AKind::CAPIC ? "c" : "l") + " > 0");
+        m->outIc = num("IC", 0.0);
+        break;
+    }
+    case AKind::POT: {
+        // ngspice: position kept inside (0, 1) (its [0, 1] limit is not checked); log: r0-wiper is r / 10^(position log_multiplier)
+        double pos = num("POSITION", 0.5);
+        pos = pos <= 0.0 ? 1e-9 : pos >= 1.0 ? 0.999999999 : pos;
+        const double r = num("R", 1e5), mult = num("LOG_MULTIPLIER", 1.0);
+        m->rOn = flag("LOG", false) ? r / std::pow(10.0, pos * mult) : pos * r;
+        m->rOff = r - m->rOn;
+        if (!(m->rOn > 0.0 && m->rOff > 0.0)) throw std::runtime_error("model " + c.name + ": potentiometer needs r > 0 and both sections > 0");
+        break;
+    }
+    case AKind::ONESHOT: {
+        auto arr = [&](const char* k, std::vector<double> def) {
+            allowed.insert(k);
+            const auto it = c.vectors.find(k);
+            return it != c.vectors.end() ? it->second : def;
+        };
+        m->x = arr("CNTL_ARRAY", {0.0, 1.0}); m->y = arr("PW_ARRAY", {1e-6, 0.9999999});
+        if (m->x.size() != m->y.size() || m->x.size() < 2)
+            throw std::runtime_error("model " + c.name + ": cntl_array and pw_array need the same size, 2 at least");
+        for (size_t i = 0; i < m->y.size(); ++i) {
+            if (i && !(m->x[i] > m->x[i - 1])) throw std::runtime_error("model " + c.name + ": cntl_array must increase");
+            if (!(m->y[i] >= 0.0)) throw std::runtime_error("model " + c.name + ": pw_array values must be >= 0");
+        }
+        m->trig = num("CLK_TRIG", 0.5); m->posEdge = flag("POS_EDGE_TRIG", true);
+        m->outLow = num("OUT_LOW", 0.0); m->outHigh = num("OUT_HIGH", 1.0);
+        m->tRise = num("RISE_TIME", 1e-9); m->tFall = num("FALL_TIME", 1e-9);
+        m->rDelay = num("RISE_DELAY", 1e-9); m->fDelay = num("FALL_DELAY", 1e-9); m->retrig = flag("RETRIG", false);
+        m->cntlNull = ports[1][0].type == "null"; m->clearNull = ports[2][0].type == "null";
+        m->intIc = {-1.0, -1.0, -1.0, -1.0, 0.0, 0.0, 0.0, m->outLow, 0.0};
+        break;
+    }
+    case AKind::ILIMIT: {
+        m->inOffset = num("IN_OFFSET", 0.0); m->gain = num("GAIN", 1.0);
+        m->rSource = num("R_OUT_SOURCE", 1.0); m->rSink = num("R_OUT_SINK", 1.0);
+        m->iSource = num("I_LIMIT_SOURCE", 10e-3); m->iSink = num("I_LIMIT_SINK", 10e-3);
+        m->range = num("V_PWR_RANGE", 1e-6); m->iSourceRange = num("I_SOURCE_RANGE", 1e-9);
+        m->iSinkRange = num("I_SINK_RANGE", 1e-9); m->rDomain = num("R_OUT_DOMAIN", 1e-9);
+        if (!(m->rSource >= 1e-9 && m->rSource <= 1e9 && m->rSink >= 1e-9 && m->rSink <= 1e9))
+            throw std::runtime_error("model " + c.name + ": ilimit r_out_source and r_out_sink must be in [1e-9, 1e9]");
+        if (!(m->iSource >= 1e-12 && m->iSink >= 1e-12 && m->range >= 1e-15 && m->iSourceRange >= 1e-15 && m->iSinkRange >= 1e-15 && m->rDomain >= 1e-15))
+            throw std::runtime_error("model " + c.name + ": ilimit limits must be >= 1e-12 and ranges >= 1e-15");
+        m->posNull = ports[1][0].type == "null"; m->negNull = ports[2][0].type == "null";
+        break;
+    }
+    case AKind::OTA: {
+        m->gain = num("GM", 1e-3); m->rOff = num("ROUT", 1e12); m->rOn = num("RIN", 1e12);
+        double noise = 0.0;
+        for (const char* k : {"EN", "IN_NOISE", "ENK", "INK", "INCM", "INCMK"}) noise += std::abs(num(k, 0.0));
+        flag("NOISE_PROGRAMMATIC", true);
+        if (noise != 0.0) throw std::runtime_error("model " + c.name + ": the ota code model's noise is not supported yet");
+        if (!(m->gain >= 1e-15 && m->rOff > 0.0 && m->rOn > 0.0)) throw std::runtime_error("model " + c.name + ": ota needs gm >= 1e-15, rout > 0, rin > 0");
         break;
     }
     case AKind::ASWITCH:
@@ -2867,7 +3606,7 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
         if (specs[s].dir != 'i') continue;
         for (const auto& pt : ports[s]) {
             Behavioural::Ref r;
-            if (pt.type == "v" || pt.type == "vd") { r.kind = 0; r.a = pt.n1; r.b = pt.n2; }
+            if (pt.type == "v" || pt.type == "vd" || pt.type == "null") { r.kind = 0; r.a = pt.n1; r.b = pt.n2; }  // NULL: 0 - 0
             else {
                 r.kind = 1;
                 if (pt.type == "vnam") {
@@ -2886,17 +3625,48 @@ void SPICEParser::resolveXspiceAnalog(const PendingA& a, const ModelCard& c,
             refs.push_back(r);
         }
     }
-    // outputs: a voltage (v, vd) or current (i, id; gd: the switch's own port current, its voltage the last input)
+    // conductance ports (g, gd): their voltages follow the inputs, in port order, for every output; then the
+    // current of each h / hd port (a voltage source: its index among the block's voltage behavioural sources,
+    // counting the outputs below in their order)
+    for (size_t s = 0; s < specs.size(); ++s)
+        if (specs[s].dir == 'b') for (const auto& pt : ports[s]) refs.push_back({0, pt.n1, pt.n2, ""});  // NULL: 0 - 0
+    {
+        int bv = 0;
+        for (const auto& o : blk.behavioural) bv += o.voltage;
+        for (size_t s = 0; s < specs.size(); ++s) {
+            if (specs[s].dir == 'i') continue;
+            for (const auto& pt : ports[s]) {
+                if (pt.type == "null") continue;
+                const bool v = pt.type == "v" || pt.type == "vd" || pt.type == "h" || pt.type == "hd";
+                if (specs[s].dir == 'h') refs.push_back({3, bv, 0, ""});
+                bv += v;
+            }
+        }
+    }
+    // outputs: a voltage (v, vd) or current (i, id; g, gd: the port's own current), each its own model copy
+    // knowing which output it is (AnalogModel::out)
+    int outIndex = 0;
     for (size_t s = 0; s < specs.size(); ++s) {
         if (specs[s].dir == 'i') continue;
         for (const auto& pt : ports[s]) {
+            if (pt.type == "null") { ++outIndex; continue; }
             Behavioural b;
             b.name = toUpper(a.name);
             b.outPos = pt.n1; b.outNeg = pt.n2;
-            b.voltage = pt.type == "v" || pt.type == "vd";
+            b.voltage = pt.type == "v" || pt.type == "vd" || pt.type == "h" || pt.type == "hd";
             b.refs = refs;
-            if (pt.type == "gd") b.refs.push_back({0, pt.n1, pt.n2, ""});
             b.cm = m;
+            if (outIndex > 0) {
+                auto copy = std::make_shared<xspice::AnalogModel>(*m);
+                copy->out = outIndex;
+                b.cm = copy;
+            }
+            ++outIndex;
+            if (xspice::stateful(kind)) {
+                b.cmState = std::make_shared<xspice::AnalogState>();
+                b.cmState->out = m->outIc;
+                b.cmState->v = m->intIc;  // s_xfer: the operating point reads its initial states
+            }
             blk.behavioural.push_back(b);
         }
     }

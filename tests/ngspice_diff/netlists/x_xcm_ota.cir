@@ -1,0 +1,16 @@
+* XSPICE ota: a differential input (gd, its rin load), the output a conductance port (g) into a load, a feedback
+* integrator, and its operating point
+vp p 0 sin(0.6 0.2 5meg)
+vn n 0 DC 0.5
+rs p p1 10k
+a1 %gd(p1 n) %g(o) ota1
+.model ota1 ota(gm=2m rout=50k rin=20k)
+rl o 0 5k
+cl o 0 2p
+a2 %gd(x 0) %g(y) ota2
+.model ota2 ota(gm=1m)
+vx x 0 pulse(0 0.5 10n 1n 1n 50n 100n)
+cy y 0 1p
+ry y 0 100k
+.tran 1n 300n
+.end

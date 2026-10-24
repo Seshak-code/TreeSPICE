@@ -206,6 +206,19 @@ def main():
                     if not all(abs(gr[k] - wr[j]) <= 1e-12 + 2e-3 * max(abs(gr[k]), abs(wr[j])) for gr, wr in zip(g["rows"], w["rows"])):
                         fail(f"raw {name}: {vn} differs from ngspice's")
             if bad == bad0: print("PASS", "raw", name, "ascii" if ascii_ else "binary")
+    # a .tran -r with every vector streams its steps to the raw file (nothing printed, measured or .saved): the same
+    # file as the stored path writes (.save all keeps every vector but stores the points), Date aside
+    tr = "s\nV1 a 0 PULSE(0 1 0 1u 1u 5u 20u)\nR1 a out 1k\nC1 out 0 1n\nR2 out 0 10k\n"
+    for ascii_ in (True, False):
+        files = []
+        for tag, extra in (("stream", ""), ("stored", ".save all\n")):
+            net = os.path.join(tmp, "stream_" + tag + ".cir")
+            open(net, "w").write(tr + extra + ".tran 0.5u 10u\n.end\n")
+            raw = os.path.join(tmp, "stream_" + tag + (".a" if ascii_ else ".b") + ".raw")
+            subprocess.run([a.treespice, "-r", raw] + (["--ascii"] if ascii_ else []) + [net], capture_output=True, check=True)
+            files.append([ln for ln in open(raw, "rb").read().split(b"\n") if not ln.startswith(b"Date:")])
+        if files[0] != files[1] or len(files[0]) < 10: fail(f"raw stream {'ascii' if ascii_ else 'binary'}: differs from the stored path's")
+        else: print("PASS", "raw stream", "ascii" if ascii_ else "binary")
     # expressions: v(a)*2 + 1 and v(a,b) equal their pieces (ngspice's .print cannot do arithmetic)
     for kind, card, cells in (("dc", ".dc V1 0 5 1", 1), ("ac", ".ac dec 1 100 1k", 2)):
         net = os.path.join(tmp, "expr.cir")

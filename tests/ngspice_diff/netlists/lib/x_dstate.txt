@@ -1,0 +1,8 @@
+* state  outputs   input -> next
+0        0s 0s     0     -> 0
+                   1     -> 1
+1        1s 0s     x     -> 2
+2        0s 1r     0     -> 2
+                   1     -> 3
+3        1z 1s     1     -> 0
+                   0     -> 1

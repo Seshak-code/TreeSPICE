@@ -1,0 +1,12 @@
+* XSPICE filesource: two columns (comments, commas, an extra column), timescale 1n and timeoffset 1n with per-column
+* scale and offset; a second one with timerelative and amplstep (each row held). Before the first row it gives the
+* second row's value, as ngspice; the run stays inside the file (past it ngspice reads past its data)
+a1 [o1 o2] fs1
+.model fs1 filesource(file="lib/x_filesource.txt" timescale=1n timeoffset=1n amplscale=[2 0.5] amploffset=[0.1 -1])
+a2 [o3] fs2
+.model fs2 filesource(file="lib/x_filesource.txt" timescale=1n timerelative=true amplstep=true amploffset=[0] amplscale=[1])
+r1 o1 0 1k
+r2 o2 0 1k
+r3 o3 0 1k
+.tran 0.05n 6.9n
+.end

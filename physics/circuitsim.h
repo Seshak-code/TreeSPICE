@@ -552,7 +552,7 @@ public:
                                BlockState::DeviceCharge *next = nullptr) const {
       const auto dc = mos1_currents(x[0], x[1], x[2], x[3], p);
       std::array<T, 4> I{dc.d, T(0.0), dc.s, dc.b};
-      if (!p.caps || !st || !(h > 1e-15) || !integrator) return I;
+      if (!p.caps || !st || !(h > 0.0) || !integrator) return I;
       const auto c = mos1_charges(x[0], x[1], x[2], x[3], p, st->v[0], st->q, st->half);
       if constexpr (std::is_same_v<T, double>)
           if (next) {  // shift the voltage history (next may alias st)
@@ -615,19 +615,21 @@ public:
   // without the resistance the internal terminal is the external one.
   static int junctionInternals(const TensorBlock &blk) {
     int k = 0;
-    for (const auto &d : blk.diodes) k += d.card.rs > 0.0;
-    for (const auto &q : blk.bjts) k += (q.card.rb > 0.0) + (q.card.rc > 0.0) + (q.card.re > 0.0);
+    for (const auto &d : blk.diodes) k += (d.card.rs > 0.0) + d.card.qp() + d.card.rswGiven;
+    for (const auto &q : blk.bjts) k += (q.card.rb > 0.0) + (q.card.rc > 0.0) + (q.card.re > 0.0) + (q.card.rco > 0.0);
     return k;
   }
 
   // A junction device of the flattened netlist. n: its terminal unknowns, 1-based
   // (0 = ground; internal nodes > numGlobalNodes). Diode: A, C, A'. BJT: C, B, E,
   // S, C', B', E'. st: charge history (null when the block state is not sized).
+  // Junction terminals: diode A C A'; BJT C B E S C' B' E' and the quasi-saturation collector Cx (C - RC - Cx - Rci - C')
+  static constexpr int kJT = 8;
   struct Junction {
     const Diode *d = nullptr;
     const BJT *q = nullptr;
     const JFET *f = nullptr;  // terminals D, G, S (RD / RS are series resistors from the parser)
-    std::array<int, 7> n{};
+    std::array<int, kJT> n{};
     int terms = 0;
     int sub = 4;           // BJT: substrate junction's inner terminal, C' (vertical) or B' (lateral)
     double subSign = 1.0;  // BJT SUBS: substrate voltage type*SUBS*(S - that terminal)
@@ -644,16 +646,20 @@ public:
         j.d = &d; j.terms = 3;
         j.n[0] = sl.map(d.anode); j.n[1] = sl.map(d.cathode);
         j.n[2] = d.card.rs > 0.0 ? next++ : j.n[0];
+        if (d.card.qp()) { j.n[3] = next++; j.terms = 4; }        // soft recovery's qp node
+        if (d.card.rswGiven) { j.n[4] = next++; j.terms = 5; }    // the separate sidewall's A_sw (n[3] = 0 without VP)
+        if (d.heat) { j.n[5] = sl.map(d.thermal); j.terms = 6; }  // self-heating's tj
         j.st = i < st->diodeState.size() ? &st->diodeState[i] : nullptr;
         f(j);
       }
       for (size_t i = 0; i < sl.blk->bjts.size(); ++i) {
         const BJT &q = sl.blk->bjts[i];
         Junction j;
-        j.q = &q; j.terms = 7;
+        j.q = &q; j.terms = 8;
         j.n[0] = sl.map(q.nodeCollector); j.n[1] = sl.map(q.base);
         j.n[2] = sl.map(q.emitter); j.n[3] = sl.map(q.substrate);
-        j.n[4] = q.card.rc > 0.0 ? next++ : j.n[0];
+        j.n[7] = q.card.rc > 0.0 ? next++ : j.n[0];      // Cx, after RC
+        j.n[4] = q.card.rco > 0.0 ? next++ : j.n[7];     // C', after the quasi-saturation Rci
         j.n[5] = q.card.rb > 0.0 ? next++ : j.n[1];
         j.n[6] = q.card.re > 0.0 ? next++ : j.n[2];
         if (q.card.lateral) { j.sub = 5; j.subSign = -1.0; }
@@ -690,12 +696,25 @@ public:
   // (the last accepted one at the start of a step)
   // The first DC iteration (swForce_) holds the accepted state, as ngspice's INITJCT / INITFIX.
   bool swForce_ = false;
+  // The first Newton iteration of a solve (or any stamp outside one): XSPICE code models' inputs are not limited
+  bool cmFresh_ = true;
   bool swAcOff_ = false;  // small-signal matrix: ngspice's swacload stamps ROFF whatever the operating point
-  bool switchState(const SwitchRef &w, const std::array<int, 2> &c, const std::vector<double> &x) const {
-    if (swForce_) return *w.prev != 0;
+  // States as ngspice's: 0 off, 1 on, 2 off and 3 on inside the hysteresis band. A negative VH (VT + VH < VT - VH)
+  // inverts the band: entering it from on turns the switch off and from off turns it on, until it leaves the band.
+  static bool swIsOn(char s) { return s == 1 || s == 3; }
+  char switchState(const SwitchRef &w, const std::array<int, 2> &c, const std::vector<double> &x) const {
     auto V = [&](int g) { return g > 0 && g <= (int)x.size() ? x[g - 1] : 0.0; };
     const double ctrl = w.s->ctrlName.empty() ? V(c[0]) - V(c[1]) : V(w.n[2]);
-    return ctrl > w.s->vt + w.s->vh ? true : ctrl < w.s->vt - w.s->vh ? false : *w.on != 0;
+    const double vt = w.s->vt, vh = w.s->vh;
+    if (swForce_) {  // INITJCT / INITFIX: the accepted state, in or out of the band by the control
+      if (swIsOn(*w.prev)) return (vh >= 0.0 ? ctrl > vt + vh : ctrl > vt - vh) ? 1 : 3;
+      return (vh >= 0.0 ? ctrl < vt - vh : ctrl < vt + vh) ? 0 : 2;
+    }
+    if (vh > 0.0) return ctrl > vt + vh ? 1 : ctrl < vt - vh ? 0 : *w.on;
+    if (ctrl > vt - vh) return 1;
+    if (ctrl < vt + vh) return 0;
+    const char p = *w.prev;  // in the band: from the accepted state
+    return p == 2 || p == 3 ? p : p == 1 ? 2 : 3;
   }
   // The accepted state moves to the last stamped one (ngspice sets no breakpoint at a toggle)
   bool acceptSwitches(const TensorNetlist &nl) const {
@@ -721,7 +740,7 @@ public:
   mutable std::string osdiNonFinite_;
   double ptranGmin_ = 0.0;  // node-to-ground gmin while solveDC runs its transient OP  // the last non-finite OSDI evaluation: reported if the analysis fails
   template <class S> double sourceValue(const S &s, double dc, double h, double time) const {
-    return srcFact_ * (h > 1e-15 ? waveformValue(s, dc, time) : tranOpSources_ ? tranOpValue(s, dc) : dc);
+    return srcFact_ * (h > 0.0 ? waveformValue(s, dc, time) : tranOpSources_ ? tranOpValue(s, dc) : dc);
   }
 
   // OSDI devices (compiled Verilog-A: BSIM4, BSIM-CMG, ...). An instance's local
@@ -738,18 +757,28 @@ public:
   struct OsdiRef {
     const OsdiDevice *dev;
     osdi::Instance *in;
-    std::vector<int> n;  // 1-based unknown of each local node (0 = ground)
+    struct Nodes {  // 1-based unknown of each local node (0 = ground)
+      const int *p = nullptr;
+      size_t L = 0;
+      size_t size() const { return L; }
+      int operator[](size_t k) const { return p[k]; }
+    } n;
   };
   // osdiCurrents() of every OSDI device at v, evaluated in parallel (an instance
   // writes only its own data; model evaluation was ~half of a BSIM4 transient), in
-  // forEachOsdi order: osdiRefs_[i], osdiI_[i] and, with jac, osdiJ_[i]. Callers
+  // forEachOsdi order: osdiRefs_[i], its currents at osdiI_[osdiOff_[i]] and Jacobian at osdiJ_[osdiJOff_[i]]
+  // (flat: no per-device vectors). Callers
   // accumulate serially, so stamps and residuals keep their order.
   // The KCL audit at a Newton iterate and the next iteration's stamp evaluate at the
   // same point (OSDI devices have no voltage limiting), so the last evaluation is
   // reused when v (bitwise), h, the method and the devices match; an accepted step
   // moves the charge history and clears it. Jacobians are always kept for that.
   mutable std::vector<OsdiRef> osdiRefs_;
-  mutable std::vector<std::vector<double>> osdiI_, osdiJ_;
+  mutable std::vector<int> osdiNodes_;           // the list's node spans
+  mutable std::vector<size_t> osdiOff_, osdiJOff_;
+  mutable std::vector<double> osdiI_, osdiJ_;
+  const double *osdiI(size_t i) const { return &osdiI_[osdiOff_[i]]; }
+  const double *osdiJ(size_t i) const { return &osdiJ_[osdiJOff_[i]]; }
   mutable std::vector<double> osdiAtV_;
   mutable double osdiAtH_ = -1.0;
   mutable int osdiAtMethod_ = -1;
@@ -770,7 +799,20 @@ public:
       }
     if (!listed || k != osdiRefs_.size()) {
       osdiRefs_.clear();
-      forEachOsdi(nl, [&](const OsdiRef &r) { osdiRefs_.push_back(r); });
+      osdiNodes_.clear();
+      osdiOff_.clear();
+      osdiJOff_.clear();
+      size_t jn = 0;
+      forEachOsdi(nl, [&](const OsdiRef &r) {
+        osdiRefs_.push_back(r);
+        osdiOff_.push_back(osdiNodes_.size());
+        osdiJOff_.push_back(jn);
+        osdiNodes_.insert(osdiNodes_.end(), r.n.p, r.n.p + r.n.L);
+        jn += r.n.L * r.n.L;
+      });
+      for (size_t i = 0; i < osdiRefs_.size(); ++i) osdiRefs_[i].n.p = osdiNodes_.data() + osdiOff_[i];
+      osdiI_.assign(osdiNodes_.size(), 0.0);
+      osdiJ_.assign(jn, 0.0);
       osdiAtValid_ = false;
     }
     const int method = integrator ? (int)integrator->getType() : -1;
@@ -778,10 +820,8 @@ public:
     // devices, whose G is from an earlier point up to the bypass tolerance away (0.1 % on a VDMOS stage's AC gain)
     if (osdiAtValid_ && limitJunctions_ && !accept && h == osdiAtH_ && method == osdiAtMethod_ && v == osdiAtV_) return;
     const int n = (int)osdiRefs_.size();
-    osdiI_.resize(n);
-    osdiJ_.resize(n);
     parallelFor(n, 2e4 * n,  // ~5 us an evaluation: a few devices are worth the pool
-                [&](int i) { osdiI_[i] = osdiCurrents(osdiRefs_[i], v, h, &osdiJ_[i], accept); });
+                [&](int i) { osdiCurrents(osdiRefs_[i], v, h, &osdiI_[osdiOff_[i]], &osdiJ_[osdiJOff_[i]], accept); });
     osdiAtValid_ = !accept;
     osdiAtV_ = v;
     osdiAtH_ = h;
@@ -794,10 +834,11 @@ public:
       for (size_t i = 0; i < sl.blk->osdiDevices.size() && i < sl.st->osdiState.size(); ++i) {
         osdi::Instance *in = sl.st->osdiState[i].get();
         if (!in) continue;
-        OsdiRef r{&sl.blk->osdiDevices[i], in, {}};
-        for (int t : r.dev->nodes) r.n.push_back(sl.map(t));
-        for (uint32_t k = 0; k < in->numInternal(); ++k) r.n.push_back(next++);
-        f(r);
+        thread_local std::vector<int> nodes;  // the callback's view (the list keeps its own copy)
+        nodes.clear();
+        for (int t : sl.blk->osdiDevices[i].nodes) nodes.push_back(sl.map(t));
+        for (uint32_t k = 0; k < in->numInternal(); ++k) nodes.push_back(next++);
+        f(OsdiRef{&sl.blk->osdiDevices[i], in, {nodes.data(), nodes.size()}});
       }
     }
   }
@@ -808,12 +849,15 @@ public:
   // the KCL audit and the history update. J: dI/dx = G + coef*C (row-major).
   // accept: store this point as the accepted step. A fatal model error gives NaN.
   static std::mutex &osdiErrorMutex() { static std::mutex m; return m; }
-  std::vector<double> osdiCurrents(const OsdiRef &r, const std::vector<double> &v, double h,
-                                   std::vector<double> *J = nullptr, bool accept = false) const {
+  // Cout: the reactive Jacobian C (row-major) of this evaluation (AC).
+  // I (L values) and J (L x L, or null): where the currents and Jacobian go.
+  void osdiCurrents(const OsdiRef &r, const std::vector<double> &v, double h, double *I, double *J = nullptr,
+                    bool accept = false, std::vector<double> *Cout = nullptr) const {
     const size_t L = r.n.size();
-    std::vector<double> x(L), I(L);
+    thread_local std::vector<double> x, f, q;  // devices evaluate in parallel
+    x.resize(L);
     for (size_t k = 0; k < L; ++k) x[k] = r.n[k] > 0 && r.n[k] <= (int)v.size() ? v[r.n[k] - 1] : 0.0;
-    const bool tran = h > 1e-15 && integrator;
+    const bool tran = h > 0.0 && integrator;
     osdi::Instance &in = *r.in;
     const uint32_t flags = tran ? osdi::ANALYSIS_TRAN : osdi::ANALYSIS_DC | osdi::ANALYSIS_STATIC;
     // Device bypass (ngspice's, voltage criterion): a device whose local voltages moved
@@ -821,27 +865,35 @@ public:
     // analysis, is not evaluated; its stored f, q extrapolate linearly with G, C
     // (error O(dv^2)). 98 % of the evaluations of a 1000-stage BSIM4 chain transient
     // were such. Never for the Jacobian at an operating point itself (AC, noise,
-    // sensitivity run with limitJunctions_ off). TREESPICE_BYPASS=0 evaluates always.
-    static const bool bypassOn = [] { const char *s = std::getenv("TREESPICE_BYPASS"); return !s || std::atoi(s) != 0; }();
-    bool bypass = bypassOn && limitJunctions_ && in.evalFlags == flags && in.evalAt.size() == L;
+    // sensitivity run with limitJunctions_ off). .options bypass=0 (or TREESPICE_BYPASS=0) evaluates always,
+    // and the devices keep no copy of their last evaluation (memory).
+    const double *at = in.evalAt();
+    bool bypass = limitJunctions_ && in.kept(flags);
     for (size_t k = 0; bypass && k < L; ++k)
-      bypass = std::abs(x[k] - in.evalAt[k]) <= 1e-3 * std::max(std::abs(x[k]), std::abs(in.evalAt[k])) + 1e-6;
+      bypass = std::abs(x[k] - at[k]) <= 1e-3 * std::max(std::abs(x[k]), std::abs(at[k])) + 1e-6;
     in.gmin = gmin_;
-    if (!bypass && !in.evaluate(x.data(), flags, 0.0)) {
-      std::lock_guard<std::mutex> lock(osdiErrorMutex());  // devices evaluate in parallel
-      osdiFatal_ = r.dev->instanceName + ": " + in.error();  // reported instead of a singular matrix
-      std::fill(I.begin(), I.end(), NAN);
-      if (J) J->assign(L * L, 0.0);
-      return I;
+    thread_local osdi::Eval ev;  // this evaluation (devices evaluate in parallel)
+    if (!bypass && !in.evaluate(x.data(), flags, 0.0, ev)) {
+      std::lock_guard<std::mutex> lock(osdiErrorMutex());
+      osdiFatal_ = r.dev->instanceName + ": " + osdi::Instance::error();  // reported instead of a singular matrix
+      std::fill(I, I + L, NAN);
+      if (J) std::fill(J, J + L * L, 0.0);
+      return;
     }
-    std::vector<double> f(in.f()), q(in.q());  // at x: as evaluated, or extrapolated when bypassed
-    if (bypass)
-      for (size_t a = 0; a < L; ++a)
+    auto G = [&](size_t a, size_t b) { return bypass ? in.G(a, b) : ev.G[a * L + b]; };
+    auto C = [&](size_t a, size_t b) { return bypass ? in.C(a, b) : ev.C[a * L + b]; };
+    f.resize(L);  // at x: as evaluated, or extrapolated when bypassed
+    q.resize(L);
+    for (size_t a = 0; a < L; ++a) {
+      f[a] = bypass ? in.f(a) : ev.f[a];
+      q[a] = bypass ? in.q(a) : ev.q[a];
+      if (bypass)
         for (size_t b = 0; b < L; ++b) {
-          const double d = x[b] - in.evalAt[b];
-          f[a] += in.G(a, b) * d;
-          q[a] += in.C(a, b) * d;
+          const double d = x[b] - at[b];
+          f[a] += G(a, b) * d;
+          q[a] += C(a, b) * d;
         }
+    }
     for (size_t k = 0; k < L; ++k)
       if (!std::isfinite(f[k]) || !std::isfinite(q[k])) {
         // An extreme Newton iterate may do this and the homotopy recovers, so it
@@ -849,22 +901,30 @@ public:
         std::lock_guard<std::mutex> lock(osdiErrorMutex());
         osdiNonFinite_ = r.dev->instanceName + ": the model returned a non-finite current or charge "
                                                "(parameters outside its valid range?)";
-        std::fill(I.begin(), I.end(), NAN);
-        if (J) J->assign(L * L, 0.0);
-        return I;
+        std::fill(I, I + L, NAN);
+        if (J) std::fill(J, J + L * L, 0.0);
+        return;
       }
     const bool trap = tran && integrator->getType() == IntegrationType::TRAPEZOIDAL;
     const double coef = !tran ? 0.0 : trap ? 2.0 / h : 1.0 / h;
     for (size_t k = 0; k < L; ++k) {
-      const double iq = tran ? coef * (q[k] - in.qPrev[k]) - (trap ? in.iPrev[k] : 0.0) : 0.0;
+      const double iq = tran ? coef * (q[k] - in.qPrev()[k]) - (trap ? in.iPrev()[k] : 0.0) : 0.0;
       I[k] = f[k] + iq;
-      if (accept) { in.qPrev[k] = q[k]; in.iPrev[k] = iq; }
+      if (accept) { in.qPrev()[k] = q[k]; in.iPrev()[k] = iq; }
     }
-    if (accept) { in.vHist[2] = in.vHist[1]; in.vHist[1] = in.vHist[0]; in.vHist[0] = x; }
+    if (accept) {
+      std::copy(in.vHist(1), in.vHist(1) + L, in.vHist(2));
+      std::copy(in.vHist(0), in.vHist(0) + L, in.vHist(1));
+      std::copy(x.begin(), x.end(), in.vHist(0));
+    }
     if (J) {
-      J->assign(L * L, 0.0);
       for (size_t a = 0; a < L; ++a)
-        for (size_t b = 0; b < L; ++b) (*J)[a * L + b] = in.G(a, b) + coef * in.C(a, b);
+        for (size_t b = 0; b < L; ++b) J[a * L + b] = G(a, b) + coef * C(a, b);
+    }
+    if (Cout) {
+      Cout->assign(L * L, 0.0);
+      for (size_t a = 0; a < L; ++a)
+        for (size_t b = 0; b < L; ++b) (*Cout)[a * L + b] = C(a, b);
     }
     // A branch-current unknown (V(a,b) <+ 0 branches, e.g. BSIM4's body network with
     // rbodymod off, which closes a loop of zero-volt branches) gets 1 uOhm in series,
@@ -874,15 +934,13 @@ public:
     for (size_t k = in.terminals(); k < L; ++k)
       if (in.isFlow(k)) {
         I[k] += 1e-6 * x[k];
-        if (J) (*J)[k * L + k] += 1e-6;
+        if (J) J[k * L + k] += 1e-6;
       }
-    return I;
   }
 
   // Newton stamp of the currents I and Jacobian J of osdiCurrents() at v (a node
   // shared by two terminals sums).
-  void stampOsdi(const OsdiRef &r, const std::vector<double> &I, const std::vector<double> &J,
-                 const std::vector<double> &v) {
+  void stampOsdi(const OsdiRef &r, const double *I, const double *J, const std::vector<double> &v) {
     const size_t L = r.n.size();
     auto V = [&](int g) { return g > 0 && g <= (int)v.size() ? v[g - 1] : 0.0; };
     for (size_t t = 0; t < L; ++t) {
@@ -900,8 +958,8 @@ public:
 
   // Charge branches (terminal pairs, q flows from -> to): diode A'->C; BJT
   // be (B'->E'), bc (B'->C'), bx (B->C'), substrate (S->C'; lateral: S->B', Junction::sub).
-  static constexpr int diodeFrom[1] = {2}, diodeTo[1] = {1};
-  static constexpr int bjtFrom[4] = {5, 5, 1, 3}, bjtTo[4] = {6, 4, 4, 4};
+  static constexpr int diodeFrom[4] = {2, 3, 4, 5}, diodeTo[4] = {1, 7, 1, 7};  // + qp, A_sw -> C, tj (7: ground, no diode terminal)
+  static constexpr int bjtFrom[5] = {5, 5, 1, 3, 5}, bjtTo[5] = {6, 4, 4, 4, 7};  // + quasi-saturation bcx (B'->Cx)
   static constexpr int jfetFrom[2] = {1, 1}, jfetTo[2] = {2, 0};  // JFET gs (G->S), gd (G->D)
   static double jfetType(const JFET &f) { return f.isNChannel ? 1.0 : -1.0; }
 
@@ -909,21 +967,43 @@ public:
   // Junction-limiting shifts (junctionLimit): added to the junction voltages
   // (diode vd; BJT vbe, vbc) so the device is evaluated at its limited point.
   // seed: the shift carries derivative 1 (the G*(vl - v) correction pass).
-  struct JShift { double d[2] = {0.0, 0.0}; bool seed = false; };
+  struct JShift { double d[3] = {0.0, 0.0, 0.0}; bool seed = false; };  // [2]: a self-heating diode's temperature rise
   template <typename T> static T shifted(const T &v, const JShift *sh, int k) {
     if (!sh || sh->d[k] == 0.0) return v;
     if constexpr (std::is_same_v<T, double>) return v + sh->d[k];
     else return v + T(sh->d[k], sh->seed ? sh->d[k] : 0.0);
   }
 
+  // f(the diode's model): a self-heating one's at its junction temperature T0 + dT (a Dual with T), else the card's
+  template <typename T, class F> decltype(auto) withDiodeModel(const Diode &d, const T &dT, F &&f) const {
+    if (d.heat) return f(diodeModel<T>(d, devtemp::diodeAt(d.heat->law, T(d.heat->t0) + dT), gmin_));
+    return f(diodeModel(d, gmin_));
+  }
+
   // hist: a MESFET's charges advance from the last accepted step (j.st); false: the operating point itself
   template <typename T>
-  int junctionCharges(const Junction &j, const std::array<T, 7> &x, T *v, T *q,
+  int junctionCharges(const Junction &j, const std::array<T, kJT> &x, T *v, T *q,
                       const JShift *sh = nullptr, bool hist = true) const {
     if (j.d) {
-      v[0] = shifted(T(x[2] - x[1]), sh, 0);
-      q[0] = diode_iq(v[0], diodeModel(*j.d, gmin_)).second;
-      return 1;
+      const auto &c = j.d->card;
+      const T dT = j.d->heat ? shifted(T(x[5]), sh, 2) : T(0.0);
+      return withDiodeModel(*j.d, dT, [&](auto p) {
+        v[0] = shifted(T(x[2] - x[1]), sh, 0);
+        const int K = j.d->heat ? 4 : c.rswGiven ? 3 : c.qp() ? 2 : 1;
+        if (K == 1) { q[0] = diode_iq(v[0], p).second; return 1; }
+        // soft recovery (ngspice dioload): the junction keeps its depletion charge, TT vqp is the qp node's
+        v[1] = x[3]; q[1] = c.qp() ? T(p.tt * x[3]) : T(0.0);
+        if (c.qp()) p.tt = 0.0;
+        q[0] = diode_iq(v[0], p).second;
+        if (K == 2) return 2;
+        // the separate sidewall's depletion charge at A_sw - C. ngspice's transient takes its capacitance for the
+        // charge (dioload: DIOcapChargeSW = deplcapSW), so its sidewall current there is d(C)/dt: a deliberate divergence
+        v[2] = c.rswGiven ? shifted(T(x[4] - x[1]), sh, 1) : T(0.0);
+        q[2] = c.rswGiven ? T(diode_sw_iq(v[0], v[2], p).second) : T(0.0);
+        if (K == 3) return 3;
+        v[3] = dT; q[3] = j.d->heat->cth0 * dT;  // self-heating: CTH0 at tj
+        return 4;
+      });
     }
     if (j.f) {
       const double t = jfetType(*j.f);
@@ -940,30 +1020,52 @@ public:
     v[0] = shifted(v[0], sh, 0); v[1] = shifted(v[1], sh, 1);
     const auto e = bjt_gp(v[0], v[1], v[2], v[3], p);
     for (int k = 0; k < 4; ++k) q[k] = e.q[k];
-    return 4;
+    if (!(p.rco > 0.0)) return 4;
+    v[4] = t * (x[5] - x[7]);
+    // ponytail: in a step the charges' side (vrci > 0) is the last accepted point's, re-decided at acceptance: an
+    // iterate a hair across vrci = 0 dropped ~QCO of charge in a femtosecond step and threw Newton to -1 kV. A real
+    // crossing (ngspice: the charge steps in that step) lands one step later; the operating point uses its own vrci.
+    auto val = [](const T &a) { if constexpr (std::is_same_v<T, double>) return a; else return a.val; };
+    const bool on = hist && j.st && j.st->qsOn >= 0 ? j.st->qsOn == 1 : val(T(t * (x[7] - x[4]))) > 0.0;
+    const auto qs = bjt_qs_charges(on, v[1], v[4], p);
+    q[1] = q[1] + qs.first;
+    q[4] = qs.second;
+    return 5;
   }
   static bool junctionHasCharge(const Junction &j) {
-    if (j.d) return j.d->card.cjo > 0.0 || j.d->card.cjsw > 0.0 || j.d->card.tt > 0.0;
+    if (j.d) return j.d->card.cjo > 0.0 || j.d->card.cjsw > 0.0 || j.d->card.tt > 0.0 || j.d->card.cpar > 0.0 ||
+                    (j.d->heat && j.d->heat->cth0 > 0.0);
     if (j.f) return j.f->card.cgs > 0.0 || j.f->card.cgd > 0.0;
     const auto &c = j.q->card;
-    return c.cje > 0.0 || c.cjc > 0.0 || c.cjs > 0.0 || c.tf > 0.0 || c.tr > 0.0;
+    return c.cje > 0.0 || c.cjc > 0.0 || c.cjs > 0.0 || c.tf > 0.0 || c.tr > 0.0 || (c.rco > 0.0 && c.qco > 0.0);
   }
 
   // Terminal currents into j at x: DC plus, in transient, the charge currents
   // integrated from the last accepted step (TRAP, else BE), as mosCurrents().
   // next != null: write the accepted charge state (history update).
   template <typename T>
-  std::array<T, 7> junctionCurrents(const Junction &j, const std::array<T, 7> &x, double h,
+  std::array<T, kJT> junctionCurrents(const Junction &j, const std::array<T, kJT> &x, double h,
                                     BlockState::DeviceCharge *next = nullptr, const JShift *sh = nullptr) const {
-    std::array<T, 7> I{};
+    std::array<T, kJT> I{};
     for (auto &i : I) i = T(0.0);
     double type = 1.0;
     const int *from, *to;
     if (j.d) {
-      const auto p = diodeModel(*j.d, gmin_);
-      if (p.rs > 0.0) { const T ir = (x[0] - x[2]) / p.rs; I[0] += ir; I[2] -= ir; }
-      const T id = diode_iq(shifted(T(x[2] - x[1]), sh, 0), p).first;
-      I[2] += id; I[1] -= id;
+      withDiodeModel(*j.d, j.d->heat ? shifted(T(x[5]), sh, 2) : T(0.0), [&](const auto &p) {
+        T ith(0.0);  // self-heating: the power into tj (ngspice dioload: vd cd + vrs^2 / RS, the sidewall's likewise)
+        if (p.rs > 0.0) { const T ir = (x[0] - x[2]) / p.rs; I[0] += ir; I[2] -= ir; ith = ith + (x[0] - x[2]) * ir; }
+        const T vd = shifted(T(x[2] - x[1]), sh, 0), id = diode_iq(vd, p).first;
+        I[2] += id; I[1] -= id;
+        ith = ith + vd * id;
+        if (j.d->card.qp()) I[3] += (x[3] - p.tt * id) / j.d->card.vp;  // qp row: vqp/VP + ddt(TT vqp) = TT/VP id
+        if (p.swSep) {  // A - RSW - A_sw, the sidewall junction A_sw - C
+          const T vdsw = shifted(T(x[4] - x[1]), sh, 1), ir = (x[0] - x[4]) * p.gsw, isw = diode_sw_iq(vd, vdsw, p).first;
+          I[0] += ir; I[4] += isw - ir; I[1] -= isw;
+          ith = ith + vdsw * isw + (x[0] - x[4]) * ir;
+        }
+        if (j.d->heat) I[5] += x[5] / j.d->heat->rth0 - ith;  // tj row: v(tj)/RTH0 + ddt(CTH0 v(tj)) = Ith
+        return 0;
+      });
       from = diodeFrom; to = diodeTo;
     } else if (j.f) {
       const auto p = jfetModel(*j.f, gmin_);
@@ -984,9 +1086,13 @@ public:
                                                dv(T(type * (x[1] - x[4]))), dv(T(type * j.subSign * (x[3] - x[j.sub]))), p);
         rbb = bjt_rbb<double, double>(ev.qb, ev.cb, p);
       }
-      res(0, 4, p.rc); res(1, 5, rbb); res(2, 6, p.re);
+      res(0, 7, p.rc); res(1, 5, rbb); res(2, 6, p.re);
+      if (p.rco > 0.0) {  // quasi-saturation: Cx -> C' through the intrinsic collector
+        const T irci = bjt_qs_irci(T(type * (x[7] - x[4])), shifted(T(type * (x[5] - x[4])), sh, 1), T(type * (x[5] - x[7])), p);
+        I[7] += type * irci; I[4] -= type * irci;
+      }
       double arg3 = 1.0, hist = 0.0;  // excess phase: the filter of this step (ngspice bjtload)
-      if (p.td > 0.0 && h > 1e-15 && j.st) {
+      if (p.td > 0.0 && h > 0.0 && j.st) {
         const double a2 = 3.0 * h / p.td, a1 = a2 * h / p.td, denom = 1.0 + a1 + a2, r = j.st->hPrev > 0.0 ? h / j.st->hPrev : 1.0;
         arg3 = a1 / denom;
         hist = (j.st->xf[0] * (1.0 + r + a2) - j.st->xf[1] * r) / denom;
@@ -994,7 +1100,7 @@ public:
       const auto e = bjt_gp(shifted(T(type * (x[5] - x[6])), sh, 0), shifted(T(type * (x[5] - x[4])), sh, 1),
                             T(type * (x[1] - x[4])), T(type * j.subSign * (x[3] - x[j.sub])), p, arg3, hist);
       if constexpr (std::is_same_v<T, double>)
-        if (next && p.td > 0.0 && h > 1e-15 && j.st) {  // next may alias st
+        if (next && p.td > 0.0 && h > 0.0 && j.st) {  // next may alias st
           next->xf[1] = j.st->xf[0]; next->xf[0] = e.xf; next->hPrev = h;
         }
       I[4] += type * e.cc; I[5] += type * e.cb; I[6] -= type * (e.cc + e.cb);
@@ -1002,7 +1108,7 @@ public:
       from = bjtFrom; to = bjtTo;
     }
     const BlockState::DeviceCharge *st = j.st;
-    if (!st || !(h > 1e-15) || !integrator || !junctionHasCharge(j)) return I;
+    if (!st || !(h > 0.0) || !integrator || !junctionHasCharge(j)) return I;
     T v[5], q[5];
     const int K = junctionCharges(j, x, v, q, sh);
     if constexpr (std::is_same_v<T, double>)
@@ -1016,6 +1122,8 @@ public:
       const bool sub = j.q && k == 3;  // substrate branch: to Junction::sub, SUBS sign
       I[from[k]] += (sub ? j.subSign : 1.0) * type * i;
       I[sub ? j.sub : to[k]] -= (sub ? j.subSign : 1.0) * type * i;
+      if (j.d && k == 1 && j.d->card.qp()) { const T g = (1.0 - j.d->card.vp) / j.d->card.tt * i; I[2] += g; I[1] -= g; }  // (1-VP)/TT ddt(Qp)
+      if (j.d && j.d->heat && (k == 0 || k == 2)) I[5] -= v[k] * i;  // ngspice's Ith takes the junctions' charge currents too
       if constexpr (std::is_same_v<T, double>)
         if (next) { next->v[0][k] = v[k]; next->q[k] = q[k]; next->i[k] = i; }
     }
@@ -1063,13 +1171,26 @@ public:
     if (offHold_ && (j.d ? j.d->off : j.f ? j.f->off : j.q->off)) {  // ngspice INITFIX: an OFF device's junctions at 0 V
       const double t = j.q ? (j.q->isNPN ? 1.0 : -1.0) : j.f ? jfetType(*j.f) : 1.0;
       const double raw[2] = {j.d ? V(2) - V(1) : j.f ? t * (V(1) - V(2)) : t * (V(5) - V(6)),
-                             j.d ? 0.0 : j.f ? t * (V(1) - V(0)) : t * (V(5) - V(4))};
+                             j.d ? (j.d->card.rswGiven ? V(4) - V(1) : 0.0) : j.f ? t * (V(1) - V(0)) : t * (V(5) - V(4))};
       for (int k = 0; k < 2; ++k) { st->jv[k] = 0.0; sh.d[k] = -raw[k]; }
+      if (j.d && j.d->heat) { st->jv[2] = 0.0; sh.d[2] = -V(5); }
       st->jvState = 1;
       return sh;
     }
     if (j.d) {
-      const auto m = diodeModel(*j.d, gmin_);
+      const auto m = j.d->heat ? diodeModel<double>(*j.d, devtemp::diodeAt(j.d->heat->law, j.d->heat->t0 + st->jv[2]), gmin_)
+                               : diodeModel(*j.d, gmin_);
+      if (j.d->heat) {  // the temperature rise: ngspice's DEVlimitlog (100 K, log-damped beyond); 0 at the first iteration
+        const double raw = V(5), old = st->jv[2];
+        double tl = 0.0;
+        if (st->jvState) {
+          tl = raw;
+          if (raw > old + 100.0) tl = old + 100.0 + std::log10((raw - old) / 100.0);
+          else if (raw < old - 100.0) tl = old - 100.0 - std::log10((old - raw) / 100.0);
+        }
+        st->jv[2] = tl;
+        sh.d[2] = tl - raw;
+      }
       const double vcrit = compute_vcrit(m.vte, m.is), raw = V(2) - V(1);
       double vl = vcrit;
       if (st->jvState) {
@@ -1077,8 +1198,19 @@ public:
                  ? -(pnjlim(-(raw + m.xbv), -(st->jv[0] + m.xbv), m.vtb, vcrit) + m.xbv)
                  : pnjlim(raw, st->jv[0], m.vte, vcrit);
       }
-      st->jv[0] = vl; st->jvState = 1;
+      st->jv[0] = vl;
       sh.d[0] = vl - raw;
+      if (m.swSep && m.isw != 0.0) {  // the separate sidewall likewise (no JSW: ngspice's VcritSW is infinite, no limit)
+        const double vcs = compute_vcrit(m.vtesw, m.isw), rw = V(4) - V(1);
+        double vs = vcs;
+        if (st->jvState)
+          vs = (m.breakdown && rw < std::min(0.0, -m.xbv + 10.0 * m.vtb))
+                   ? -(pnjlim(-(rw + m.xbv), -(st->jv[1] + m.xbv), m.vtb, vcs) + m.xbv)
+                   : pnjlim(rw, st->jv[1], m.vtesw, vcs);
+        st->jv[1] = vs;
+        sh.d[1] = vs - rw;
+      }
+      st->jvState = 1;
       return sh;
     }
     if (j.f) {  // both gate junctions start at -1 V (ngspice jfetload INITJCT)
@@ -1125,12 +1257,12 @@ public:
   // shifted point plus the G*(vl - v) correction from one seeded pass.
   void stampJunction(const Junction &j, const std::vector<double> &v, double h) {
     const JShift sh = limitJunctions_ ? junctionLimit(j, v) : JShift{};
-    stampByDual(j.n, j.terms, v, [&](const std::array<Dual<double>, 7> &x) { return junctionCurrents(j, x, h, nullptr, &sh); });
-    if (sh.d[0] == 0.0 && sh.d[1] == 0.0) return;
+    stampByDual(j.n, j.terms, v, [&](const std::array<Dual<double>, kJT> &x) { return junctionCurrents(j, x, h, nullptr, &sh); });
+    if (sh.d[0] == 0.0 && sh.d[1] == 0.0 && sh.d[2] == 0.0) return;
     JShift seeded = sh;
     seeded.seed = true;
-    std::array<Dual<double>, 7> x;
-    for (int k = 0; k < 7; ++k) x[k] = Dual<double>(j.n[k] > 0 && j.n[k] <= (int)v.size() ? v[j.n[k] - 1] : 0.0, 0.0);
+    std::array<Dual<double>, kJT> x;
+    for (int k = 0; k < kJT; ++k) x[k] = Dual<double>(j.n[k] > 0 && j.n[k] <= (int)v.size() ? v[j.n[k] - 1] : 0.0, 0.0);
     const auto cur = junctionCurrents(j, x, h, nullptr, &seeded);
     for (int t = 0; t < j.terms; ++t)
       if (j.n[t] > 0) rhsVector[j.n[t] - 1] += cur[t].grad;
@@ -1317,7 +1449,7 @@ private:
 
   /** Capacitor + inductor history after an accepted step (global + instances),
    *  using the same companion formulas as the stamps and the KCL audit. */
-  void updateReactiveHistory(TensorNetlist& netlist, const std::vector<double>& v, double h);
+  void updateReactiveHistory(TensorNetlist& netlist, const std::vector<double>& v, double h, double t);
   void seedReactiveHistory(TensorNetlist& netlist, const std::vector<double>& x, bool uic);
 
   /** Last full solution x (node voltages + branch currents). */
@@ -1383,19 +1515,19 @@ public:
     const TensorBlock *blk;
     const BlockState *st;
     std::function<int(int)> map;   // local node -> global node
-    int vs, ind, e, h, tl, bv, dev;  // first matrix row of each branch kind (tl: two per transmission line; bv: voltage behavioural sources); dev: device internal nodes
+    int vs, ind, e, h, tl, lt, bv, dev;  // first matrix row of each branch kind (tl: two per transmission line, lt: two per lossy line; bv: voltage behavioural sources); dev: device internal nodes
     const BlockInstance *inst = nullptr;
   };
   std::vector<BranchSlot> branchSlots(const TensorNetlist &nl, int &total) const {
     std::vector<BranchSlot> branchList;
-    branchList.push_back({&nl.globalBlock, &nl.globalState, [](int x) { return x; }, 0, 0, 0, 0, 0, 0, 0, nullptr});
+    branchList.push_back({&nl.globalBlock, &nl.globalState, [](int x) { return x; }, 0, 0, 0, 0, 0, 0, 0, 0, nullptr});
     for (size_t k = 0; k < nl.instances.size() && k < nl.instanceStates.size(); ++k) {
       auto it = nl.blockDefinitions.find(nl.instances[k].blockName);
       if (it == nl.blockDefinitions.end()) continue;
       const auto *inst = &nl.instances[k];
       branchList.push_back({&it->second, &nl.instanceStates[k], [inst](int x) {
         return (x <= 0 || x > (int)inst->nodeMapping.size()) ? 0 : inst->nodeMapping[x - 1];
-      }, 0, 0, 0, 0, 0, 0, 0, inst});
+      }, 0, 0, 0, 0, 0, 0, 0, 0, inst});
     }
     int next = nl.numGlobalNodes;
     for (auto &s : branchList) { s.vs = next; next += (int)s.blk->voltageSources.size(); }
@@ -1403,6 +1535,7 @@ public:
     for (auto &s : branchList) { s.e = next; next += (int)s.blk->voltageControlledVoltageSources.size(); }
     for (auto &s : branchList) { s.h = next; next += (int)s.blk->currentControlledVoltageSources.size(); }
     for (auto &s : branchList) { s.tl = next; next += 2 * (int)s.blk->transmissionLines.size(); }
+    for (auto &s : branchList) { s.lt = next; next += 2 * (int)s.blk->lossyLines.size(); }
     for (auto &s : branchList) {
       s.bv = next;
       for (const auto &b : s.blk->behavioural) next += b.voltage;
@@ -1441,7 +1574,9 @@ public:
   // Small-signal system at the last DC operating point: G (Newton Jacobian
   // without node gmin), reactive triplets C. Shared by solveAC and solveNoise.
   // dr/dc/dv/dtd: entries dv * e^(-jw dtd) (transmission lines), beside the jw*cv ones
-  struct ACSystem { Csr_matrix G; std::vector<int> cr, cc; std::vector<double> cv; std::vector<int> dr, dc; std::vector<double> dv, dtd; int n = 0; };
+  struct ACSystem { Csr_matrix G; std::vector<int> cr, cc; std::vector<double> cv; std::vector<int> dr, dc; std::vector<double> dv, dtd;
+                    std::vector<int> fr, fc; std::vector<std::function<std::complex<double>(double)>> fv;  // entries f(w)
+                    int n = 0; };
   bool acSystem(TensorNetlist &netlist, ACSystem &sys);
   // R(Y) = [[G, -wC], [wC, G]] for Y = G + jwC (transpose: R(Y)^T = R(Y^H)).
   static Csr_matrix acMatrix(const ACSystem &s, double w, bool transpose);
@@ -1465,7 +1600,7 @@ public:
       for (const auto &e : b.inductors) mark({e.nodeCoil1, e.nodeCoil2});
       for (const auto &e : b.voltageSources) mark({e.nodePositive, e.nodeNegative});
       for (const auto &e : b.currentSources) mark({e.nodePositive, e.nodeNegative});
-      for (const auto &e : b.diodes) mark({e.anode, e.cathode});
+      for (const auto &e : b.diodes) mark({e.anode, e.cathode, e.thermal});
       for (const auto &e : b.mosfets) mark({e.drain, e.gate, e.source, e.body});
       for (const auto &e : b.bjts) mark({e.nodeCollector, e.base, e.emitter, e.substrate});
       for (const auto &e : b.osdiDevices)
@@ -1477,6 +1612,7 @@ public:
       for (const auto &e : b.currentControlledVoltageSources) mark({e.outPos, e.outNeg});
       for (const auto &e : b.currentControlledCurrentSources) mark({e.outPos, e.outNeg});
       for (const auto &e : b.transmissionLines) mark({e.nodePort1Pos, e.nodePort1Neg, e.nodePort2Pos, e.nodePort2Neg});
+      for (const auto &e : b.lossyLines) mark({e.p1, e.n1, e.p2, e.n2});
       for (const auto &e : b.behavioural) mark({e.outPos, e.outNeg});
       for (const auto &e : b.parasiticResistors) mark({e.node1, e.node2});
       for (const auto &e : b.parasiticCapacitors) mark({e.node1, e.node2});
@@ -1525,7 +1661,7 @@ public:
     auto add = [&](int r, int c, double v) {
       if (r >= 0 && c >= 0) { S.r.push_back(r); S.c.push_back(c); S.v.push_back(v); }
     };
-    const bool tran = h > 1e-15 && integrator;
+    const bool tran = h > 0.0 && integrator;
     const IntegrationType type = tran ? integrator->getType() : IntegrationType::GEAR_1_EULER;
     // Inductor companion: v = coef * sum_j L_aj * i_j + history (per method)
     const double coef = !tran ? 0.0 : type == IntegrationType::TRAPEZOIDAL ? 2.0 / h
@@ -1604,6 +1740,41 @@ public:
           add(b2, b1, 1.0); add(b2, b2, 1.0);
         }
       }
+      // Lossy lines (ngspice LTRA, ltraload): i1, i2 into the + terminals. DC (and the RG line always): RG its
+      // two-port, the others R*LEN between the + terminals. Transient: Y0 v - i (+ the convolutions' first terms)
+      // = the inputs from the accepted history (RC: its h1 / h2 / h3 terms). AC: acSystem stamps the rows.
+      for (size_t k = 0; k < blk.lossyLines.size(); ++k) {
+        const auto &o = blk.lossyLines[k];
+        const auto &m = o.m;
+        const int b1 = sl.lt + 2 * (int)k, b2 = b1 + 1;
+        const int p1 = node(o.p1), n1 = node(o.n1), p2 = node(o.p2), n2 = node(o.n2);
+        add(p1, b1, 1.0); add(n1, b1, -1.0); add(p2, b2, 1.0); add(n2, b2, -1.0);
+        if (m.kase == ltra::Case::RG) {
+          add(b1, p1, 1.0); add(b1, n1, -1.0); add(b1, p2, -m.coshlrootGR); add(b1, n2, m.coshlrootGR);
+          add(b1, b2, (1 + gmin_) * m.rRsLrGRorG);
+          add(b2, b2, m.coshlrootGR); add(b2, p2, -(1 + gmin_) * m.rGsLrGRorR); add(b2, n2, (1 + gmin_) * m.rGsLrGRorR);
+          add(b2, b1, 1.0);
+          continue;
+        }
+        if (acLines_) { add(b1, b1, -1.0); add(b2, b2, -1.0); continue; }  // the rest are acSystem's
+        if (!tran || k >= sl.st->ltraState.size()) {
+          add(b1, b1, 1.0); add(b1, b2, 1.0); add(b2, p1, 1.0); add(b2, p2, -1.0); add(b2, b1, -m.R * m.len);
+          continue;
+        }
+        const auto &hst = sl.st->ltraState[k];
+        ltra::inputs(m, hst, time);
+        if (m.kase == ltra::Case::RC) {
+          add(b1, b1, -1.0); add(b2, b2, -1.0);
+          add(b1, p1, hst.h1f); add(b1, n1, -hst.h1f); add(b2, p2, hst.h1f); add(b2, n2, -hst.h1f);
+          add(b1, b2, -hst.h2f); add(b2, b1, -hst.h2f);
+          add(b1, p2, -hst.h3f); add(b1, n2, hst.h3f); add(b2, p1, -hst.h3f); add(b2, n1, hst.h3f);
+        } else {
+          const double y = m.admit * (1.0 + (m.kase == ltra::Case::RLC ? hst.h1f : 0.0));
+          add(b1, p1, y); add(b1, n1, -y); add(b1, b1, -1.0);
+          add(b2, p2, y); add(b2, n2, -y); add(b2, b2, -1.0);
+        }
+        S.rhs[b1] += hst.in1; S.rhs[b2] += hst.in2;
+      }
     }
   }
   void stampBranchSystem(const TensorNetlist &nl, double h, double time) {
@@ -1623,8 +1794,12 @@ public:
     double time() const { return t; }
     Dual<double> ref(int k) const { return Dual<double>(rv[k], k == seed ? 1.0 : 0.0); }
   };
-  struct BehavEval { double f = 0.0; std::vector<std::pair<int, double>> d; };
-  BehavEval behavEval(const Behavioural &b, const BranchSlot &sl, const std::vector<double> &x, double time, bool grad) const {
+  // f and its partials (d: per column; g: per input, code models only). limited: XSPICE's convergence limiting
+  // (mifload.c, on by default): past a solve's first iteration a code model's input moves at most
+  // max(0.25 |last|, 0.1) per iteration, and the source is linearised there (rv: the inputs it was evaluated at)
+  struct BehavEval { double f = 0.0; std::vector<std::pair<int, double>> d; std::vector<double> g, rv; };
+  BehavEval behavEval(const Behavioural &b, const BranchSlot &sl, const std::vector<double> &x, double time, bool grad,
+                      double h = 0.0, bool limited = false) const {
     const size_t n = b.refs.size();
     auto X = [&](int c) { return c >= 0 && c < (int)x.size() ? x[c] : 0.0; };
     std::vector<int> ca(n, -1), cb(n, -1);
@@ -1637,13 +1812,24 @@ public:
     }
     BehavEval out;
     if (b.cm) {  // an XSPICE code model (xspice_analog.h): one Dual pass per input
+      if (limited) {
+        if (!cmFresh_ && b.cmLast.size() == n)
+          for (size_t k = 0; k < n; ++k) {
+            const double last = b.cmLast[k], step = std::max(0.25 * std::abs(last), 0.1);
+            rv[k] = std::clamp(rv[k], last - step, last + step);
+          }
+        b.cmLast = rv;
+      }
       std::vector<Dual<double>> in(n);
       for (size_t k = 0; k < n; ++k) in[k] = Dual<double>(rv[k]);
-      if (!grad || n == 0) { out.f = xspice::analogOut(*b.cm, in).val; return out; }
+      const xspice::AnalogState *st = b.cmState.get();
+      out.rv = rv;
+      if (!grad || n == 0) { out.f = xspice::analogOut(*b.cm, in, st, h, time).val; return out; }
       for (size_t k = 0; k < n; ++k) {
         for (size_t j = 0; j < n; ++j) in[j].grad = j == k ? 1.0 : 0.0;
-        const auto r = xspice::analogOut(*b.cm, in);
+        const auto r = xspice::analogOut(*b.cm, in, st, h, time);
         out.f = r.val;
+        out.g.push_back(r.grad);
         if (ca[k] >= 0) out.d.push_back({ca[k], r.grad});
         if (cb[k] >= 0) out.d.push_back({cb[k], -r.grad});
       }
@@ -1669,16 +1855,61 @@ public:
       for (const auto &b : sl.blk->behavioural) f(b, sl, b.voltage ? row++ : -1);
     }
   }
+  // The stateful code models (int, d_dt) take their state at an accepted point x (h: the step that reached it;
+  // 0: the t = 0 operating point, where int starts at out_ic and d_dt from its input)
+  void acceptBehav(const TensorNetlist &nl, const std::vector<double> &x, double h, double t = 0.0) const {
+    forEachBehav(nl, [&](const Behavioural &b, const BranchSlot &sl, int) {
+      if (!b.cm || !b.cmState) return;
+      auto X = [&](int c) { return c >= 0 && c < (int)x.size() ? x[c] : 0.0; };
+      std::vector<double> in;
+      for (const auto &r : b.refs)
+        in.push_back(r.kind == 0 ? X(sl.map(r.a) - 1) - X(sl.map(r.b) - 1)
+                                 : X(r.kind == 1 ? sl.vs + r.a : r.kind == 2 ? sl.ind + r.a : sl.bv + r.a));
+      if (xspice::oscillator(b.cm->kind)) {
+        b.cmState->v = xspice::oscStep(*b.cm, in.empty() ? 0.0 : in[0], *b.cmState, t, h).st;
+        return;
+      }
+      if (b.cm->kind == xspice::AKind::MEMRISTOR) {
+        b.cmState->out = h > 0.0 ? xspice::memristorR(*b.cm, in[0], b.cmState->out, h) : b.cm->outIc;
+        return;
+      }
+      if (b.cm->kind == xspice::AKind::ONESHOT) {
+        b.cmState->v = xspice::oneshotStep(*b.cm, in[0], in[1], in[2], *b.cmState, t, h).st;
+        return;
+      }
+      if (b.cm->kind == xspice::AKind::LCOUPLE) {  // the flux at this point (minus the core port's current)
+        b.cmState->in = -in[1];
+        return;
+      }
+      if (b.cm->kind == xspice::AKind::HYST || (b.cm->kind == xspice::AKind::CORE && b.cm->coreHyst)) {
+        const double v = in.empty() ? 0.0 : in[0];
+        b.cmState->leg = xspice::hystOut(*b.cm, v, xspice::hystLeg(*b.cm, v, *b.cmState)).second;
+        return;
+      }
+      if (b.cm->kind == xspice::AKind::S_XFER) {
+        if (h <= 0.0) b.cmState->v = b.cm->intIc;  // t = 0: the integrators' initial values (the top one: the input's)
+        const auto s = xspice::sxferChain(*b.cm, in.empty() ? 0.0 : in[0], *b.cmState, h);
+        b.cmState->v.assign(s.begin(), s.end());
+        return;
+      }
+      const double out = xspice::analogOut(*b.cm, in, b.cmState.get(), h);
+      b.cmState->out = out;
+      b.cmState->in = in.empty() ? 0.0 : in[0];
+    });
+  }
   // Newton stamp at x: f ~ f0 + g.(x' - x). A voltage source's row reads v+ - v- - g.x' = f0 - g.x; a
   // current source leaves + (enters -) with g.x' + f0 - g.x.
-  void stampBehav(const Behavioural &b, const BranchSlot &sl, int row, const std::vector<double> &x, double time) {
-    auto ev = behavEval(b, sl, x, time, true);
+  void stampBehav(const Behavioural &b, const BranchSlot &sl, int row, const std::vector<double> &x, double time, double h = 0.0) {
+    auto ev = behavEval(b, sl, x, time, true, h, true);
     // ponytail: outside a function's domain (ln(0) at the cold start, V = 0) the Newton step sees 0 here;
     // the audit (calculatePhysicalResiduals) keeps the exact value, so a real domain error cannot converge
     if (!std::isfinite(ev.f)) ev.f = 0.0;
     for (auto &[c, g] : ev.d) if (!std::isfinite(g)) g = 0.0;
     double rhs = ev.f;
-    for (auto [c, g] : ev.d) rhs -= g * (c < (int)x.size() ? x[c] : 0.0);
+    if (b.cm) {  // linearised at the (limited) inputs it was evaluated at
+      for (size_t k = 0; k < ev.g.size(); ++k) if (std::isfinite(ev.g[k])) rhs -= ev.g[k] * ev.rv[k];
+    } else
+      for (auto [c, g] : ev.d) rhs -= g * (c < (int)x.size() ? x[c] : 0.0);
     const int np = sl.map(b.outPos) - 1, nn = sl.map(b.outNeg) - 1;
     if (b.voltage) {
       for (auto [c, g] : ev.d) matrixBuilder.add(row, c, -g);
@@ -1768,15 +1999,15 @@ public:
     // 3.6 Diodes and BJTs, global block and every instance: the stamped
     //     junctionCurrents(), including their internal-node rows
     forEachJunction(netlist, [&](const Junction &j) {
-        std::array<double, 7> x{};
+        std::array<double, kJT> x{};
         for (int k = 0; k < j.terms; ++k) x[k] = getV(j.n[k]);
         auto I = junctionCurrents(j, x, h);
         if (offHold_ && (j.d ? j.d->off : j.f ? j.f->off : j.q->off)) {
           // held (ngspice INITFIX): the companion I(vl) + G (v - vl) at junctions held at 0 V, as stampJunction
           JShift sh = junctionLimit(j, v_candidate);
           sh.seed = true;
-          std::array<Dual<double>, 7> xd;
-          for (int k = 0; k < 7; ++k) xd[k] = Dual<double>(x[k], 0.0);
+          std::array<Dual<double>, kJT> xd;
+          for (int k = 0; k < kJT; ++k) xd[k] = Dual<double>(x[k], 0.0);
           const auto c = junctionCurrents(j, xd, h, nullptr, &sh);
           for (int k = 0; k < j.terms; ++k) I[k] = c[k].val - c[k].grad;
         }
@@ -1785,24 +2016,24 @@ public:
     });
     // 3.62 Switches: the stamped state's conductance; a state the iterate would change is not converged
     forEachSwitch(netlist, [&](const SwitchRef &w, const std::array<int, 2> &c) {
-        const double i = (getV(w.n[0]) - getV(w.n[1])) / (*w.on ? w.s->ron : w.s->roff);
+        const double i = (getV(w.n[0]) - getV(w.n[1])) / (swIsOn(*w.on) ? w.s->ron : w.s->roff);
         addRes(w.n[0], -i);
         addRes(w.n[1], i);
-        if (switchState(w, c, v_candidate) != (*w.on != 0)) addRes(w.n[0], 1.0);
+        if (swIsOn(switchState(w, c, v_candidate)) != swIsOn(*w.on)) addRes(w.n[0], 1.0);
     });
     // 3.65 OSDI devices: the stamped osdiCurrents(), internal-node rows included
     osdiAll(netlist, v_candidate, h, false, false);
     for (size_t i = 0; i < osdiRefs_.size(); ++i) {
         const auto &r = osdiRefs_[i];
         for (size_t k = 0; k < r.n.size(); ++k)
-          if (r.n[k] > 0 && r.n[k] <= (int)node_residuals.size()) node_residuals[r.n[k] - 1] -= osdiI_[i][k];
+          if (r.n[k] > 0 && r.n[k] <= (int)node_residuals.size()) node_residuals[r.n[k] - 1] -= osdiI(i)[k];
     }
     
     // 3.7 Hierarchical Instances — audited in Section 5 (parallel scheduler path)
     
     // 4. Capacitors (Transient Only)
     // If h > 0, we are in transient and must audit the displacement current
-    if (h > 1e-15 && integrator) {
+    if (h > 0.0 && integrator) {
       for (size_t i = 0; i < netlist.globalBlock.capacitors.size(); ++i) {
         const auto &c = netlist.globalBlock.capacitors[i];
         const auto &hist = netlist.globalState.capacitorState[i];
@@ -1872,7 +2103,7 @@ public:
         }
 
         // Capacitors (Transient)
-        if (h > 1e-15 && integrator) {
+        if (h > 0.0 && integrator) {
           const auto &instState = netlist.instanceStates[instanceIdx];
           for (size_t c_idx = 0; c_idx < block.capacitors.size(); ++c_idx) {
             const auto &c = block.capacitors[c_idx];
@@ -1917,7 +2148,7 @@ public:
 
     // Behavioural sources: the exact f(x), not the linearisation just stamped
     forEachBehav(netlist, [&](const Behavioural &b, const BranchSlot &sl, int row) {
-      const double f = behavEval(b, sl, v_candidate, time, false).f;
+      const double f = behavEval(b, sl, v_candidate, time, false, h).f;
       if (b.voltage) { node_residuals[row] += f; return; }
       addRes(sl.map(b.outPos), -f);
       addRes(sl.map(b.outNeg), f);
@@ -2038,7 +2269,7 @@ public:
     // 3. Diodes and BJTs (every block): DC junctionCurrents() at the external
     //    nodes (internal-node rows are not node KCL rows here)
     forEachJunction(netlist, [&](const Junction &j) {
-      std::array<double, 7> x{};
+      std::array<double, kJT> x{};
       for (int k = 0; k < j.terms; ++k) x[k] = getV(j.n[k]);
       const auto I = junctionCurrents(j, x, 0.0);
       DeviceAttribution a{j.d ? j.d->instanceName : j.f ? j.f->instanceName : j.q->instanceName, j.d ? "Diode" : j.f ? "JFET" : "BJT", {}};
@@ -2052,7 +2283,7 @@ public:
     osdiAll(netlist, v_candidate, 0.0, false, false);
     for (size_t i = 0; i < osdiRefs_.size(); ++i) {
       const auto &r = osdiRefs_[i];
-      const auto &I = osdiI_[i];
+      const double *I = osdiI(i);
       DeviceAttribution a{r.dev->instanceName, "OSDI", {}};
       for (size_t k = 0; k < r.dev->nodes.size(); ++k) {
         addRes(r.n[k], -I[k]);
@@ -2268,12 +2499,12 @@ public:
         // SoA Pathway (Flattened). tensorizeNetlist() stores DC values only, so
         // in transient re-evaluate every source at `time`, walking blocks in the
         // same order tensorizeNetlist() flattens them (global, then instances).
-        if (h > 1e-15 || tranOpSources_) {
+        if (h > 0.0 || tranOpSources_) {
             size_t ki = 0;
             auto refresh = [&](const TensorBlock &blk) {
                 for (const auto &i : blk.currentSources)
                     if (ki < soaBlock.currentSources.currents.size())
-                        soaBlock.currentSources.currents[ki++] = h > 1e-15 ? waveformValue(i, i.current_A, time) : tranOpValue(i, i.current_A);
+                        soaBlock.currentSources.currents[ki++] = h > 0.0 ? waveformValue(i, i.current_A, time) : tranOpValue(i, i.current_A);
             };
             refresh(netlist.globalBlock);
             for (const auto &inst : netlist.instances) {
@@ -2304,16 +2535,16 @@ public:
 
     // Branch-current elements (V, L+K, E, F, H), MOSFETs, diodes and BJTs: one implementation for both paths
     stampBranchSystem(netlist, h, time);
-    forEachBehav(netlist, [&](const Behavioural &b, const BranchSlot &sl, int row) { stampBehav(b, sl, row, v_guess, time); });
+    forEachBehav(netlist, [&](const Behavioural &b, const BranchSlot &sl, int row) { stampBehav(b, sl, row, v_guess, time, h); });
     forEachMosfet(netlist, [&](const Mosfet &m, const std::array<int, 4> &n,
                                const BlockState::DeviceCharge *st) { stampMos1(n, mos1Params(m, gmin_), st, h, v_guess, offHold_ && m.off); });
     forEachJunction(netlist, [&](const Junction &j) { stampJunction(j, v_guess, h); });
     forEachSwitch(netlist, [&](const SwitchRef &w, const std::array<int, 2> &c) {
-      *w.on = !swAcOff_ && switchState(w, c, v_guess);
-      stampResistor(w.n[0], w.n[1], *w.on ? w.s->ron : w.s->roff, matrixBuilder);
+      *w.on = swAcOff_ ? 0 : switchState(w, c, v_guess);
+      stampResistor(w.n[0], w.n[1], swIsOn(*w.on) ? w.s->ron : w.s->roff, matrixBuilder);
     });
     osdiAll(netlist, v_guess, h, true, false);  // stamped in device order: the same sequence every iteration
-    for (size_t i = 0; i < osdiRefs_.size(); ++i) stampOsdi(osdiRefs_[i], osdiI_[i], osdiJ_[i], v_guess);
+    for (size_t i = 0; i < osdiRefs_.size(); ++i) stampOsdi(osdiRefs_[i], osdiI(i), osdiJ(i), v_guess);
 
     // A node no element touches is not a circuit node (ngspice drops it after
     // flattening, e.g. an X pin wired to a port the .subckt never uses): pin it

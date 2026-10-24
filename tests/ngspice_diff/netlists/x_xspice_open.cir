@@ -1,0 +1,29 @@
+* XSPICE open collector / open emitter: two d_open_c with a d_pullup make a wired AND, two d_open_e with a
+* d_pulldown a wired OR; an inertial d_open_c drops a pulse shorter than its delay; an input at U drives U.
+* No dac_bridge: the adc's sub-step U (its band, crossed between points) passes through the open outputs, and its
+* length is each simulator's step choice; the event comparison forgives it, an analog ramp would not
+va a_a 0 pulse(0 3 2n 0.1n 0.1n 4n 10n)
+vb b_a 0 pulse(0 3 4n 0.1n 0.1n 4n 8n)
+vg g_a 0 pwl(0 0 6n 0 6.1n 3 6.4n 3 6.5n 0 12n 0 12.1n 3 16n 3 16.1n 1.5 18n 1.5 18.1n 0)
+a_adc [a_a b_a g_a] [a b g] adc_mod
+.model adc_mod adc_bridge(in_low=1.0 in_high=2.0)
+a_c1 a wand oc
+a_c2 b wand oc
+a_pu wand pu
+.model oc d_open_c(open_delay=0.3n fall_delay=0.2n)
+.model pu d_pullup
+a_e1 a wor oe
+a_e2 b wor oe
+a_pd wor pd
+.model oe d_open_e(rise_delay=0.25n open_delay=0.35n)
+.model pd d_pulldown
+a_i g gi oci
+a_pu2 gi pu
+.model oci d_open_c(open_delay=0.6n fall_delay=0.5n inertial_delay=true)
+.tran 0.1n 24n
+.control
+run
+print v(a_a) v(g_a)
+eprint wand wor gi
+.endc
+.end

@@ -14,6 +14,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <complex>
+#include <functional>
+#include <regex>
 #include <cstdlib>
 #include <cstdio>
 #include <fstream>
@@ -286,8 +289,28 @@ int main(int argc, char** argv) {
         if (an.kind == "tran" && overrides.empty()) an.req.transient.stepSizeS = an.req.transient.stopTimeS = 0;  // the .tran card
         auto session = engine->createSession();
         EngineCallbacks cb;
+        // -r of a .tran with every vector (no .save/.probe, nothing printed or measured from the points): the steps
+        // stream to the raw file as they are accepted instead of staying in memory, as ngspice's batch mode writes it
+        static const std::regex keeps(R"((^|\n)[ \t]*\.(save|probe|print|meas|measure|four|step)\b)", std::regex::icase);
+        const bool stream = an.kind == "tran" && !rawPath.empty() && !std::regex_search(text, keeps);
+        const std::string rowsPath = rawPath + ".rows";
+        std::ofstream rows;
+        size_t streamed = 0, width = 0;
+        std::function<void(const WaveformDataPoint&, unsigned long long)> sink;
+        if (stream) {
+            rows.open(rowsPath, std::ios::binary);
+            if (!rows) { std::cerr << "treespice: cannot write " << rowsPath << "\n"; return 1; }
+            an.req.transient.keepPoints = false;
+            sink = [&](const WaveformDataPoint& p, unsigned long long) {
+                width = 1 + p.nodeVoltages.size() + p.branchCurrents.size();
+                rows.write(reinterpret_cast<const char*>(&p.timeS), sizeof(double));
+                rows.write(reinterpret_cast<const char*>(p.nodeVoltages.data()), (std::streamsize)(p.nodeVoltages.size() * sizeof(double)));
+                rows.write(reinterpret_cast<const char*>(p.branchCurrents.data()), (std::streamsize)(p.branchCurrents.size() * sizeof(double)));
+                ++streamed;
+            };
+        }
         const auto t0 = std::chrono::steady_clock::now();
-        SimulationResponseDTO r = an.kind == "tran" ? session->runTransient(an.req, cb, nullptr)
+        SimulationResponseDTO r = an.kind == "tran" ? session->runTransient(an.req, cb, sink)
                                 : an.kind == "ac"   ? session->runAC(an.req, cb)
                                 : an.kind == "noise" ? session->runNoise(an.req, cb)
                                 : an.kind == "sens" ? session->runSens(an.req, cb)
@@ -295,13 +318,38 @@ int main(int argc, char** argv) {
                                 : an.kind == "pz"   ? session->runPoleZero(an.req, cb)
                                                     : session->runDC(an.req, cb);
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (stream) rows.close();
         if (!r.converged) {
+            if (stream) std::remove(rowsPath.c_str());
             std::cerr << "treespice: ." << an.kind << " failed: " << r.errorDetail << "\n";
             status = 1;
             continue;
         }
         try {
-            if (an.kind == "tf") {
+            if (stream) {  // the streamed rows as writeRaw(selectOutputs(r, {})) would write them: named nodes, then branches
+                OutputTable t;
+                t.plotName = "Transient Analysis";
+                t.scaleName = "time";
+                std::vector<size_t> cols;
+                for (size_t i = 0; i < r.nodeNames.size(); ++i)
+                    if (!r.nodeNames[i].empty()) { t.columns.push_back({"v(" + r.nodeNames[i] + ")", "voltage", {}, false}); cols.push_back(1 + i); }
+                for (size_t i = 0; i < r.branchNames.size(); ++i) {
+                    t.columns.push_back({"i(" + r.branchNames[i] + ")", "current", {}, false});
+                    cols.push_back(1 + r.nodeNames.size() + i);
+                }
+                writeRawHeader(rawFile, t, std::max<size_t>(streamed, 1), title(text), ascii);
+                std::ifstream in(rowsPath, std::ios::binary);
+                std::vector<double> buf(width);
+                std::vector<std::complex<double>> row;
+                for (size_t k = 0; k < streamed && in.read(reinterpret_cast<char*>(buf.data()), (std::streamsize)(width * sizeof(double))); ++k) {
+                    row.assign(1, buf[0]);
+                    for (size_t c : cols) row.push_back(c < width ? buf[c] : 0.0);
+                    writeRawRow(rawFile, k, row, false, ascii);
+                }
+                in.close();
+                std::remove(rowsPath.c_str());
+                out << ".tran: " << streamed << " points streamed to " << rawPath << "\n";
+            } else if (an.kind == "tf") {
                 if (!rawPath.empty()) writeRaw(rawFile, tfTable(r), title(text), ascii);
                 printTF(out, r);
             } else if (an.kind == "sens") {
