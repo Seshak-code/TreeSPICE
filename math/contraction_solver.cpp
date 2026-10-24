@@ -383,7 +383,17 @@ ContractionPlan planContraction(const Csr_matrix& A, int leafSize) {
     // ordering of the rest, which goes under it.
     const double hubDegree = std::max(16.0, 10.0 * std::sqrt((double)n));
     std::vector<int> hubs, rest;
-    for (int v = 0; v < n; ++v) ((double)adj[v].size() > hubDegree ? hubs : rest).push_back(v);
+    for (int v = 0; v < n; ++v) {
+        if (adj[v].empty()) {  // a single: its own equation, nothing else reads it
+            const int r = base.rowOfVar[v];
+            int k = -1;
+            for (int t = A.row_pointer[r]; t < A.row_pointer[r + 1]; ++t) if (A.col_indices[t] == v) k = t;
+            base.singles.push_back(v);
+            base.singleK.push_back(k);
+            continue;
+        }
+        ((double)adj[v].size() > hubDegree ? hubs : rest).push_back(v);
+    }
 
     // The rest is ordered both ways and the cheaper plan is kept: nested dissection
     // wins on grids / power-delivery meshes, minimum degree on transistor-level
@@ -596,7 +606,7 @@ void layoutFront(const ContractionPlan& plan, int id, std::vector<FrontFactor>& 
 }
 
 // Forward pass (rhs through the tree) + top-down back substitution.
-void solveWithFactors(const ContractionPlan& plan, const std::vector<FrontFactor>& F,
+void solveWithFactors(const Csr_matrix& A, const ContractionPlan& plan, const std::vector<FrontFactor>& F,
                       const std::vector<double>& b, std::vector<double>& x) {
     const int nf = (int)plan.fronts.size();
     std::vector<std::vector<double>> w(nf);
@@ -621,6 +631,8 @@ void solveWithFactors(const ContractionPlan& plan, const std::vector<FrontFactor
         });
     }
     x.assign(plan.n, 0.0);
+    for (size_t i = 0; i < plan.singles.size(); ++i)
+        x[plan.singles[i]] = b[plan.rowOfVar[plan.singles[i]]] / A.values[plan.singleK[i]];
     for (int li = (int)plan.levels.size() - 1; li >= 0; --li) {
         const auto& level = plan.levels[li];
         parallelFor((int)level.size(), levelWork(plan, level, false), [&](int t) {
@@ -700,7 +712,17 @@ SolverResult solve(const Csr_matrix& A, const std::vector<double>& b, const Cont
     bool singular = false;
     double smallestPivot = std::numeric_limits<double>::infinity();
     int smallestPivotRow = -1;
+    for (size_t i = 0; i < plan.singles.size(); ++i) {  // their pivots, as a 1x1 front's
+        const double a = plan.singleK[i] < 0 ? 0.0 : std::abs(A.values[plan.singleK[i]]);
+        const int row = plan.rowOfVar[plan.singles[i]];
+        if (a < smallestPivot) { smallestPivot = a; smallestPivotRow = row; }
+        if (!(a > 0.0) || !std::isfinite(a)) {
+            singular = true;
+            if (res.rankDeficientRow < 0) res.rankDeficientRow = row;
+        }
+    }
     for (const auto& level : plan.levels) {
+        if (singular) break;
         parallelFor((int)level.size(), levelWork(plan, level, true), [&](int li) {
             const int id = level[li];
             const auto& fr = plan.fronts[id];
@@ -840,7 +862,7 @@ SolverResult solve(const Csr_matrix& A, const std::vector<double>& b, const Cont
     }
 
     std::vector<double> x, r(n), dx;
-    solveWithFactors(plan, F, b, x);
+    solveWithFactors(A, plan, F, b, x);
 
     // FP32 fronts need refinement whatever the caller asked; it converges linearly
     // (rate ~ kappa * 2^-24), so stop once a step no longer halves the error.
@@ -849,7 +871,7 @@ SolverResult solve(const Csr_matrix& A, const std::vector<double>& b, const Cont
     const int steps = res.gpuFronts ? std::max(refineSteps, 10) : refineSteps;
     double omega = residual(A, b, x, r);
     for (int s = 0; s < steps && omega > 4.0 * eps; ++s) {
-        solveWithFactors(plan, F, r, dx);
+        solveWithFactors(A, plan, F, r, dx);
         for (int i = 0; i < n; ++i) x[i] += dx[i];
         const double prev = omega;
         omega = residual(A, b, x, r);

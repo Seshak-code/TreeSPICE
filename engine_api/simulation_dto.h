@@ -106,6 +106,7 @@ struct TransientConfigDTO {
     double stepSizeS = 1e-9;
     double maxStepS  = 1e-8;
     bool   uic       = false;   // start from .ic / IC= values, skip the DC bias
+    bool   keepPoints = true;   // false: each step goes only to the stream callback (a long run of a large circuit)
 };
 
 struct ACConfigDTO {

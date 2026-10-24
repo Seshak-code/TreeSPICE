@@ -50,6 +50,10 @@ struct ContractionPlan {
     int n = 0;
     std::vector<int> rowPtr, colIdx;          // CSR pattern this plan was built for
     std::vector<int> rowOfVar;                // equation (A row) paired with each variable
+    // Variables whose row and column hold only the diagonal (an OSDI device's zero-volt branch with both ends
+    // collapsed together: two per BSIM4 device): x = b / a, outside the tree. singleK: that entry's CSR value
+    // index (-1: none, singular)
+    std::vector<int> singles, singleK;
     std::vector<ContractionFront> fronts;     // postorder: children before parents
     std::vector<std::vector<int>> levels;     // fronts grouped by height; independent within a level
     double flopEstimate = 0.0;                // factorization flops

@@ -209,8 +209,7 @@ void writeTable(std::ostream& os, const OutputTable& t, const std::string& title
     os << "\n";
 }
 
-void writeRaw(std::ostream& os, const OutputTable& t, const std::string& title, bool ascii) {
-    const size_t points = std::max<size_t>(t.scale.size(), 1);
+void writeRawHeader(std::ostream& os, const OutputTable& t, size_t points, const std::string& title, bool ascii) {
     const bool scaled = !t.scaleName.empty();
     char date[64];
     const std::time_t now = std::time(nullptr);
@@ -225,23 +224,34 @@ void writeRaw(std::ostream& os, const OutputTable& t, const std::string& title, 
     }
     for (const auto& c : t.columns) os << "\t" << idx++ << "\t" << c.name << "\t" << c.type << "\n";
     os << (ascii ? "Values:\n" : "Binary:\n");
+}
+
+void writeRawRow(std::ostream& os, size_t k, const std::vector<cplx>& row, bool complexData, bool ascii) {
+    if (ascii) {
+        for (size_t j = 0; j < row.size(); ++j) {
+            os << (j == 0 ? " " + std::to_string(k) : std::string()) << "\t";
+            value(os, row[j], complexData);
+            os << "\n";
+        }
+        os << "\n";
+    } else {
+        for (const cplx& v : row) {
+            const double d[2] = {v.real(), v.imag()};
+            os.write(reinterpret_cast<const char*>(d), static_cast<std::streamsize>(complexData ? 16 : 8));
+        }
+    }
+}
+
+void writeRaw(std::ostream& os, const OutputTable& t, const std::string& title, bool ascii) {
+    const size_t points = std::max<size_t>(t.scale.size(), 1);
+    const bool scaled = !t.scaleName.empty();
+    writeRawHeader(os, t, points, title, ascii);
+    std::vector<cplx> row;
     for (size_t k = 0; k < points; ++k) {
-        std::vector<cplx> row;
+        row.clear();
         if (scaled) row.push_back(t.scale[k]);
         for (const auto& c : t.columns) row.push_back(c.values[k]);
-        if (ascii) {
-            for (size_t j = 0; j < row.size(); ++j) {
-                os << (j == 0 ? " " + std::to_string(k) : std::string()) << "\t";
-                value(os, row[j], t.complexData);
-                os << "\n";
-            }
-            os << "\n";
-        } else {
-            for (const cplx& v : row) {
-                const double d[2] = {v.real(), v.imag()};
-                os.write(reinterpret_cast<const char*>(d), static_cast<std::streamsize>(t.complexData ? 16 : 8));
-            }
-        }
+        writeRawRow(os, k, row, t.complexData, ascii);
     }
 }
 
