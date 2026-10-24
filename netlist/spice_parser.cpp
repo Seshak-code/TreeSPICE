@@ -300,13 +300,13 @@ std::vector<std::pair<int, std::string>> SPICEParser::preprocessLines(
 // code model (A_GEN<name>) driven by the input node, v(a[, b]), or a B source (B_GEN<name>) for any other
 // expression, and .model GEN_MODEL<name> xfer table = [values]; <name> drops the type letter, as ngspice. A line
 // the rewrite does not take (ngspice's: a value word over 3 characters in place of a keyword ...) stays as is.
-static std::vector<std::pair<int, std::string>> replaceFreq(const std::vector<std::pair<int, std::string>>& lines) {
-    std::vector<std::pair<int, std::string>> out;
+static std::vector<std::pair<int, std::string>> replaceFreq(std::vector<std::pair<int, std::string>> lines) {
+    std::vector<std::pair<int, std::string>> out;  // the kept lines move: one copy of the netlist at a time
     auto ws = [](char c) { return c == ' ' || c == '\t'; };
     auto low = [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); };
-    for (const auto& [num, line] : lines) {
+    for (auto& [num, line] : lines) {
         const char t = low(line.empty() ? ' ' : line[0]);
-        auto keep = [&]() { out.push_back({num, line}); };
+        auto keep = [&]() { out.push_back({num, std::move(line)}); };
         if (t != 'e' && t != 'g') { keep(); continue; }
         const std::string l = [&] { std::string s; for (char c : line) s += low(c); return s; }();
         const size_t n = l.size();
@@ -382,7 +382,7 @@ static std::vector<std::pair<int, std::string>> replaceFreq(const std::vector<st
 }
 
 std::vector<std::pair<int, std::string>> SPICEParser::expandIncludes(
-    const std::vector<std::pair<int, std::string>>& lines, const std::string& dir, int depth, int& errLine)
+    std::vector<std::pair<int, std::string>> lines, const std::string& dir, int depth, int& errLine)
 {
     if (depth > 16) throw std::runtime_error(".include/.lib nested deeper than 16 files (a cycle?)");
     auto unquote = [](std::string s) {
@@ -404,10 +404,10 @@ std::vector<std::pair<int, std::string>> SPICEParser::expandIncludes(
         return f;
     };
     std::vector<std::pair<int, std::string>> out;
-    for (const auto& [num, line] : lines) {
+    for (auto& [num, line] : lines) {
         const auto f = fields(line);
         const bool inc = f[0] == ".INCLUDE" || f[0] == ".INC", lib = f[0] == ".LIB" && !f[2].empty();
-        if (!inc && !lib) { out.push_back({num, line}); continue; }
+        if (!inc && !lib) { out.push_back({num, std::move(line)}); continue; }
         errLine = num;
         if (f[1].empty() || (inc && !f[2].empty()) || !f[3].empty())
             throw std::runtime_error(inc ? ".include takes one file" : ".lib takes a file and a section");
@@ -435,8 +435,8 @@ std::vector<std::pair<int, std::string>> SPICEParser::expandIncludes(
             if (fields(body[k].second)[0] == ".END") { body.resize(k); break; }
         for (auto& b : body) b.first = num;
         const size_t slash = path.rfind('/');
-        const auto sub = expandIncludes(body, slash == std::string::npos ? "" : path.substr(0, slash), depth + 1, errLine);
-        out.insert(out.end(), sub.begin(), sub.end());
+        auto sub = expandIncludes(std::move(body), slash == std::string::npos ? "" : path.substr(0, slash), depth + 1, errLine);
+        out.insert(out.end(), std::make_move_iterator(sub.begin()), std::make_move_iterator(sub.end()));
     }
     return out;
 }
@@ -500,8 +500,8 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
 
     int incLine = 0;
     try {
-        lines = expandIncludes(lines, baseDir, 0, incLine);
-        lines = replaceFreq(lines);  // before numparam, as ngspice: the braces are FREQ's
+        lines = expandIncludes(std::move(lines), baseDir, 0, incLine);
+        lines = replaceFreq(std::move(lines));  // before numparam, as ngspice: the braces are FREQ's
         // .step and .meas are taken out before numparam sees them: their 'expr' and bare words are theirs
         lines.erase(std::remove_if(lines.begin(), lines.end(), [&](const std::pair<int, std::string>& nl) {
             if (nl.first == 1) return false;
@@ -525,7 +525,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (std::isnan(tempC) && !t.empty() && (toUpper(t[0]) == ".OPTIONS" || toUpper(t[0]) == ".OPTION"))
                 for (size_t i = 1; i + 1 < t.size(); ++i) if (toUpper(t[i]) == "TEMP") try { circuitC = parseValue(t[i + 1]); } catch (...) {}
         }
-        lines = numparam::expand(lines, incLine, circuitC, paramOverrides);  // .param expressions, subckt parameters, .if
+        lines = numparam::expand(std::move(lines), incLine, circuitC, paramOverrides);  // .param expressions, subckt parameters, .if
     } catch (const std::exception& e) { return fail(incLine, e.what()); }
 
     // .param values are global in SPICE: resolve them before any card uses one
@@ -787,10 +787,10 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                     noAnalogRef_ = true;  // an X port is analog only if the body uses it so (expandInstance)
                     for (size_t i = 1; i + 1 < tok.size(); ++i) {
                         pi.nodes.push_back(nodeIndex(tok[i]));
-                        pi.portNames.push_back(toUpper(tok[i]));
+                        if (flatten_) pi.portNames.push_back(toUpper(tok[i]));  // the expansion's names (S3: 1e6 a bank)
                     }
                     noAnalogRef_ = false;
-                    (inSubckt_ ? subcktChildren_[subcktName_] : topInstances_).push_back(pi);
+                    (inSubckt_ ? subcktChildren_[subcktName_] : topInstances_).push_back(std::move(pi));
                     break;
                 }
                 default:
@@ -1130,9 +1130,21 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     for (const auto& ic : pendingICs_) {
         auto it = nodeMap_.find(ic.node);
         const bool top = it != nodeMap_.end();
-        if (!top && !flatten_ && ic.node.find('.') != std::string::npos)
-            return fail(ic.line, (ic.nodeset ? ".nodeset" : ".ic") + std::string(" on subcircuit node '") + ic.node +
-                                 "' needs the flattened netlist");
+        if (!top && !flatten_) {  // an instance's internal node: its path in the hierarchy (a pin is its parent's net)
+            auto& h = result_.netlist.hier;
+            std::vector<const HierInstance*> chain;
+            int local = 0;
+            if (!h.resolve(ic.node, chain, local) || local <= (int)result_.netlist.blockDefinitions.at(chain.back()->def).pinNames.size())
+                return fail(ic.line, (ic.nodeset ? ".nodeset" : ".ic") + std::string(" names unknown node '") + ic.node + "'");
+            Hierarchy::PathSeed ps{{}, {local, ic.value, ic.nodeset}};
+            const std::vector<HierInstance>* level = &h.top;
+            for (const auto* x : chain) {  // resolve found each in its level, so the next level exists
+                ps.path.push_back((int)(x - level->data()));
+                if (const auto c = h.children.find(x->def); c != h.children.end()) level = &c->second;
+            }
+            h.pathSeeds.push_back(std::move(ps));
+            continue;
+        }
         if (!top) it = result_.nodeIndex.find(ic.node);
         if (!top && it == result_.nodeIndex.end())
             return fail(ic.line, (ic.nodeset ? ".nodeset" : ".ic") + std::string(" names unknown node '") + ic.node + "'");

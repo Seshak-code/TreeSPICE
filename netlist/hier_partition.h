@@ -43,6 +43,7 @@ struct Context {
     std::vector<int> net;     // each local node's color (0: ground; the top level: global nodes)
     std::vector<int> child;   // each child instance's context (hier.children[def], hier.top)
     std::vector<int> elem;    // each element's class (forEachElement order)
+    std::vector<Hierarchy::Seed> own;  // .ic / .nodeset given to this instance alone by path (hier.pathSeeds)
 };
 
 struct Partition {
@@ -88,9 +89,9 @@ template <class B, class F> void forEachElement(B& b, F&& f) {
 }
 
 // S3.2: the quotient circuit of a partition: one node per net class, one element per element class standing for all
-// of its members (|E|: R / |E|, C, MOS1, OSDI and diode multipliers x |E|, a V source's m), each node's KCL row a
-// class sum that the solver divides back to one net's (TensorNetlist::classSize). Other kinds with more than one
-// member are refused (not supported unflattened yet).
+// of its members (|E|: R / |E|, C, MOS1, OSDI, diode, BJT and JFET multipliers x |E|, a V or I source's and an
+// inductor's m), each node's KCL row a class sum that the solver divides back to one net's
+// (TensorNetlist::classSize). Other kinds with more than one member are refused (not supported unflattened yet).
 struct Quotient {
     TensorNetlist nl;              // flat: the global block only
     std::map<int, int> node;       // net color -> quotient node (1-based; ground's color: none)
@@ -104,7 +105,7 @@ public:
     explicit Refiner(const TensorNetlist& nl) : nl_(nl) {}
 
     Partition run() {
-        const int top = refineCtx("", {});
+        const int top = refineCtx("", {}, nl_.hier.pathSeeds);
         // the contexts reached with the final colors (refinement also met intermediate ones), parents first
         Partition p;
         std::map<int, int> id;
@@ -115,7 +116,7 @@ public:
                 if (id.emplace(c, (int)order.size()).second) order.push_back(c);
         for (int r : order) {
             const Ref& f = refs_[r];
-            Context c{f.def, f.pins, f.net, {}, f.elem};
+            Context c{f.def, f.pins, f.net, {}, f.elem, f.own};
             for (int ch : f.child) c.child.push_back(id.at(ch));
             p.ctx.push_back(std::move(c));
         }
@@ -201,7 +202,7 @@ public:
             switch (el.kind) {
             case 'R': { auto x = b.resistors[i]; x.resistance_ohms /= m; if (!std::isnan(x.ac_ohms)) x.ac_ohms /= m; qb.resistors.push_back(x); break; }
             case 'C': { auto x = b.capacitors[i]; x.capacitance_farads *= m; qb.capacitors.push_back(x); break; }
-            case 'L': single("an inductor"); qb.inductors.push_back(b.inductors[i]); break;
+            case 'L': { auto x = b.inductors[i]; x.m = m; qb.inductors.push_back(x); break; }
             case 'V': {
                 auto x = b.voltageSources[i];
                 x.m = m;
@@ -210,7 +211,7 @@ public:
                 qb.voltageSources.push_back(x);
                 break;
             }
-            case 'I': single("a current source"); qb.currentSources.push_back(b.currentSources[i]); break;
+            case 'I': { auto x = b.currentSources[i]; x.m = m; qb.currentSources.push_back(x); break; }
             case 'D': {
                 auto x = b.diodes[i];
                 if (x.heat && m != 1.0) single("a self-heating diode");
@@ -227,8 +228,14 @@ public:
                 qb.osdiDevices.push_back(x);
                 break;
             }
-            case 'Q': single("a BJT"); qb.bjts.push_back(b.bjts[i]); break;
-            case 'J': single("a JFET"); qb.jfets.push_back(b.jfets[i]); break;
+            case 'Q': {  // quasi-saturation (RCO, VO, GAMMA, QCO) does not scale with AREA
+                auto x = b.bjts[i];
+                if (x.card.rco > 0.0 && m != 1.0) single("a quasi-saturation BJT (RCO)");
+                x.area *= m; x.m *= m; x.rep *= m;
+                qb.bjts.push_back(x);
+                break;
+            }
+            case 'J': { auto x = b.jfets[i]; x.area *= m; x.m *= m; x.rep *= m; qb.jfets.push_back(x); break; }
             case 'S': single("a switch"); qb.switches.push_back(b.switches[i]); break;
             case 'E': single("an E source"); qb.voltageControlledVoltageSources.push_back(b.voltageControlledVoltageSources[i]); break;
             case 'G': single("a G source"); qb.voltageControlledCurrentSources.push_back(b.voltageControlledCurrentSources[i]); break;
@@ -272,8 +279,9 @@ public:
         for (const auto& [n, v] : nl_.nodeSets) if (n > 0) sets[nodeOf(classOf(p.ctx[0], n))] = v;
         for (const auto& c : p.ctx) {
             const auto sd = nl_.hier.seeds.find(c.def);
-            if (c.def.empty() || sd == nl_.hier.seeds.end()) continue;
-            for (const auto& s : sd->second) (s.nodeset ? sets : ics)[nodeOf(classOf(c, s.node))] = s.value;
+            if (!c.def.empty() && sd != nl_.hier.seeds.end())
+                for (const auto& s : sd->second) (s.nodeset ? sets : ics)[nodeOf(classOf(c, s.node))] = s.value;
+            for (const auto& s : c.own) (s.nodeset ? sets : ics)[nodeOf(classOf(c, s.node))] = s.value;  // by path: it wins
         }
         q.nl.nodeICs.assign(ics.begin(), ics.end());
         q.nl.nodeSets.assign(sets.begin(), sets.end());
@@ -307,8 +315,8 @@ private:
             if (!s.ctrlName.empty()) throw std::runtime_error(where + ": W switches are not supported unflattened yet");
         // R, C, L, V, I are equal by value, every field (the build fails when one gains a field: keep this whole);
         // the rest by identity, the same element of the same definition
-        static_assert(fields<Resistor>() == 16 && fields<Capacitor>() == 17 && fields<Inductor>() == 12 &&
-                          fields<VoltageSource>() == 27 && fields<CurrentSource>() == 26,
+        static_assert(fields<Resistor>() == 16 && fields<Capacitor>() == 17 && fields<Inductor>() == 13 &&
+                          fields<VoltageSource>() == 27 && fields<CurrentSource>() == 27,
                       "an R/C/L/V/I struct gained or lost a field: update its descriptor in hier_partition.h (and the count here)");
         auto source = [&](char kind, double dc, const std::string& type, double acm, double acp, const double* pulse,
                           const double* sine, const std::vector<double>& pt, const std::vector<double>& pv, double ptd, double pr,
@@ -336,7 +344,7 @@ private:
             } else if (kind == 'L') {
                 const auto& l = b.inductors[i];
                 id = color({2, 'L', strId(l.model_name), strId(l.expression), bits(l.inductance_henries), bits(l.width_m),
-                            bits(l.length_m), bits(l.area_m2), l.turns, l.icGiven, bits(l.ic_A)});
+                            bits(l.length_m), bits(l.area_m2), l.turns, l.icGiven, bits(l.ic_A), bits(l.m)});
             } else if (kind == 'V') {
                 const auto& v = b.voltageSources[i];
                 const double pulse[7] = {v.pulse_v1, v.pulse_v2, v.pulse_td, v.pulse_tr, v.pulse_tf, v.pulse_pw, v.pulse_per};
@@ -348,7 +356,7 @@ private:
                 const double pulse[7] = {v.pulse_v1, v.pulse_v2, v.pulse_td, v.pulse_tr, v.pulse_tf, v.pulse_pw, v.pulse_per};
                 const double sine[6] = {v.sine_vo, v.sine_va, v.sine_freq, v.sine_td, v.sine_theta, v.sine_phase};
                 id = source('I', v.current_A, v.type, v.ac_mag, v.ac_phase, pulse, sine, v.pwl_t, v.pwl_v, v.pwl_td, v.pwl_r, v.wf,
-                            v.expression, 1.0);
+                            v.expression, v.m);
             } else {
                 id = color({1, kind, d, (long long)i});
             }
@@ -376,12 +384,20 @@ private:
     // colors are what a parent's net sees of this child), so a child contributes to its parent's nets by the refined
     // color of the pin there: interchangeable pins (a row's bit lines) stay one class; the quotient joins each pin
     // with its parent's net.
-    struct Ref { std::string def; std::vector<int> pins, net, elem, child; };  // child: refs_ indices
+    // A path seed (hier.pathSeeds) travels down its instances: a context is (definition, pin colors, the seeds
+    // below it), so only the seeded instance's chain is its own.
+    struct Ref { std::string def; std::vector<int> pins, net, elem, child; std::vector<Hierarchy::Seed> own; };  // child: refs_
     std::vector<Ref> refs_;
-    std::map<std::pair<std::string, std::vector<int>>, int> memo_;
+    std::map<std::pair<std::string, Key>, int> memo_;
 
-    int refineCtx(const std::string& def, const std::vector<int>& pins) {
-        const auto key = std::make_pair(def, pins);
+    int refineCtx(const std::string& def, const std::vector<int>& pins, const std::vector<Hierarchy::PathSeed>& sub) {
+        Key who(pins.begin(), pins.end());
+        for (const auto& ps : sub) {
+            who.insert(who.end(), {-1, (long long)ps.path.size()});
+            who.insert(who.end(), ps.path.begin(), ps.path.end());
+            who.insert(who.end(), {ps.seed.node, bits(ps.seed.value), ps.seed.nodeset});
+        }
+        const auto key = std::make_pair(def, who);
         if (auto it = memo_.find(key); it != memo_.end()) return it->second;
         static const std::vector<HierInstance> none;
         static const std::vector<Hierarchy::Seed> noSeeds;
@@ -400,8 +416,16 @@ private:
         std::vector<int> col(N + 1);
         col[0] = color({3, 0});
         for (int n = 1; n <= N; ++n) col[n] = n <= (int)pins.size() ? pins[n - 1] : color({3, 1});
-        for (const auto& sd : seeds)
-            if (sd.node >= 1 && sd.node <= N) col[sd.node] = color({4, col[sd.node], bits(sd.value), sd.nodeset});
+        std::vector<Hierarchy::Seed> own;
+        std::vector<std::vector<Hierarchy::PathSeed>> below(kids.size());
+        for (const auto& ps : sub) {
+            if (ps.path.empty()) { own.push_back(ps.seed); continue; }
+            if (ps.path[0] < 0 || ps.path[0] >= (int)kids.size()) throw std::runtime_error("an .ic path outside the hierarchy (internal error)");
+            below[ps.path[0]].push_back({{ps.path.begin() + 1, ps.path.end()}, ps.seed});
+        }
+        for (const auto* ss : {&seeds, &std::as_const(own)})  // the body's, then this instance's own (it wins)
+            for (const auto& sd : *ss)
+                if (sd.node >= 1 && sd.node <= N) col[sd.node] = color({4, col[sd.node], bits(sd.value), sd.nodeset});
         std::vector<std::vector<std::pair<int, int>>> inc(N + 1);  // per node: (element, terminal) or (els + child, pin)
         for (size_t e = 0; e < els.size(); ++e)
             for (size_t t = 0; t < els[e].t.size(); ++t)
@@ -419,7 +443,7 @@ private:
                 for (int t : els[e].t) k.push_back(t >= 0 && t <= N ? col[t] : -1);
                 part[e] = color(k);
             }
-            for (size_t x = 0; x < kids.size(); ++x) childRef[x] = refineCtx(kids[x].def, pinsOf(kids[x], col));
+            for (size_t x = 0; x < kids.size(); ++x) childRef[x] = refineCtx(kids[x].def, pinsOf(kids[x], col), below[x]);
             std::vector<int> next(N + 1);
             next[0] = col[0];
             for (int n = 1; n <= N; ++n) {
@@ -443,22 +467,23 @@ private:
         }
         // A stable local partition's color ids still carry only as many rounds of history as this context needed, so
         // a net two rounds from a differing pin could share its id with another context's: final colors name the
-        // context (its definition and pin colors), so equal colors are one context's one class.
+        // context (its definition, pin colors and seeds below it), so equal colors are one context's one class.
         Key ck{8, strId(def)};
-        ck.insert(ck.end(), pins.begin(), pins.end());
+        ck.insert(ck.end(), who.begin(), who.end());
         const int self = color(ck);
         for (int n = 1; n <= N; ++n) col[n] = color({9, self, col[n]});
         Ref r;
         r.def = def;
         r.pins = pins;
         r.net = col;
+        r.own = own;
         r.elem.resize(els.size());
         for (size_t e = 0; e < els.size(); ++e) {  // the final classes: element and its terminals' colors
             Key k{6, els[e].id};
             for (int t : els[e].t) k.push_back(t >= 0 && t <= N ? col[t] : -1);
             r.elem[e] = color(k);
         }
-        for (size_t x = 0; x < kids.size(); ++x) r.child.push_back(refineCtx(kids[x].def, pinsOf(kids[x], col)));  // final colors
+        for (size_t x = 0; x < kids.size(); ++x) r.child.push_back(refineCtx(kids[x].def, pinsOf(kids[x], col), below[x]));  // final
         const int id = (int)refs_.size();
         memo_[key] = id;
         refs_.push_back(std::move(r));

@@ -28,7 +28,7 @@ TensorizedBlock tensorizeNetlist(const TensorNetlist& netlist) {
         for (const auto& v : block.voltageSources)
             result.voltageSources.push(remap(v.nodePositive), remap(v.nodeNegative), v.voltage_V);
         for (const auto& i : block.currentSources)
-            result.currentSources.push(remap(i.nodePositive), remap(i.nodeNegative), i.current_A);
+            result.currentSources.push(remap(i.nodePositive), remap(i.nodeNegative), i.m * i.current_A);
     };
     collect(netlist.globalBlock, [](int n) { return n; });
     for (const auto& inst : netlist.instances) {

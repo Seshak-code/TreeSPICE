@@ -199,16 +199,42 @@ static std::string toQuotient(SPICEParseResult& out) {
     hierpart::Quotient q;
     try { q = hierpart::quotient(out.netlist, &part); }
     catch (const std::exception& e) { return std::string("hierarchical solve (.options hier): ") + e.what(); }
-    for (const auto& c : part.ctx) {  // undriven, unseeded nets of one instance that symmetry makes equal
+    // A bistable pair symmetry would hold at its metastable point: unseeded, undriven nets of one instance in one class
+    // that one element or child instance couples through terminals of different roles (two identical inverters'
+    // q / qb, in at one and out at the other); nets a row meets at interchangeable pins (bit lines) are fine
+    for (const auto& c : part.ctx) {
         if (c.def.empty()) continue;
         const auto& blk = out.netlist.blockDefinitions.at(c.def);
         std::set<int> fixed;
         for (const auto& v : blk.voltageSources) { fixed.insert(v.nodePositive); fixed.insert(v.nodeNegative); }
         if (const auto sd = out.netlist.hier.seeds.find(c.def); sd != out.netlist.hier.seeds.end())
             for (const auto& sv : sd->second) fixed.insert(sv.node);
+        for (const auto& sv : c.own) fixed.insert(sv.node);
+        auto free = [&](int n) { return n > (int)blk.pinNames.size() && n < (int)c.net.size() && !fixed.count(n); };
+        std::set<int> coupled;  // classes two of whose nets one element or child touches in different roles
+        auto touch = [&](const std::vector<int>& t, const std::vector<int>& role) {
+            std::map<int, std::pair<int, int>> seen;  // color -> its first (net, role) here
+            for (size_t k = 0; k < t.size(); ++k)
+                if (free(t[k]))
+                    if (const auto [it, isNew] = seen.emplace(c.net[t[k]], std::make_pair(t[k], role[k]));
+                        !isNew && it->second.first != t[k] && it->second.second != role[k])
+                        coupled.insert(c.net[t[k]]);
+        };
+        hierpart::forEachElement(blk, [&](char, size_t, const std::vector<const int*>& t) {
+            std::vector<int> v, role;  // an element's role: its terminal
+            for (const int* n : t) { role.push_back((int)v.size()); v.push_back(*n); }
+            touch(v, role);
+        });
+        if (const auto kids = out.netlist.hier.children.find(c.def); kids != out.netlist.hier.children.end())
+            for (size_t x = 0; x < kids->second.size(); ++x) {  // a child's role: its pin's refined color there
+                const auto& k = part.ctx[c.child[x]];
+                std::vector<int> role;
+                for (size_t p = 0; p < kids->second[x].ports.size(); ++p) role.push_back(k.net[p + 1]);
+                touch(kids->second[x].ports, role);
+            }
         std::map<int, std::vector<std::string>> same;
         for (const auto& [name, local] : out.netlist.hier.nodeNames[c.def])
-            if (local > (int)blk.pinNames.size() && local < (int)c.net.size() && !fixed.count(local)) same[c.net[local]].push_back(name);
+            if (free(local) && coupled.count(c.net[local])) same[c.net[local]].push_back(name);
         for (const auto& [col, names] : same)
             if (names.size() > 1) {
                 std::cerr << "Warning: .options hier: nets";
@@ -237,6 +263,11 @@ static std::string toQuotient(SPICEParseResult& out) {
                 if (comma != std::string::npos) named(args.substr(comma + 1));
             }
         }
+    auto top = [&](int& n) {  // a top-level node an analysis names -> its class's node (ground: 0)
+        const auto it = n > 0 && n < (int)part.ctx[0].net.size() ? q.node.find(part.ctx[0].net[n]) : q.node.end();
+        n = it == q.node.end() ? 0 : it->second;
+    };
+    top(out.noiseOut); top(out.noiseRef); top(out.tfOut); top(out.tfRef);
     out.netlist = std::move(q.nl);
     out.nodeIndex = std::move(idx);
     out.sourceIndex = std::move(q.vsource);
@@ -251,6 +282,13 @@ static std::string hierShared(const SPICEParseResult& p, const std::string& name
     const auto it = p.elementCount.find(name);
     if (it != p.elementCount.end() && it->second == 1.0) return "";
     return name + " stands for identical elements on the hierarchical path (.options hier): it cannot be swept or varied alone";
+}
+
+// S3: a node an analysis measures alone (noise, .tf output) must be its class's only net on the hierarchical path
+static std::string hierNet(const SPICEParseResult& p, int node, const std::string& what) {
+    if (!p.hierarchical || node <= 0 || node > (int)p.netlist.classSize.size() || p.netlist.classSize[node - 1] == 1.0) return "";
+    return what + " stands for " + std::to_string((long long)p.netlist.classSize[node - 1]) +
+           " identical nets on the hierarchical path (.options hier): one of them alone needs the flat netlist";
 }
 
 // The request's netlist at circuit temperature tempC (NaN: the netlist's), with the values of this .step run applied.
@@ -289,7 +327,7 @@ static bool deserialiseRequest(const SimulationRequestDTO& req, SPICEParseResult
         failure.errorDetail = e;
         return false;
     }
-    if (out.hierarchical && !hierOk) {  // S3: .op, .dc and .tran so far
+    if (out.hierarchical && !hierOk) {  // S3: .op, .dc, .tran, .ac, .noise and .tf so far
         failure.errorDetail = "this analysis on the hierarchical path (.options hier) is not supported yet";
         return false;
     }
@@ -614,7 +652,7 @@ SimulationResponseDTO SessionImpl::dispatch_ac_internal(const SimulationRequestD
                                                           const EngineCallbacks& cb) {
     SPICEParseResult parsed;
     SimulationResponseDTO r;
-    if (!deserialiseRequest(req, parsed, r, false, true)) return r;
+    if (!deserialiseRequest(req, parsed, r, false, true, false, true)) return r;
     if (!parsed.steps.empty() && req.stepValues.empty())
         return runSteps(req, parsed.steps, [&](const SimulationRequestDTO& q) { return dispatch_ac_internal(q, cb); });
     TensorNetlist& netlist = parsed.netlist;
@@ -798,14 +836,20 @@ SimulationResponseDTO SessionImpl::runNoise(const SimulationRequestDTO& req,
     r.jobId        = jobId_;
     r.analysisType = AnalysisTypeDTO::NOISE;
     SPICEParseResult parsed;
-    if (deserialiseRequest(req, parsed, r)) {
+    if (deserialiseRequest(req, parsed, r, false, false, false, true)) {
         TensorNetlist& netlist = parsed.netlist;
         const auto freqs = CircuitSim::acFrequencies(parsed.noiseSweep, parsed.noisePoints,
                                                      parsed.noiseStart, parsed.noiseStop, true);
         CircuitSim sim;
         sim.execMode = selectExecMode(precision_);
+        std::string shared;
+        for (const auto& e : {hierNet(parsed, parsed.noiseOut, "the noise output"), hierNet(parsed, parsed.noiseRef, "the noise reference"),
+                              hierShared(parsed, parsed.noiseSource)})
+            if (shared.empty()) shared = e;
         if (parsed.noiseSource.empty() || freqs.empty())
             r.errorDetail = "Noise needs .noise v(out[,ref]) src dec|oct|lin n fstart fstop.";
+        else if (!shared.empty())
+            r.errorDetail = shared;
         else if (SolverStep dc = sim.solveDC(netlist); !dc.stats.converged)
             r.errorDetail = "DC operating point failed before noise analysis: " + dc.stats.error_detail;
         else {
@@ -906,11 +950,18 @@ SimulationResponseDTO SessionImpl::runTF(const SimulationRequestDTO& req,
     r.jobId        = jobId_;
     r.analysisType = AnalysisTypeDTO::TRANSFER_FUNCTION;
     SPICEParseResult parsed;
-    if (deserialiseRequest(req, parsed, r)) {
+    if (deserialiseRequest(req, parsed, r, false, false, false, true)) {
         CircuitSim sim;
         sim.execMode = selectExecMode(precision_);
+        std::string shared;
+        for (const auto& e : {hierNet(parsed, parsed.tfOut, "the .tf output"), hierNet(parsed, parsed.tfRef, "the .tf reference"),
+                              hierShared(parsed, parsed.tfSource),
+                              parsed.tfOutSource.empty() ? std::string() : hierShared(parsed, parsed.tfOutSource)})
+            if (shared.empty()) shared = e;
         if (!parsed.hasTF)
             r.errorDetail = "Transfer function needs .tf v(out[,ref]) src or .tf i(vsrc) src.";
+        else if (!shared.empty())
+            r.errorDetail = shared;
         else if (SolverStep dc = sim.solveDC(parsed.netlist); !dc.stats.converged)
             r.errorDetail = "DC operating point failed before transfer function analysis: " + dc.stats.error_detail;
         else {

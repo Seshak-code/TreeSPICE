@@ -968,14 +968,41 @@ int main() {
                           " reports the flat run's saved vectors (" + std::to_string(f.waveformPoints.size()) + " points, worst " +
                           [&] { char b2[32]; std::snprintf(b2, 32, "%.3g", w); return std::string(b2); }() + ")" + (h.converged ? "" : ": " + h.errorDetail));
             }
-            {   // refused on the hierarchical path: AC (not yet), sweeping a source its class shares (vbl1 = vbl2)
-                std::string acNet = hierNet;
-                acNet.replace(acNet.rfind(".tran"), std::string::npos, ".ac lin 1 1k 1k\n.end\n");
+            {   // S3.3: an .ic by path holds one instance's cell (only its chain splits from its class); an unknown path is an error
+                const std::string ic = ".ic v(xb2.xr1.xc2.q)=0 v(xb2.xr1.xc2.qb)=1.8\n";
+                std::string fi = flatNet, hi = hierNet;
+                fi.insert(fi.rfind(".tran"), ic);
+                hi.insert(hi.rfind(".tran"), ic);
+                const auto f = session(fi, true), h = session(hi, true);
+                const auto col = [](const SimulationResponseDTO& r, const std::string& n) {
+                    return (size_t)(std::find(r.nodeNames.begin(), r.nodeNames.end(), n) - r.nodeNames.begin());
+                };
+                bool same = f.converged && h.converged && f.waveformPoints.size() == h.waveformPoints.size() && !f.waveformPoints.empty();
+                double w = 0.0;
+                for (const auto& n : f.nodeNames) {
+                    const size_t a = col(f, n), b = col(h, n);
+                    same = same && b < h.nodeNames.size();
+                    for (size_t k = 0; same && k < f.waveformPoints.size(); ++k)
+                        w = std::max(w, std::abs(f.waveformPoints[k].nodeVoltages[a] - h.waveformPoints[k].nodeVoltages[b]));
+                }
+                const size_t qb = col(h, "xb2.xr1.xc2.qb");
+                const bool held = same && qb < h.nodeNames.size() && h.waveformPoints.front().nodeVoltages[qb] > 1.7;
+                std::string bad = hierNet;
+                bad.insert(bad.rfind(".tran"), ".ic v(xb2.xr9.q)=0\n");
+                const auto u = session(bad, true);
+                check(same && held && w < 1e-9 && !u.converged && u.errorDetail.find("names unknown node 'XB2.XR9.Q'") != std::string::npos,
+                      "S3.3: an .ic by path sets one instance's cell on the hierarchical path as flat (worst " +
+                          [&] { char b2[32]; std::snprintf(b2, 32, "%.3g", w); return std::string(b2); }() + " V; " + u.errorDetail + ")");
+            }
+            {   // refused on the hierarchical path: .pz (the quotient lacks the modes symmetry hides), sweeping a source its
+                // class shares (vbl1 = vbl2)
+                std::string pzNet = hierNet;
+                pzNet.replace(pzNet.rfind(".tran"), std::string::npos, ".pz bl0 0 blb0 0 vol pz\n.end\n");
                 auto engine = ISimulationEngine::create();
                 SimulationRequestDTO q;
-                q.source.payload = acNet;
+                q.source.payload = pzNet;
                 EngineCallbacks c;
-                const auto ra = engine->createSession()->runAC(q, c);
+                const auto ra = engine->createSession()->runPoleZero(q, c);
                 std::string dcNet = hierNet;
                 dcNet.replace(dcNet.rfind(".tran"), std::string::npos, ".dc VBL1 0 1.8 0.9\n.end\n");
                 q.source.payload = dcNet;
@@ -986,9 +1013,88 @@ int main() {
                 const auto ro = engine->createSession()->runDC(q, c);
                 check(!ra.converged && ra.errorDetail.find("hierarchical path") != std::string::npos && !rd.converged &&
                           rd.errorDetail.find("stands for identical") != std::string::npos && ro.converged && ro.waveformPoints.size() == 3,
-                      "S3.2 session: AC and a shared source's sweep are refused, a unique source's .dc runs (" + ra.errorDetail + " | " +
+                      "S3.2 session: .pz and a shared source's sweep are refused, a unique source's .dc runs (" + ra.errorDetail + " | " +
                           rd.errorDetail + ")");
             }
+        }
+        {   // S3.3: .op, .ac, .noise and .tf on the quotient. Four identical BJT/JFET stages (classes of four I, L, Q and J,
+            // whose multipliers carry the count) are summed into one node; every result equals the flat run's. Noise there
+            // is each member's power (the class's multiplier) through each member's transfer (the adjoint times the
+            // row's 1/class size). A stage's own output (a class of four nets) cannot be measured alone.
+            const std::string amp = "* s3.3\n.subckt stage in out vcc\nQ1 c in e qn\nRC vcc c 5k\nRE e e2 500\nL1 e2 0 1u\nIB vcc c 10u\n"
+                                    "J1 vcc c out jn\nRS out 0 2k\nC1 out 0 1p\n.ends\n"
+                                    ".model qn npn bf=100 is=1e-15 rb=100 cje=1p cjc=0.5p tf=1n kf=1e-16\n"
+                                    ".model jn njf vto=-2 beta=1e-3 lambda=0.01 cgs=1p cgd=1p kf=1e-17\n"
+                                    "VCC vcc 0 5\nVIN in 0 DC 0.7 AC 1\nX1 in o1 vcc stage\nX2 in o2 vcc stage\nX3 in o3 vcc stage\n"
+                                    "X4 in o4 vcc stage\nR1 o1 sum 10k\nR2 o2 sum 10k\nR3 o3 sum 10k\nR4 o4 sum 10k\nRL sum 0 10k\n"
+                                    ".save v(sum) v(o2) v(x3.c) v(x1.e2) i(vcc)\n";
+            auto run = [&](bool hier, const std::string& card, int kind) {  // 0 .op, 1 .ac, 2 .noise, 3 .tf
+                auto engine = ISimulationEngine::create();
+                SimulationRequestDTO q;
+                q.source.payload = amp + (hier ? ".options hier\n" : "") + card + "\n.end\n";
+                EngineCallbacks c;
+                auto s = engine->createSession();
+                return kind == 0 ? s->runDC(q, c) : kind == 1 ? s->runAC(q, c) : kind == 2 ? s->runNoise(q, c) : s->runTF(q, c);
+            };
+            auto rel = [](double a, double b) { return std::abs(a - b) / std::max(std::abs(a) + std::abs(b), 1e-300); };
+            double worst = 0.0;
+            bool ok = true;
+            for (int kind : {0, 1}) {  // the saved vectors, by name (real and imaginary)
+                const char* card = kind == 0 ? ".op" : ".ac dec 2 1k 1g";
+                const auto f = run(false, card, kind), h = run(true, card, kind);
+                ok = ok && f.converged && h.converged && f.waveformPoints.size() == h.waveformPoints.size() && f.nodeNames.size() == 4;
+                for (size_t n = 0; ok && n < f.nodeNames.size(); ++n) {
+                    const auto it = std::find(h.nodeNames.begin(), h.nodeNames.end(), f.nodeNames[n]);
+                    ok = it != h.nodeNames.end();
+                    const size_t hn = it - h.nodeNames.begin();
+                    for (size_t k = 0; ok && k < f.waveformPoints.size(); ++k) {
+                        const auto &a = f.waveformPoints[k], &b = h.waveformPoints[k];
+                        worst = std::max(worst, rel(a.nodeVoltages[n], b.nodeVoltages[hn]));
+                        if (kind == 1) worst = std::max(worst, rel(a.nodeVoltagesImag[n], b.nodeVoltagesImag[hn]));
+                    }
+                }
+                for (size_t k = 0; ok && k < f.waveformPoints.size(); ++k)
+                    worst = std::max(worst, rel(f.waveformPoints[k].branchCurrents.at(0), h.waveformPoints[k].branchCurrents.at(0)));
+            }
+            const auto fn = run(false, ".noise v(sum) vin dec 2 1k 1g", 2), hn = run(true, ".noise v(sum) vin dec 2 1k 1g", 2);
+            ok = ok && fn.converged && hn.converged && fn.extended.noise.onoise.size() == hn.extended.noise.onoise.size();
+            for (size_t k = 0; ok && k < fn.extended.noise.onoise.size(); ++k)
+                worst = std::max({worst, rel(fn.extended.noise.onoise[k], hn.extended.noise.onoise[k]),
+                                  rel(fn.extended.noise.inoise[k], hn.extended.noise.inoise[k])});
+            if (ok) worst = std::max({worst, rel(fn.extended.noise.onoiseTotal, hn.extended.noise.onoiseTotal),
+                                      rel(fn.extended.noise.inoiseTotal, hn.extended.noise.inoiseTotal)});
+            const auto ft = run(false, ".tf v(sum) vin", 3), ht = run(true, ".tf v(sum) vin", 3);
+            ok = ok && ft.converged && ht.converged && ft.extended.dcTf.values.size() == 3 && ht.extended.dcTf.names == ft.extended.dcTf.names;
+            for (size_t k = 0; ok && k < 3; ++k) worst = std::max(worst, rel(ft.extended.dcTf.values[k], ht.extended.dcTf.values[k]));
+            const auto refused = run(true, ".noise v(o1) vin dec 2 1k 1g", 2);
+            char msg[160];
+            std::snprintf(msg, sizeof msg, "S3.3: .op, .ac, .noise and .tf on the quotient equal flat (worst relative %.2g); a shared "
+                          "noise output is refused", worst);
+            check(ok && worst < 1e-9 && !refused.converged && refused.errorDetail.find("stands for 4 identical nets") != std::string::npos,
+                  std::string(msg) + " (" + fn.errorDetail + hn.errorDetail + ft.errorDetail + ht.errorDetail + " | " + refused.errorDetail + ")");
+        }
+        {   // S3.3: the metastable warning names a latch's q / qb (two identical inverters couple them in different roles),
+            // not nets driven alike (a resistor-driven bus that one instance meets at interchangeable pins)
+            auto warned = [&](const std::string& net) {
+                std::ostringstream err;
+                auto* old = std::cerr.rdbuf(err.rdbuf());
+                auto engine = ISimulationEngine::create();
+                SimulationRequestDTO q;
+                q.source.payload = net;
+                EngineCallbacks c;
+                engine->createSession()->runDC(q, c);
+                std::cerr.rdbuf(old);
+                return err.str();
+            };
+            const std::string inv = ".subckt inv in out vdd\nM1 out in 0 0 nm W=1u L=0.18u\nM2 out in vdd vdd pm W=1u L=0.18u\n.ends\n"
+                                    ".model nm nmos level=1 vto=0.5 kp=200u\n.model pm pmos level=1 vto=-0.5 kp=80u\nVDD vdd 0 1.8\n";
+            const auto latch = warned("* latch\n" + inv + ".subckt latch vdd\nX1 q qb vdd inv\nX2 qb q vdd inv\n.ends\nXL1 vdd latch\n"
+                                      "XL2 vdd latch\n.options hier\n.op\n.end\n");
+            const auto bus = warned("* bus\n" + inv + ".subckt pair a b vdd\nX1 a oa vdd inv\nX2 b ob vdd inv\n.ends\n"
+                                    ".subckt top vdd\nXP b0 b1 vdd pair\nVB p 0 1\nR0 p b0 1k\nR1 p b1 1k\n.ends\nXT vdd top\n.options hier\n.op\n.end\n");
+            check(latch.find("nets Q QB of LATCH are equal by symmetry") != std::string::npos && bus.find("equal by symmetry") == std::string::npos,
+                  "S3.3: the metastable warning names a latch's coupled pair, not a bus driven alike (" + latch.substr(0, latch.find('\n')) +
+                      " | " + bus.substr(0, bus.find('\n')) + ")");
         }
         {   // .save narrows what a run stores to the vectors .save, .print and .meas name (ngspice saves only those);
             // .save all, or none, keeps every node and branch

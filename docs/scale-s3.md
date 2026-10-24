@@ -1,7 +1,7 @@
 # S3: simulating 1e9-cell arrays (design, for review)
 
-Status: S3.0–S3.2 landed (2026-10-24, `.options hier`: `.op`, `.dc`, `.tran`); S3.3 open. S1 (memory per device,
-PR #21) is the base. Results at the end.
+Status: S3.0–S3.3 landed (2026-10-24, `.options hier`: `.op`, `.dc`, `.tran`, `.ac`, `.noise`, `.tf`). S1 (memory
+per device, PR #21) is the base. Results and what stays refused at the end.
 
 ## Goal and gate
 
@@ -119,19 +119,41 @@ Each stage lands with the full matrix (ctest, run_diff, Xyce, cli_check) and its
    driver code that walk `instances` move to that view. That's no change in behaviour, but it touches
    `compute/orchestration`.
 
-## Results (S3.0–S3.2, M4 Pro)
+## Results (S3.0–S3.3, M4 Pro)
 
 Gate netlist: `bench/s3_sram.py` (6T cells with a body `.ic`, a write then a read of one word, `.tran 0.02n 3.2n`).
 
 | Cells | Path | Unknowns | Wall | Peak RSS | vs flat |
 |---|---|---|---|---|---|
-| 64 | hier | 36 | 0.09 s | 5 MB | worst 1e-15 V, same 269 steps |
+| 64 | hier | 36 | 0.01 s | 5 MB | worst 1e-15 V, same 269 steps |
 | 8 192 | flat | 17 410 | 19.3 s | 149 MB | |
 | 8 192 | hier | 36 | 0.03 s | 8.7 MB | worst 4e-17 V, same 268 steps |
-| 1 048 576 | hier | 26 | 1.2 s | 289 MB | |
-| 1 049 601 000 | hier | 36 | 2.2 s | 498 MB | |
+| 1 048 576 | hier | 26 | 1.2 s | 194 MB | |
+| 1 049 601 000 | hier | 36 | 2.2 s | 328 MB | |
 
 The written cell flips 1.8 → 0 V and holds through the read; unwritten columns and idle banks hold 1.8 V. At 1e9
-the peak is the parser's (27 MB of text, about 18× in line copies): the hierarchy itself is 0.2 MB, the partition
-0.2 s. Not yet unflattened: B/E/G expressions, F/H, K, W, XSPICE and `.global` inside a subcircuit (refused), I, L,
-Q, J classes of more than one member, an `.ic` on a hierarchical path, AC/noise/sens/tf/pz (S3.3).
+the peak is the parser's: 27 MB of text, 85 MB live after the parse (the bank bodies' 2050-port X cards, twice),
+the rest its working copies. The partition takes 0.26 s.
+
+**S3.3 (as built):**
+- **AC:** the stimulus is the same for every member, so the small-signal solution is class-constant too. The
+  reactive, delayed and f(w) entries, the AC= correction and the excitation take the same per-net row scale as G.
+- **Noise:** each class element's PSD is already its members' sum (its multiplier); the transfer from a current
+  into node g is its adjoint entry times g's row scale. Exact when the output (and reference) is a class of one
+  net. An output in a larger class is refused: one net of it alone is not class-constant.
+- **.tf:** the same rule for the output; the input and an i(vsrc) output must be single-member sources.
+- **Classes:** I (current × m at every stamp), L (KCL coupling m, as V), BJT and JFET (AREA and M × m, and a `rep`
+  that scales their junction GMIN as for MOS and diodes). A multi-member BJT with RCO is refused (quasi-saturation
+  does not scale with AREA).
+- **.ic / .nodeset by path** (`x1.x2.n`): the seed travels down its instances in the context key, so only that chain
+  becomes its own contexts. A pin or unknown path is an error, as flat.
+- **Metastable warning:** a class of one instance's unseeded, undriven nets that one element or child touches in
+  different roles (two identical inverters' q / qb). Nets driven alike (bit lines) no longer warn.
+- **Tests:** test_engine_fixes S3.3 (four BJT/JFET stages: `.op`, `.ac`, `.noise`, `.tf` within 5e-11 relative of
+  flat; path `.ic`; the warning). Removing the noise row scale fails the test (0.26).
+
+**Refused on the hierarchical path** (an explicit error, never a silent answer): `.pz` (the quotient lacks the
+antisymmetric modes the full determinant has), `.sens`, sweeps and Monte Carlo of a shared element, `.step` where the
+analysis lacks it flat; B/E/G expressions, F/H, K, W, XSPICE and `.global` inside a subcircuit; multi-member S, T,
+LTRA, E/G, parasitic R/C and self-heating diodes. Not done: an automatic choice of the hierarchical path (it changes
+what a run without `.save` stores, so it stays the user's switch).

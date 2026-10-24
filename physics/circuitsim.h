@@ -335,7 +335,7 @@ public:
          double v_diff = 0.0;
          if (i.nodePositive > 0 && i.nodePositive <= (int)current_voltages.size()) v_diff += current_voltages[i.nodePositive-1];
          if (i.nodeNegative > 0 && i.nodeNegative <= (int)current_voltages.size()) v_diff -= current_voltages[i.nodeNegative-1];
-         power_in += std::abs(i.current_A * v_diff);
+         power_in += std::abs(i.m * i.current_A * v_diff);
     }
     // Voltage Sources: estimate power as |V| * sum of cap-branch currents at the
     // VS node (using the previous step's stored hist.i).  This prevents the
@@ -1684,7 +1684,7 @@ public:
       const auto flux = fluxLinks(blk);
       for (size_t a = 0; a < L.size(); ++a) {
         const int b = sl.ind + (int)a;
-        branch(b, node(L[a].nodeCoil1), node(L[a].nodeCoil2));  // DC: v1 - v2 = 0 (short)
+        branch(b, node(L[a].nodeCoil1), node(L[a].nodeCoil2), L[a].m);  // DC: v1 - v2 = 0 (short)
         if (!tran) continue;
         for (auto [j, Laj] : flux[a]) {
           add(b, sl.ind + j, -coef * Laj);
@@ -1975,7 +1975,7 @@ public:
     // 2.5. Current Sources (Ideal Current Injection)
     // Current sources inject fixed current regardless of voltage
     for (const auto &cs : netlist.globalBlock.currentSources) {
-      double is = sourceValue(cs, cs.current_A, h, time);
+      double is = cs.m * sourceValue(cs, cs.current_A, h, time);
       // Current flows from + to - inside source, leaves + externally
       addRes(cs.nodePositive, -is); // Current leaving + node
       addRes(cs.nodeNegative, is);  // Current entering - node
@@ -2089,7 +2089,7 @@ public:
 
         // Current sources inside the subcircuit (V sources are branch elements)
         for (const auto &cs : block.currentSources) {
-          double is = sourceValue(cs, cs.current_A, h, time);
+          double is = cs.m * sourceValue(cs, cs.current_A, h, time);
           addRes(mapNode(cs.nodePositive), -is);
           addRes(mapNode(cs.nodeNegative), is);
         }
@@ -2261,7 +2261,7 @@ public:
 
     // Current Sources
     for (const auto &cs : netlist.globalBlock.currentSources) {
-      const double is = sourceValue(cs, cs.current_A, 0.0, 0.0);
+      const double is = cs.m * sourceValue(cs, cs.current_A, 0.0, 0.0);
       addRes(cs.nodePositive, -is);
       addRes(cs.nodeNegative, is);
       attributions.push_back({cs.type.empty() ? "I?" : cs.type, "CurrentSource",
@@ -2507,7 +2507,7 @@ public:
             auto refresh = [&](const TensorBlock &blk) {
                 for (const auto &i : blk.currentSources)
                     if (ki < soaBlock.currentSources.currents.size())
-                        soaBlock.currentSources.currents[ki++] = h > 0.0 ? waveformValue(i, i.current_A, time) : tranOpValue(i, i.current_A);
+                        soaBlock.currentSources.currents[ki++] = i.m * (h > 0.0 ? waveformValue(i, i.current_A, time) : tranOpValue(i, i.current_A));
             };
             refresh(netlist.globalBlock);
             for (const auto &inst : netlist.instances) {
@@ -2563,6 +2563,11 @@ public:
       if (!used[n]) matrixBuilder.add(n - 1, n - 1, 1.0);
   }
 
+
+  // S3 quotient: row r's scale to one net's KCL (1 for branch rows and a flat netlist)
+  static double netScale(const TensorNetlist &nl, int r) {
+    return r >= 0 && r < (int)nl.classSize.size() ? 1.0 / nl.classSize[r] : 1.0;
+  }
 
   static std::vector<double> quotientRowScale(const TensorNetlist &nl) {
     std::vector<double> s(nl.classSize.size());

@@ -107,7 +107,7 @@ inline DiodeModel<double> diodeModel(const Diode& d, double gmin = PhysicsConsta
 inline JfetModel<double> jfetModel(const JFET& j, double gmin = PhysicsConstants::JUNCTION_GMIN) {
     const auto& c = j.card;
     JfetModel<double> p;
-    p.gmin = gmin;
+    p.gmin = gmin * j.rep;
     p.type = j.isNChannel ? 1.0 : -1.0;
     p.beta = j.beta * j.area; p.vto = j.Vto; p.lambda = j.lambda; p.b = c.b;
     p.is = c.is * j.area; p.vt = c.n * j.thermalVoltage_V_T_V;
@@ -121,7 +121,7 @@ inline BjtModel<double> bjtModel(const BJT& q, double gmin = PhysicsConstants::J
     const double a = q.area;
     const double vt = q.thermalVoltage_V_T_V, is = q.saturationCurrent_I_S_A;
     BjtModel<double> p;
-    p.gmin = gmin;
+    p.gmin = gmin * q.rep;
     p.type = q.isNPN ? 1.0 : -1.0;
     p.is = is * a; p.bf = q.betaF; p.br = q.betaR;
     p.isbe = c.ibeIbc ? c.ibe * a : p.is; p.isbc = c.ibeIbc ? c.ibc * a : p.is;
