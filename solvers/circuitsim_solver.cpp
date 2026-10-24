@@ -758,7 +758,8 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
   acceptBehav(netlist, x, 0.0);  // XSPICE int starts at out_ic, d_dt from its input
   // OSDI charges at x, zero current
   forEachOsdi(netlist, [&](const OsdiRef &r) {
-    osdiCurrents(r, x, 0.0, nullptr, true);
+    std::vector<double> I(r.n.size());
+    osdiCurrents(r, x, 0.0, I.data(), nullptr, true);
     std::copy(r.in->vHist(0), r.in->vHist(0) + r.n.size(), r.in->vHist(1));
     std::copy(r.in->vHist(0), r.in->vHist(0) + r.n.size(), r.in->vHist(2));
   });
@@ -1233,8 +1234,8 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys) {
   });
   // OSDI devices: the reactive Jacobian dq/dx at the operating point
   forEachOsdi(netlist, [&](const OsdiRef &r) {
-    std::vector<double> C;
-    osdiCurrents(r, lastSolution_, 0.0, nullptr, false, &C);
+    std::vector<double> I(r.n.size()), C;
+    osdiCurrents(r, lastSolution_, 0.0, I.data(), nullptr, false, &C);
     const size_t L = r.n.size();
     for (size_t a = 0; a < L; ++a)
       for (size_t b = 0; b < L; ++b)

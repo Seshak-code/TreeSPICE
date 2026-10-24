@@ -80,6 +80,15 @@ int main(int argc, char** argv) {
         req.transient.stepSizeS = std::atof(argv[3]);
         req.transient.stopTimeS = std::atof(argv[4]);
         EngineCallbacks cb;
+        bool paused = false;  // SCALE_PROBE_PAUSE: hold the run at 90 % of the transient, its state live
+        cb.onTimeStep = [&](double t, double) {
+            const char* p = std::getenv("SCALE_PROBE_PAUSE");
+            if (!p || paused || t < 0.9 * req.transient.stopTimeS) return;
+            paused = true;
+            std::printf("pid %d paused at t = %g\n", (int)getpid(), t);
+            std::fflush(stdout);
+            sleep((unsigned)std::atoi(p));
+        };
         const auto tr = engine->createSession()->runTransient(req, cb, nullptr);
         done = true;
         sampler.join();
