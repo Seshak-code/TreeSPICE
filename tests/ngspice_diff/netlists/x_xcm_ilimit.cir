@@ -1,0 +1,14 @@
+* XSPICE ilimit: the output limited by its supplies and its source / sink currents (different r_out), the supply
+* currents (seen in their sources), and a second ilimit with NULL supplies
+vin in 0 sin(0 3 2meg)
+vp vp 0 DC 2
+vn vn 0 DC -1.5
+a1 in vp vn o lim1
+.model lim1 ilimit(gain=2 r_out_source=50 r_out_sink=20 i_limit_source=20m i_limit_sink=40m v_pwr_range=0.1 i_source_range=1m i_sink_range=2m r_out_domain=0.05)
+rl o 0 100
+a2 in NULL NULL o2 lim2
+.model lim2 ilimit(in_offset=0.2 i_limit_source=5m i_limit_sink=5m)
+rl2 o2 0 1k
+.tran 2n 1u
+.print tran v(o) v(o2) i(vp) i(vn)
+.end

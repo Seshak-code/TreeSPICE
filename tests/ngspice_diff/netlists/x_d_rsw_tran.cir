@@ -1,0 +1,8 @@
+* Diode RSW transient, sidewall without capacitance (ngspice's transient takes the sidewall's capacitance for its
+* charge: the CJSW case is checked in test_engine_fixes)
+VIN 1 0 PULSE(2 -4 10n 1n 1n 60n 120n)
+R1 1 2 1k
+D1 2 0 DR PJ=30u
+.model DR D(IS=1e-14 TT=10n CJO=4p RS=2 JSW=3e-9 NS=1.2 RSW=300)
+.tran 0.2n 200n
+.end

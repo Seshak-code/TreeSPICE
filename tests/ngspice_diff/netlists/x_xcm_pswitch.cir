@@ -1,0 +1,13 @@
+* XSPICE pswitch: log (default) and linear resistance against the control, a falling control (cntl_on < cntl_off),
+* and the control port's own resistance, swept
+vc c 0 DC 0
+rc c c2 1k
+vs s 0 DC 2
+r1 s o1 1k
+a1 %g c2 %gd(o1 0) sw1
+.model sw1 pswitch(cntl_off=0.2 cntl_on=0.8 r_off=1meg r_on=10 r_cntl_in=10k)
+r2 s o2 1k
+a2 c 0 o2 0 sw2
+.model sw2 pswitch(log=false cntl_off=0.8 cntl_on=0.1 r_off=100k r_on=50)
+.dc vc -0.5 1.5 0.01
+.end

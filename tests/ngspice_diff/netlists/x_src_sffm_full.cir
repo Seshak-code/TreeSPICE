@@ -1,0 +1,12 @@
+* SFFM with ngspice 47's full argument list and defaults: TD and both phases; FC, MDI, FM from TSTOP (5/TSTOP,
+* 90 held to FC/FM, 500/TSTOP); an FM of 0 is not given; an SFFM current source
+v1 a 0 sffm(0.5 1 2meg 3 200k 0.3u 45 30)
+r1 a 0 1k
+v2 b 0 sffm(0 1)
+r2 b 0 1k
+v3 c 0 sffm(0.2 0.8 1meg 2 0 0 90)
+r3 c 0 1k
+i4 0 d sffm(0 1m 500k 1.5 50k 0.2u)
+r4 d 0 1k
+.tran 2n 5u
+.end

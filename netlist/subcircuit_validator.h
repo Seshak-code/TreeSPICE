@@ -146,6 +146,7 @@ inline ValidationResult validateSubCircuit(const SubCircuitDefinition& def) {
     for (const auto& d : block.diodes) {
         connectedNodes.insert(d.anode);
         connectedNodes.insert(d.cathode);
+        if (d.thermal > 0) connectedNodes.insert(d.thermal);
         
         if (d.saturationCurrent_I_S_A <= 0.0) {
             result.issues.push_back({

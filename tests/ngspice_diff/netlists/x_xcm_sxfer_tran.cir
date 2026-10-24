@@ -1,0 +1,11 @@
+* XSPICE s_xfer in transient: a first-order low-pass and a second-order one (int_ic) driven by a pulse; at the
+* operating point a strictly proper s_xfer outputs its integrators' initial state, not its DC gain
+VA a 0 PULSE(0 1 1u 10n 10n 20u 40u)
+a1 a o1 lp1
+.model lp1 s_xfer(num_coeff=[1] den_coeff=[1e-6 1])
+a2 a o2 lp2
+.model lp2 s_xfer(num_coeff=[1e10] den_coeff=[1 6e4 1e10] int_ic=[0 2e-11])
+R1 o1 0 1k
+R2 o2 0 1k
+.tran 20n 60u
+.end

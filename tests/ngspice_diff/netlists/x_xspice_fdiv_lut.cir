@@ -1,0 +1,28 @@
+* XSPICE d_fdiv (default, high_cycles above 1, i_count in range and out of it) and d_lut (a 3-input table with a
+* U entry, a short table padded with U), from a counter of d_tff stages
+vc c_a 0 pulse(0 3 1n 0.1n 0.1n 1n 2n)
+vu u_a 0 pwl(0 0 20n 0 20.1n 1.5 22n 1.5 22.1n 3)
+a_adc [c_a u_a] [c u] adc_mod
+.model adc_mod adc_bridge(in_low=1.0 in_high=2.0)
+a_f1 c f1 fd1
+.model fd1 d_fdiv
+a_f2 c f2 fd2
+.model fd2 d_fdiv(div_factor=5 high_cycles=2 i_count=3 rise_delay=0.2n fall_delay=0.3n)
+a_f3 c f3 fd3
+.model fd3 d_fdiv(div_factor=3 high_cycles=1 i_count=9)
+a_t0 one c NULL NULL b0 NULL tf
+a_t1 one b0 NULL NULL b1 NULL tf
+.model tf d_tff(clk_delay=0.1n)
+a_one one pu
+.model pu d_pullup
+a_l1 [b0 b1 f2] l1 lut1
+.model lut1 d_lut(table_values="0110X001" rise_delay=0.2n fall_delay=0.4n)
+a_l2 [b0 u] l2 lut2
+.model lut2 d_lut(table_values="10")
+.tran 0.1n 30n
+.control
+run
+print v(c_a) v(u_a)
+eprint f1 f2 f3 b0 b1 l1 l2
+.endc
+.end

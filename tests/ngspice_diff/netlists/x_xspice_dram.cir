@@ -1,0 +1,21 @@
+* XSPICE d_ram: writes (driven back at high impedance), reads, an unwritten word (ic U), deselect / reselect,
+* an address bit at U (reads U; a write there makes the whole RAM U), write_en at U on a select change, and a
+* second RAM with ic = 0 and a one-line select
+a_stim [d0 d1 a0 a1 we s0 s1] stim
+.model stim d_source(input_file="lib/x_dram_stim.txt")
+a_ram [d0 d1] [q0 q1] [a0 a1] we [s0 s1] ram
+.model ram d_ram(select_value=2 read_delay=1n)
+a_ram2 [d1] [r0] [a1 a0] we [s1] ram2
+.model ram2 d_ram(ic=0 read_delay=0.5n)
+a_dac [q0 q1 r0] [v1 v2 v3] dac_mod
+.model dac_mod dac_bridge(out_low=0 out_high=3.3 t_rise=0.1n t_fall=0.1n)
+r1 v1 0 1k
+r2 v2 0 1k
+r3 v3 0 1k
+.tran 0.1n 34n
+.control
+run
+print v(v1) v(v2) v(v3)
+eprint q0 q1 r0
+.endc
+.end

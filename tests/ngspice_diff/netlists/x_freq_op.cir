@@ -1,0 +1,19 @@
+* E/G FREQ tables at the operating point (the xfer's f = 0 entry): a node, v(a, b) and an expression (a B source)
+* as input, one or two output nodes, dB / magnitude, degrees / radians, real-imaginary
+V1 in 0 DC 1 AC 1
+V2 in2 0 DC 0.3 AC 0.5
+R0 in 0 1k
+R00 in2 0 1k
+E1 o1 0 FREQ {in} = DB (0, 0, 0) (1k, -3, -45) (10k, -20, -90) (1meg, -60, -180)
+R1 o1 0 1k
+E2 o2 o2n FREQ {v(in, in2)} MAG RAD (0 1 0) (5k 0.5 -1) (50k 0.1 -2)
+R2 o2 o2n 1k
+R2n o2n 0 1k
+E3 o3 0 FREQ {2*v(in)+v(in2)} R_I (0 1 0) (2k 0.5 -0.5) (20k 0 -0.2)
+R3 o3 0 1k
+G4 o4 0 FREQ {v(in2)} DB DEG (0 -6 0) (3k -9 -30) (30k -26 -80)
+R4 o4 0 1k
+E5 o5 0 FREQ {v(in,in2)} (0 0 0) (1k -6 -90)
+R5 o5 0 1k
+.op
+.end

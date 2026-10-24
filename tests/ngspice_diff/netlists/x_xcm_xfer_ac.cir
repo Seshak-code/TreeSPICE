@@ -1,0 +1,10 @@
+* XSPICE xfer in AC: a dB / degree table (interpolated linearly in frequency as complex numbers, held past its ends),
+* and a real / imaginary one with a wider span (offset 2), cascaded through a resistive load
+v1 a 0 DC 0.5 AC 1
+a1 a o1 x1
+.model x1 xfer(table=[0 0 0 1k -3 -45 10k -20 -90 100k -40 -180])
+a2 o1 o2 x2
+.model x2 xfer(r_i=true span=4 offset=2 table=[100 9 0.5 0.1 1meg 9 -0.2 0.3])
+r1 o2 0 1k
+.ac dec 6 10 1meg
+.end

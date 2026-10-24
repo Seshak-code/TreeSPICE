@@ -1,0 +1,31 @@
+* XSPICE D and SR latches: transparent while enabled, set / reset pulses (one released while enabled, which takes
+* the data at once), set and reset overlapping, and t = 0 set at 1 with reset at U, which keeps ic as in ngspice
+vd d_a 0 pulse(0 3 1.5n 0.1n 0.1n 2n 4n)
+ve e_a 0 pulse(0 3 3n 0.1n 0.1n 5n 12n)
+vst st_a 0 pwl(0 0 5n 0 5.1n 3 6n 3 6.1n 0 17.5n 0 17.6n 3 19n 3 19.1n 0)
+vrs rs_a 0 pwl(0 0 17n 0 17.1n 3 18n 3 18.1n 0)
+vs s_a 0 pulse(0 3 2n 0.1n 0.1n 3n 8n)
+vr r_a 0 pulse(0 3 6n 0.1n 0.1n 5n 8n)
+vone one_a 0 DC 3
+vu u_a 0 DC 1.5
+a_adc [d_a e_a st_a rs_a s_a r_a one_a u_a] [d e st rs s r one u] adc_mod
+.model adc_mod adc_bridge(in_low=1.0 in_high=2.0)
+a_dl d e st rs q1 q1b dl
+.model dl d_dlatch(data_delay=0.2n enable_delay=0.3n set_delay=0.4n reset_delay=0.5n rise_delay=0.1n fall_delay=0.15n)
+a_sl s r e NULL rs q2 q2b sl
+.model sl d_srlatch(sr_delay=0.25n enable_delay=0.35n reset_delay=0.45n ic=1)
+a_du d e u NULL q3 NULL du
+.model du d_dlatch(ic=1)
+a_dc d e one u q4 NULL dc0
+.model dc0 d_dlatch(ic=0)
+a_ff d e one u q5 NULL ff0
+.model ff0 d_dff(ic=0)
+a_dac [q1 q1b q2 q2b q3 q4 q5] [v1 v1b v2 v2b v3 v4 v5] dac_mod
+.model dac_mod dac_bridge(out_low=0 out_high=3.3 t_rise=0.1n t_fall=0.1n)
+.tran 0.1n 24n
+.control
+run
+print v(v1) v(v1b) v(v2) v(v2b) v(v3) v(v4) v(v5)
+eprint q1 q2 q3 q4 q5
+.endc
+.end

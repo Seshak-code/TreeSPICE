@@ -1,0 +1,13 @@
+* Diode LEVEL 3 (ngspice diosetup): W/L geometry with XW and .option scale gives AREA and PJ, the metal and poly
+* overlap capacitors (XOM, XOI in Angstrom, XM, XP; D2's instance LM/WM over the model's) across the junction
+.option scale=1e-6
+VB 1 0 DC 0.6 AC 1
+R1 1 2 1k
+D1 2 0 D3 W=20 L=10
+VR 3 0 DC -4.5 AC 1
+R2 3 4 1k
+D2 4 0 D3 W=5 L=4 LM=30 WM=20
+.model D3 D(LEVEL=3 IS=1e-4 JSW=1e-10 CJO=2e-4 CJSW=1e-10 BV=5 IBV=10 XW=0.5 LM=50 WM=40 XOM=2e4 XM=1e-7
++ LP=20 WP=10 XOI=8e3 XP=-1e-7 TT=1n)
+.ac dec 10 1k 10G
+.end

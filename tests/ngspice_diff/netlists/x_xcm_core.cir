@@ -1,0 +1,19 @@
+* XSPICE lcouple + core: a two-winding transformer on a saturating pwl core (B-H smoothed at its corners), driven
+* hard enough to saturate, its secondary loaded; and a winding on a hysteresis-mode core
+v1 a 0 sin(0 5 10k)
+r1 a p 2
+a1 p 0 mm1 m2 lp
+.model lp lcouple(num_turns=20)
+a2 mm2 0 s 0 ls
+.model ls lcouple(num_turns=10)
+rl s 0 50
+a3 m2 mm2 cr
+.model cr core(h_array=[-2000 -500 500 2000] b_array=[-1.4 -1.2 1.2 1.4] area=2e-4 length=0.05)
+v2 b 0 sin(0 2 5k)
+r2 b q 5
+a4 q 0 mh 0 lh
+.model lh lcouple(num_turns=50)
+a5 mh 0 ch
+.model ch core(h_array=[-1 1] b_array=[-1 1] area=1 length=1 mode=2 in_low=-50 in_high=50 hyst=10 out_lower_limit=-1e-4 out_upper_limit=1e-4)
+.tran 1u 400u
+.end

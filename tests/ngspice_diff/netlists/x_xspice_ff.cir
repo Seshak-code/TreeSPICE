@@ -1,0 +1,26 @@
+* XSPICE JK, T and SR flip-flops: a JK toggle counter, a T-flip-flop divider, an SR register, set / reset pulses,
+* and a D flip-flop whose set sits at U (from an adc_bridge's band): it still clocks, as ngspice's d_dff
+vclk clk_a 0 pulse(0 3 1n 0.1n 0.1n 1n 2n)
+vj j_a 0 pulse(0 3 3n 0.1n 0.1n 6n 12n)
+vk k_a 0 pulse(0 3 7n 0.1n 0.1n 4n 12n)
+vs s_a 0 pwl(0 0 14n 0 14.1n 3 15n 3 15.1n 0)
+vu u_a 0 DC 1.5
+a_adc [clk_a j_a k_a s_a u_a] [clk j k st u] adc_mod
+.model adc_mod adc_bridge(in_low=1.0 in_high=2.0)
+a_jk j k clk NULL NULL q1 q1b jk
+.model jk d_jkff(clk_delay=0.2n rise_delay=0.1n fall_delay=0.15n)
+a_t j clk st NULL q2 q2b tf
+.model tf d_tff(clk_delay=0.3n set_delay=0.4n ic=1)
+a_sr j k clk NULL st q3 q3b sr
+.model sr d_srff(clk_delay=0.25n reset_delay=0.5n)
+a_d j clk u NULL q4 NULL df
+.model df d_dff(clk_delay=0.2n)
+a_dac [q1 q1b q2 q2b q3 q3b q4] [v1 v1b v2 v2b v3 v3b v4] dac_mod
+.model dac_mod dac_bridge(out_low=0 out_high=3.3 t_rise=0.1n t_fall=0.1n)
+.tran 0.1n 24n
+.control
+run
+print v(v1) v(v1b) v(v2) v(v2b) v(v3) v(v3b) v(v4)
+eprint q1 q2 q3 q4
+.endc
+.end

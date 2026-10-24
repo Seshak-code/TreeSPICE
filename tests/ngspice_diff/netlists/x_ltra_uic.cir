@@ -1,0 +1,19 @@
+* LTRA under UIC: a charged RLC line (IC=v1,i1,v2,i2) discharging into its terminations (their capacitors round the
+* steps each TD; bare, the value on a step is each simulator's step choice), and an LC line in a subcircuit, twice
+o1 a 0 b 0 rline ic=1,0,1,0
+ra a 0 100
+rb b 0 20
+ca a 0 20p
+cb b 0 20p
+.model rline ltra r=3 l=250n c=100p len=1
+.subckt seg in out
+o1 in 0 out 0 lline
+.model lline ltra l=300n c=120p len=0.5
+.ends
+v1 s 0 pulse(0 1 0.5n 0.2n 0.2n 2n 10n)
+rs s x1 50
+x1 x1 x2 seg
+x2 x2 x3 seg
+rl x3 0 1k
+.tran 20p 12n uic
+.end

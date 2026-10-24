@@ -1,0 +1,8 @@
+* LTRA lossless (LC) line: a pulse into 50 ohm, the far end 200 ohm (reflections), TD = 1 ns
+v1 a 0 pulse(0 1 0.2n 0.1n 0.1n 2n 6n)
+rs a in 50
+o1 in 0 out 0 lline
+rl out 0 200
+.model lline ltra l=250n c=100p len=1
+.tran 10p 10n
+.end
