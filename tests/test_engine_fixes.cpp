@@ -803,7 +803,8 @@ int main() {
                 t += ".ends\n.model nm nmos level=1 vto=0.5 kp=200u\n.model pm pmos level=1 vto=-0.5 kp=80u\nVDD vdd 0 1.8\n"
                      "VIN in 0 0.7\nVIN2 in2 0 1.1\nR9 in 0 1meg\nR10 in2 0 1meg\nXB0 in2 vdd bank\n";
                 for (int i = 1; i < 4; ++i) t += "XB" + std::to_string(i) + " in vdd bank\n";
-                return t + (b ? "B1 x 0 V=v(in)\nR11 x 0 1k\n" : "") + ".op\n.end\n";
+                // tight tolerances: flat and quotient are separate Newton runs, equal to roundoff only when converged
+                return t + (b ? "B1 x 0 V=v(in)\nR11 x 0 1k\n" : "") + ".options reltol=1e-10 vntol=1e-13 abstol=1e-16\n.op\n.end\n";
             };
             const auto flat = run(PrecisionMode::Native_F64, arr(false));
             SPICEParser hp;
@@ -845,6 +846,27 @@ int main() {
                   "S3.1: every net of a class has one flat voltage (worst " + std::to_string(worst) + " V over " +
                       std::to_string(mapped) + " nets; " + std::to_string(part.ctx.size()) + " contexts, " +
                       std::to_string(classV.size()) + " classes)");
+            // S3.2: the quotient circuit solves to the flat one's voltages: every flat node against its class's node
+            hierpart::Partition qp;
+            const auto qn = hierpart::quotient(h.netlist, &qp);
+            CircuitSim qsim;
+            auto qnl = qn.nl;
+            const auto qs = qsim.solveDC(qnl);
+            double qworst = 0.0;
+            size_t qmapped = 0;
+            for (size_t i = 0; qs.stats.converged && i < flat.nodeNames.size(); ++i) {
+                std::string name = flat.nodeNames[i];
+                for (auto& ch : name) ch = (char)std::toupper((unsigned char)ch);
+                const int qnode = name.empty() ? -1 : hierpart::nodeFor(h.netlist, h.nodeIndex, qp, qn, name);
+                if (qnode < 0) continue;
+                const double qv = qnode == 0 ? 0.0 : qs.nodeVoltages[qnode - 1];
+                qworst = std::max(qworst, std::abs(qv - flat.waveformPoints.back().nodeVoltages[i]));
+                ++qmapped;
+            }
+            check(qs.stats.converged && qmapped > 100 && qworst < 1e-9,
+                  "S3.2: the quotient circuit (" + std::to_string(qn.nl.numGlobalNodes) + " nodes, " + std::to_string(qn.elementClasses) +
+                      " elements) gives every flat node its voltage (worst " + [&] { char b[32]; std::snprintf(b, 32, "%.3g", qworst); return std::string(b); }() + " V over " +
+                      std::to_string(qmapped) + ")");
             SPICEParser bp;
             bp.setFlatten(false);
             const auto hb = bp.parse(arr(true));

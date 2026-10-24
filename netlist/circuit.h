@@ -234,6 +234,7 @@ struct VoltageSource {
 
     std::string expression;  // Symbolic override for DC/main value
     std::string name;        // instance name (F/H cards reference it)
+    double m = 1.0;          // S3 quotient: identical sources it stands for (its current enters KCL m times)
 };
 
 /*
@@ -641,6 +642,7 @@ struct Diode {
     bool thermalFlag = false;
     struct Heat { devtemp::DiodeLaw law; double t0 = 300.15, rth0 = 0.0, cth0 = 0.0; };
     std::shared_ptr<const Heat> heat;  // null: no self-heating
+    double rep = 1.0;  // S3 quotient: identical diodes it stands for (in area and mult, and its GMIN, which M= leaves alone)
 };
 
 struct Mosfet {
@@ -684,6 +686,7 @@ struct Mosfet {
         int nf = 1;      // Number of fingers
         double mult = 1.0;  // Multiplier (M=): scales beta, the junctions and every capacitance
     } extra;
+    double rep = 1.0;  // S3 quotient: identical devices it stands for (in mult, and its junction GMIN, which M= leaves alone)
 
     // SPICE level-1 .model values, resolved by the parser (SPICE defaults for
     // missing keys). resolved = false (the GUI's Verilog-A path, no cards):
@@ -1366,6 +1369,9 @@ public:
 
     std::vector<BlockInstance> instances;                // Placed block instances (the expansion of hier)
     Hierarchy hier;                                      // the subcircuit hierarchy as written (not flattened only)
+    // S3 quotient netlist (hierpart::quotient): nets each node stands for. Its KCL row sums them, the solver divides
+    // it back to one net's (per-net residuals and tolerances, as flat). Empty: every node is one net.
+    std::vector<double> classSize;
     int numGlobalNodes = 0;
 
     // Create the OSDI runtime instance of every OSDI device (global block and

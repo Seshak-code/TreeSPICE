@@ -145,6 +145,12 @@ public:
     vals_.push_back(value);
   }
 
+  // Multiply every stamp in row r < s.size() by s[r]
+  void scaleRows(const std::vector<double>& s) {
+    for (size_t k = 0; k < rows_.size(); ++k)
+      if (rows_[k] >= 0 && rows_[k] < (int)s.size()) vals_[k] *= s[rows_[k]];
+  }
+
   void addBatch(const std::vector<int>& rows, const std::vector<int>& cols, const std::vector<double>& values) {
     rows_.insert(rows_.end(), rows.begin(), rows.end());
     cols_.insert(cols_.end(), cols.begin(), cols.end());
