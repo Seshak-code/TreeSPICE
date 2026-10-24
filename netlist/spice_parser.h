@@ -97,6 +97,9 @@ public:
     // paramOverrides: upper-case global .param values that win over the netlist's (a .step param run)
     SPICEParseResult parse(const std::string& netlistText, const std::string& baseDir = "", double tempC = NAN,
                            const std::map<std::string, double>& paramOverrides = {}, const SensParam* sens = nullptr);
+    // false: the hierarchy only (netlist.hier), no expansion into netlist.instances: O(definitions) for an
+    // array of 1e9 cells (S3). XSPICE devices and .ic / .nodeset inside a subcircuit need the expansion then.
+    void setFlatten(bool flatten) { flatten_ = flatten; }
 
 private:
     // ── Value and Token Helpers ────────────────────────────────────────
@@ -177,6 +180,7 @@ private:
     // .subckt parsing state. Bodies use LOCAL node numbers (ports 1..P, then
     // internal nodes); X cards are expanded after the whole file is read, so
     // a subcircuit may be defined after use and may contain X cards itself.
+    bool             flatten_ = true;
     bool             inSubckt_ = false;
     std::string      subcktName_;
     std::vector<std::string> subcktPorts_;

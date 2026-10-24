@@ -1077,10 +1077,44 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         for (auto& [name, blk] : result_.netlist.blockDefinitions) { mosSeries(blk, false); jfetSeries(blk, false); bjtThermal(blk, false); }
     } catch (const std::exception& e) { return fail(lines.back().first, e.what()); }
 
-    // Expand X cards (recursively) now that every .subckt is defined
-    for (const auto& pi : topInstances_) {
-        try { expandInstance(pi, pi.nodes, 0, "", pi.portNames, pi.line); }
-        catch (const std::exception& e) { return fail(pi.line, e.what()); }
+    // X cards expanded (recursively) now that every .subckt is defined. Without flattening, the hierarchy as written
+    // (netlist.hier) instead, each definition's X cards checked once (S3: O(definitions)); the flat path does not
+    // keep it (a top-level array of cells would hold its instances twice)
+    if (!flatten_) {
+        auto& h = result_.netlist.hier;
+        for (const auto& pi : topInstances_) h.top.push_back({pi.subckt, pi.name, pi.nodes});
+        for (const auto& [def, kids] : subcktChildren_)
+            for (const auto& c : kids) h.children[def].push_back({c.subckt, c.name, c.nodes});
+        h.nodeNames = subcktNames_;
+    }
+    if (flatten_) {
+        for (const auto& pi : topInstances_) {
+            try { expandInstance(pi, pi.nodes, 0, "", pi.portNames, pi.line); }
+            catch (const std::exception& e) { return fail(pi.line, e.what()); }
+        }
+    } else {
+        std::map<std::string, int> seen;  // 1: being checked (a cycle back to it is a recursive .subckt), 2: done
+        std::function<void(const PendingInstance&, int)> check = [&](const PendingInstance& pi, int depth) {
+            auto it = result_.netlist.blockDefinitions.find(pi.subckt);
+            if (it == result_.netlist.blockDefinitions.end()) throw std::runtime_error("unknown subcircuit '" + pi.subckt + "'");
+            if (pi.nodes.size() != it->second.pinNames.size())
+                throw std::runtime_error(pi.subckt + " has " + std::to_string(it->second.pinNames.size()) +
+                                         " pins but the instance connects " + std::to_string(pi.nodes.size()));
+            int& st = seen[pi.subckt];
+            if (st == 2) return;
+            if (st == 1 || depth > 64) throw std::runtime_error("subcircuit nesting deeper than 64 (recursive .subckt?)");
+            st = 1;
+            if (!subcktA_[pi.subckt].empty())
+                throw std::runtime_error(pi.subckt + ": XSPICE devices in a subcircuit need the flattened netlist");
+            if (!subcktICs_[pi.subckt].empty())
+                throw std::runtime_error(pi.subckt + ": .ic / .nodeset in a subcircuit need the flattened netlist");
+            for (const auto& c : subcktChildren_[pi.subckt]) check(c, depth + 1);
+            st = 2;
+        };
+        for (const auto& pi : topInstances_) {
+            try { check(pi, 0); }
+            catch (const std::exception& e) { return fail(pi.line, e.what()); }
+        }
     }
     // XSPICE A devices, a body's per instance (in netlist order: a node folds its drivers in that order)
     {
@@ -1093,6 +1127,9 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     for (const auto& ic : pendingICs_) {
         auto it = nodeMap_.find(ic.node);
         const bool top = it != nodeMap_.end();
+        if (!top && !flatten_ && ic.node.find('.') != std::string::npos)
+            return fail(ic.line, (ic.nodeset ? ".nodeset" : ".ic") + std::string(" on subcircuit node '") + ic.node +
+                                 "' needs the flattened netlist");
         if (!top) it = result_.nodeIndex.find(ic.node);
         if (!top && it == result_.nodeIndex.end())
             return fail(ic.line, (ic.nodeset ? ".nodeset" : ".ic") + std::string(" names unknown node '") + ic.node + "'");

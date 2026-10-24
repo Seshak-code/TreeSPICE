@@ -16,6 +16,7 @@
 
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <complex>
 #include <cstdio>
 #include <string>
@@ -749,6 +750,44 @@ int main() {
             const auto w = session->runDC(req).waveformPoints;
             check(w.size() == 2 && w[0].nodeVoltages[1] == w[1].nodeVoltages[1] && std::abs(w[0].nodeVoltages[1] - 5.0) > 1e-6,
                   "Monte Carlo variation survives the .dc TEMP re-parse");
+        }
+        {   // S3.0: an SRAM written as nested subcircuits (cell -> row of n -> bank of n rows -> n banks) parses without
+            // flattening into its hierarchy: O(definitions), 1e9 cells included; a hierarchical name resolves through
+            // it; the flat path expands the same hierarchy into as many instances
+            auto sram = [](int n) {
+                std::string t = "* nested sram\n.subckt cell bl blb wl vdd\nM1 q qb 0 0 nm W=1u L=0.18u\nM2 q qb vdd vdd pm W=1u L=0.18u\n"
+                                "M3 qb q 0 0 nm W=1u L=0.18u\nM4 qb q vdd vdd pm W=1u L=0.18u\nM5 bl wl q 0 nm W=0.5u L=0.18u\n"
+                                "M6 blb wl qb 0 nm W=0.5u L=0.18u\n.ends\n.subckt row bl blb wl vdd\n";
+                for (int i = 0; i < n; ++i) t += "XC" + std::to_string(i) + " bl blb wl vdd cell\n";
+                t += ".ends\n.subckt bank bl blb vdd\n";
+                for (int i = 0; i < n; ++i) t += "XR" + std::to_string(i) + " bl blb wl" + std::to_string(i) + " vdd row\n";
+                t += ".ends\n.model nm nmos level=1 vto=0.5 kp=200u\n.model pm pmos level=1 vto=-0.5 kp=80u\nVDD vdd 0 1.8\n";
+                for (int i = 0; i < n; ++i) t += "XB" + std::to_string(i) + " bl" + std::to_string(i) + " blb" + std::to_string(i) + " vdd bank\n";
+                return t + ".op\n.end\n";
+            };
+            SPICEParser hp;
+            hp.setFlatten(false);
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto big = hp.parse(sram(1000));
+            const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            std::vector<const HierInstance*> chain;
+            int local = 0;
+            const bool found = big.success && big.netlist.hier.resolve("XB7.XR3.XC999.Q", chain, local);
+            check(big.success && big.netlist.instances.empty() && big.netlist.hier.expandedInstances() == 1e9 + 1e6 + 1e3 &&
+                      found && chain.size() == 3 && chain.back()->def == "CELL" && local > 4 && secs < 5.0,
+                  "S3.0: a 1e9-cell nested SRAM parses unflattened (" + std::to_string(secs) + " s), x1.x2.x3.q resolves" +
+                      (big.success ? "" : ": " + big.errorMessage));
+            SPICEParser fp, hp2;
+            hp2.setFlatten(false);
+            const auto flat = fp.parse(sram(6)), h6 = hp2.parse(sram(6));
+            check(flat.success && h6.success && (double)flat.netlist.instances.size() == h6.netlist.hier.expandedInstances() &&
+                      flat.netlist.instances.size() == 6 * 6 * 6 + 6 * 6 + 6 && flat.netlist.hier.top.empty(),
+                  "S3.0: the flat path expands the hierarchy into its instance count (" + std::to_string(flat.netlist.instances.size()) + ")");
+            SPICEParser xp;
+            xp.setFlatten(false);
+            const auto xs = xp.parse("* a in subckt\n.subckt buf a y\naa a y g\n.model g gain(gain=2)\n.ends\nV1 i 0 1\nX1 i o buf\nR1 o 0 1k\n.op\n.end\n");
+            check(!xs.success && xs.errorMessage.find("need the flattened netlist") != std::string::npos,
+                  "S3.0: XSPICE devices in a subcircuit need the flattened netlist (" + xs.errorMessage + ")");
         }
         {   // .save narrows what a run stores to the vectors .save, .print and .meas name (ngspice saves only those);
             // .save all, or none, keeps every node and branch
