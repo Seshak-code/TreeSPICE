@@ -1,7 +1,14 @@
-// scale_probe <netlist>: live heap bytes (macOS malloc zones) after parsing and after the DC operating point,
-// per device; the scale track's (S1) measure. Prints the sizes of the per-device and per-instance records too.
+// scale_probe <netlist> [tran <step> <stop>]: live heap bytes (macOS malloc zones) after parsing and after the DC
+// operating point (or the transient: its peak too, sampled), per device; the scale track's (S1) measure. Prints the
+// sizes of the per-device and per-instance records too.
 #include "netlist/spice_parser.h"
 #include "physics/circuitsim.h"
+#include "engine_api/isimulation_engine.h"
+#include "engine_api/simulation_session.h"
+#include "engine_api/simulation_dto.h"
+#include "engine_api/engine_callbacks.h"
+#include <atomic>
+#include <thread>
 #include "osdi/osdi_abi.h"
 #include "osdi/osdi_device.h"
 #include <malloc/malloc.h>
@@ -9,6 +16,8 @@
 #include <cstdio>
 #include <fstream>
 #include <sstream>
+#include <cstdlib>
+#include <unistd.h>
 
 using namespace acutesim;
 
@@ -54,6 +63,32 @@ int main(int argc, char** argv) {
     std::printf("instances %zu, MOSFETs %zu, nodes %d\n", parsed.netlist.instances.size(), devices, parsed.netlist.numGlobalNodes);
     std::printf("parse: %.1f MB (%.0f B/device) %.2f s\n", m1 - m0, (m1 - m0) * 1048576.0 / devices,
                 std::chrono::duration<double>(t1 - t0).count());
+    if (argc >= 5 && std::string(argv[2]) == "tran") {  // the whole session path, as acutesim_engine_dump runs it
+        std::atomic<bool> done{false};
+        std::atomic<double> top{0.0};
+        std::thread sampler([&] {
+            while (!done) {
+                const double m = liveMB();
+                if (m > top) top = m;
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        });
+        auto engine = ISimulationEngine::create();
+        engine->setPrecisionMode(PrecisionMode::Native_F64);
+        compute::orchestration::SimulationRequestDTO req;
+        req.source.payload = text;
+        req.transient.stepSizeS = std::atof(argv[3]);
+        req.transient.stopTimeS = std::atof(argv[4]);
+        EngineCallbacks cb;
+        const auto tr = engine->createSession()->runTransient(req, cb, nullptr);
+        done = true;
+        sampler.join();
+        const double after = liveMB();
+        // the session parses its own copy: counted from after the probe's parse
+        std::printf("tran: converged %d, %zu points, peak live %.1f MB (%.0f B/device), live after %.1f MB %.2f s\n",
+                    (int)tr.converged, tr.waveformPoints.size(), top - m1, (top - m1) * 1048576.0 / devices, after - m1,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
+    } else {
     CircuitSim sim;
     double peak = 0.0;
     const auto r = sim.solveDC(parsed.netlist);
@@ -62,5 +97,12 @@ int main(int argc, char** argv) {
     auto t2 = std::chrono::steady_clock::now();
     std::printf("op: converged %d, live after %.1f MB (%.0f B/device; solver-held %.1f MB) %.2f s\n", (int)r.stats.converged,
                 peak, peak * 1048576.0 / devices, m2 - m1, std::chrono::duration<double>(t2 - t1).count());
+    }
+    // SCALE_PROBE_PAUSE=<s>: hold the solved state that long (attach malloc_history / heap to this pid)
+    if (const char* p = std::getenv("SCALE_PROBE_PAUSE")) {
+        std::printf("pid %d paused\n", (int)getpid());
+        std::fflush(stdout);
+        sleep((unsigned)std::atoi(p));
+    }
     return 0;
 }
