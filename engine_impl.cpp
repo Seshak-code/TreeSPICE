@@ -36,6 +36,8 @@
 #include <sstream>
 #include <cctype>
 #include <map>
+#include <set>
+#include <regex>
 
 // Full SPICE3f5 parser (must be included OUTSIDE any namespace to avoid
 // double-qualification: the parser itself already declares namespace acutesim)
@@ -69,6 +71,65 @@ static SimulationResponseDTO stepToResponse(const SolverStep& step,
     return dto;
 }
 
+// .save (ngspice): given, and not "all", the response keeps only the vectors .save, .print and .meas name (their
+// v(...), i(...) and .save's bare node names), so a long transient of a large circuit stores those columns, not
+// every node at every step. Indices into the solution's nodes and branches, ascending; all: no .save.
+struct KeptColumns { bool all = true; std::vector<int> nodes, branches; };
+static KeptColumns keptColumns(const SPICEParseResult& parsed, const CircuitSim& sim) {
+    KeptColumns k;
+    auto lower = [](std::string x) { for (auto& c : x) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return x; };
+    auto upper = [](std::string x) { for (auto& c : x) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c))); return x; };
+    bool save = false;
+    for (const auto& o : parsed.outputs)
+        if (o.kind == 's') {
+            save = true;
+            for (const auto& sp : o.specs) if (lower(sp) == "all") return k;
+        }
+    if (!save) return k;
+    k.all = false;
+    const auto branches = sim.branchNames(parsed.netlist);
+    std::set<int> nodes, brs;
+    auto node = [&](const std::string& n) {
+        if (const auto it = parsed.nodeIndex.find(upper(n)); it != parsed.nodeIndex.end() && it->second >= 1) nodes.insert(it->second - 1);
+    };
+    auto branch = [&](const std::string& b) {
+        const auto it = std::find(branches.begin(), branches.end(), lower(b));
+        if (it != branches.end()) brs.insert((int)(it - branches.begin()));
+    };
+    static const std::regex ref(R"(\b([vi])[a-z]*\(([^()]*)\))", std::regex::icase), bare(R"([A-Za-z0-9_.#:$\[\]]+)");
+    for (const auto& o : parsed.outputs)
+        for (const auto& spec : o.specs) {
+            if (o.kind == 's' && std::regex_match(spec, bare)) { node(spec); continue; }
+            for (auto it = std::sregex_iterator(spec.begin(), spec.end(), ref); it != std::sregex_iterator(); ++it) {
+                std::string args = (*it)[2];
+                args.erase(std::remove_if(args.begin(), args.end(), [](unsigned char c) { return std::isspace(c); }), args.end());
+                if (std::tolower(static_cast<unsigned char>((*it)[1].str()[0])) == 'i') { branch(args); continue; }
+                const size_t comma = args.find(',');
+                node(args.substr(0, comma));
+                if (comma != std::string::npos) node(args.substr(comma + 1));
+            }
+        }
+    k.nodes.assign(nodes.begin(), nodes.end());
+    k.branches.assign(brs.begin(), brs.end());
+    return k;
+}
+
+// The kept columns of a point that still has every node (fullNodes) and branch (fullBranches)
+static void keepColumns(const KeptColumns& k, WaveformDataPoint& p, size_t fullNodes, size_t fullBranches) {
+    if (k.all) return;
+    auto pick = [](std::vector<double>& v, const std::vector<int>& idx, size_t full) {
+        if (v.size() != full) return;
+        std::vector<double> out;
+        out.reserve(idx.size());
+        for (int i : idx) out.push_back(i < (int)v.size() ? v[i] : 0.0);
+        v = std::move(out);
+    };
+    pick(p.nodeVoltages, k.nodes, fullNodes);
+    pick(p.nodeVoltagesImag, k.nodes, fullNodes);
+    pick(p.branchCurrents, k.branches, fullBranches);
+    pick(p.branchCurrentsImag, k.branches, fullBranches);
+}
+
 static void nameColumns(SimulationResponseDTO& r, const SPICEParseResult& parsed, const CircuitSim& sim) {
     r.nodeNames.assign(parsed.netlist.numGlobalNodes, "");
     for (const auto& [name, idx] : parsed.nodeIndex)
@@ -78,6 +139,14 @@ static void nameColumns(SimulationResponseDTO& r, const SPICEParseResult& parsed
         }
     r.branchNames = sim.branchNames(parsed.netlist);
     for (const auto& o : parsed.outputs) r.outputRequests.push_back({o.kind, o.analysis, o.specs});
+    const KeptColumns k = keptColumns(parsed, sim);  // .save: the points (those stored whole) and names narrow
+    if (k.all) return;
+    for (auto& p : r.waveformPoints) keepColumns(k, p, r.nodeNames.size(), r.branchNames.size());
+    std::vector<std::string> nn, bn;
+    for (int i : k.nodes) nn.push_back(r.nodeNames[i]);
+    for (int i : k.branches) bn.push_back(r.branchNames[i]);
+    r.nodeNames = std::move(nn);
+    r.branchNames = std::move(bn);
 }
 
 // ── Helper: select CircuitSim ExecutionMode ────────────────────────────────
@@ -525,6 +594,8 @@ SimulationResponseDTO SessionImpl::dispatch_tran_internal(const SimulationReques
 
     SimulationResponseDTO result;
     uint64_t stepIdx = 0;
+    const KeptColumns kept = keptColumns(parsed, sim);  // .save: each step stores only these columns
+    const size_t fullNodes = (size_t)netlist.numGlobalNodes, fullBranches = sim.branchNames(netlist).size();
     const std::string err = sim.runTransient(
         netlist, dt, stopTime, uic, [&](const SolverStep& step) {
             if (status_.load() == JobStatus::Cancelled) return false;
@@ -532,6 +603,7 @@ SimulationResponseDTO SessionImpl::dispatch_tran_internal(const SimulationReques
             pt.timeS        = step.time;
             pt.nodeVoltages = step.nodeVoltages;
             pt.branchCurrents = step.branchCurrents;
+            keepColumns(kept, pt, fullNodes, fullBranches);
             result.waveformPoints.push_back(pt);
             if (streamCb) streamCb(pt, stepIdx);
             cb.onTimeStep(step.time, stopTime);

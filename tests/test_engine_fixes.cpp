@@ -750,6 +750,30 @@ int main() {
             check(w.size() == 2 && w[0].nodeVoltages[1] == w[1].nodeVoltages[1] && std::abs(w[0].nodeVoltages[1] - 5.0) > 1e-6,
                   "Monte Carlo variation survives the .dc TEMP re-parse");
         }
+        {   // .save narrows what a run stores to the vectors .save, .print and .meas name (ngspice saves only those);
+            // .save all, or none, keeps every node and branch
+            auto tr = [&](const char* save) {
+                auto engine = ISimulationEngine::create();
+                SimulationRequestDTO q;
+                q.source.payload = std::string("save\nV1 a 0 PULSE(0 1 0 1u 1u 5u 20u)\nR1 a b 1k\nR2 b out 1k\nC1 out 0 1n\n"
+                                               "R3 out 0 10k\n.meas tran vb max v(b)\n") + save + "\n.tran 0.5u 10u\n.end\n";
+                q.transient.stepSizeS = 0.5e-6;
+                q.transient.stopTimeS = 1e-5;
+                EngineCallbacks c;
+                return engine->createSession()->runTransient(q, c, nullptr);
+            };
+            const auto full = tr(""), sel = tr(".save v(out) i(v1)"), all = tr(".save all v(out)");
+            const bool ok = full.converged && sel.converged && all.converged && !sel.waveformPoints.empty() &&
+                            sel.waveformPoints.size() == full.waveformPoints.size();
+            const auto& p = ok ? sel.waveformPoints.back() : WaveformDataPoint{};
+            const auto& f = ok ? full.waveformPoints.back() : WaveformDataPoint{};
+            // full columns: a b out / v1; .save v(out) i(v1) keeps out (and b, which .meas reads), v1
+            check(ok && sel.nodeNames == std::vector<std::string>{"b", "out"} && sel.branchNames == std::vector<std::string>{"v1"} &&
+                      p.nodeVoltages.size() == 2 && p.nodeVoltages[1] == f.nodeVoltages[2] && p.branchCurrents[0] == f.branchCurrents[0] &&
+                      all.nodeNames.size() == 3 && !sel.measures.empty() && !full.measures.empty() &&
+                      sel.measures[0].value == full.measures[0].value,
+                  ".save keeps the vectors .save, .print and .meas name; .save all keeps every one");
+        }
         {   // OSDI devices with the same model and parameters share one setup; .options bypass=0 (memory mode)
             // keeps no copy of each device's last evaluation and evaluates always: the same transient, to
             // within bypass's extrapolation (RELTOL 1e-3 of the step's voltage change)
