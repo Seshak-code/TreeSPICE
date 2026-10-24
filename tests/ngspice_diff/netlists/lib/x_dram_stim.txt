@@ -1,0 +1,18 @@
+* time d0 d1 a0 a1 we s0 s1
+0 0s 0s 0s 0s 0s 0s 1s
+2n 1s 0s 0s 0s 1s 0s 1s
+4n 1s 0s 0s 0s 0s 0s 1s
+6n 1s 0s 1s 0s 0s 0s 1s
+8n 1s 1s 1s 0s 1s 0s 1s
+10n 1s 1s 1s 0s 0s 0s 1s
+12n 1s 1s 0s 0s 0s 0s 1s
+14n 1s 1s 0s 0s 0s 0s 0s
+16n 1s 1s 0s 0s 0s 0s 1s
+17n 1s 0s 0s 0s 0s 0s 1s
+18n 1s 0s Us 0s 0s 0s 1s
+20n 1s 0s Us 0s 1s 0s 1s
+22n 1s 0s 0s 0s 0s 0s 1s
+24n 1s 0s 1s 0s 0s 0s 1s
+26n 1s 0s 1s 0s Us 0s 1s
+28n 1s 0s 1s 0s 0s 1s 1s
+30n 1s 0s 1s 0s 0s 0s 1s

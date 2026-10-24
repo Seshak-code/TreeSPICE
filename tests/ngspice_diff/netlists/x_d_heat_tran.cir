@@ -1,0 +1,11 @@
+* Diode self-heating transient: CTH0 at tj (RTH0 CTH0 = 50 us), the junction's charge current in the power;
+* D2 with a separate sidewall (RSW) and TLEV 2's band gap heats through both junctions
+VIN a 0 PULSE(-2 3 10u 1u 1u 80u 200u)
+R1 a k 10
+D1 k 0 tj DH THERMAL
+R2 a k2 15
+D2 k2 0 tj2 DS THERMAL
+.model DH D(IS=1e-12 N=1.2 RS=0.5 CJO=10p TT=5n RTH0=50 CTH0=1e-6 TRS1=3e-3)
+.model DS D(IS=1e-13 RS=1 JSW=1e-9 NS=1.1 RSW=1e-4 TLEV=2 EG=1.16 GAP1=7.02e-4 GAP2=1108 RTH0=80 CTH0=4e-7)
+.tran 0.5u 200u
+.end

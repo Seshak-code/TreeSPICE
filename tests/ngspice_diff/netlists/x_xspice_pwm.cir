@@ -1,0 +1,24 @@
+* XSPICE d_pwm: the default dc_array [0 1] (ngspice makes it [0.01 0.99]) with a control stepping just after edges,
+* a table entry below 0.01 kept (only 0 and 1 are replaced) with the control below the table (extended, then held
+* to 0.01), and init_phase 45 / -120
+vc c 0 pwl(0 0 20.1n 0 20.2n 0.6 50.1n 0.6 50.2n -0.8)
+vk k 0 DC -1
+vm m 0 DC 1.5
+a_p1 c p1 pwm1
+.model pwm1 d_pwm(frequency=100meg)
+a_p2 k p2 pwm2
+.model pwm2 d_pwm(cntl_array=[0 1 2] dc_array=[0.005 0.5 0.995] frequency=50meg init_phase=45)
+a_p3 m p3 pwm3
+.model pwm3 d_pwm(cntl_array=[0 1 2] dc_array=[0.005 0.5 0.995] frequency=80meg init_phase=-120)
+a_dac [p1 p2 p3] [v1 v2 v3] dac_mod
+.model dac_mod dac_bridge(out_low=0 out_high=3.3 t_rise=0.1n t_fall=0.1n)
+r1 v1 0 1k
+r2 v2 0 1k
+r3 v3 0 1k
+.tran 0.1n 90n
+.control
+run
+print v(v1) v(v2) v(v3)
+eprint p1 p2 p3
+.endc
+.end

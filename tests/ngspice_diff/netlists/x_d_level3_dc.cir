@@ -1,0 +1,12 @@
+* Diode LEVEL 3 DC: AREA from W/L scales IS, JSW by PJ, IBV by AREA (the breakdown knee); a level-1 W/L instance
+* takes AREA 1, PJ 0
+.option scale=1e-6
+VD a 0 DC 0
+R1 a k1 100
+D1 k1 0 D3 W=20 L=10
+R2 a k2 100
+D2 k2 0 D1 W=20 L=10
+.model D3 D(LEVEL=3 IS=1e-4 JSW=1e-10 BV=5 IBV=10 XW=0.5 N=1.1)
+.model D1 D(IS=1e-14 JSW=1e-10 BV=5 IBV=1e-5 AREA=3 PJ=2)
+.dc VD -7 1 0.02
+.end

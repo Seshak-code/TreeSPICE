@@ -11,7 +11,7 @@ ENGINE = next((p for p in (os.path.join(ROOT, "build", "acutesim_engine_dump"),
                            os.path.join(ROOT, "..", "build", "acutesim_engine", "acutesim_engine_dump"))
                if os.access(p, os.X_OK)), os.path.join(ROOT, "build", "acutesim_engine_dump"))
 GROUND = {"0", "GND"}  # ngspice: vss / ground are ordinary nodes
-NODE_POS = {**{c: [1, 2] for c in "RCLVIDHFB"}, **{c: [1, 2, 3, 4] for c in "MEGT"},
+NODE_POS = {**{c: [1, 2] for c in "RCLVIDHFB"}, **{c: [1, 2, 3, 4] for c in "MEGTO"},
             "Q": [1, 2, 3], "J": [1, 2, 3], "Z": [1, 2, 3], "S": [1, 2, 3, 4], "W": [1, 2], "K": []}
 SUFFIX = {"t": 1e12, "g": 1e9, "meg": 1e6, "k": 1e3, "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15}
 
@@ -124,12 +124,18 @@ def node_map(text):
             w = re.sub(r"\s*=\s*", "=", line).split()
             w = w[:next((k for k, x in enumerate(w) if "=" in x or x.upper() == "PARAMS:"), len(w))]
             pos = range(1, len(w) - 1)
-        if c in "EGFH" and len(t) > 3 and t[3].upper() in ("POLY", "VALUE", "VOL", "CUR", "TABLE"):
+        if c in "EGFH" and len(t) > 3 and t[3].upper() in ("POLY", "VALUE", "VOL", "CUR", "TABLE", "FREQ"):
             pos = [1, 2]  # behavioural forms: the control nodes are not at the linear positions
+        if c in "EG" and len(t) > 2 and t[2].upper() == "FREQ": pos = [1]  # E n1 FREQ ...: one output node
+        if c in "EG" and any(x.upper() == "FREQ" for x in t[2:4]):  # an expression input: the engine's B source node first
+            ex = line[line.upper().index("FREQ") + 4:].strip()
+            ex = ex[1:ex.find("}")].strip() if ex.startswith("{") else ""
+            if ex and not re.fullmatch(r"[a-z_][a-z0-9_]*|v\(.*\)", ex, re.I): m.setdefault("GEN_NODE_" + t[0][1:].upper(), len(m) + 1)
         if c == "N":  # N<name> <terminals...> <model> [params]: terminals precede the first model name
             pos = range(1, next((k for k in range(1, len(t)) if t[k].upper() in models), 1))
         if c == "M" and len(t) > 4 and t[4].upper() in models: pos = [1, 2, 3]  # a 3-node VDMOS
         if c == "M" and len(t) > 6 and t[6].upper() in models and t[4].upper() not in models: pos = [1, 2, 3, 4, 5]  # VDMOS THERMAL
+        if c == "D" and len(t) > 4 and t[3].upper() not in models and t[4].upper() in models: pos = [1, 2, 3]  # D a k tj
         # Q c b e [s] model ...: the 4th field is a substrate node when the 5th is a name (engine rule)
         if c == "Q" and len(t) >= 6 and not re.fullmatch(r"[-+.\d].*", t[5]) and t[5].upper() not in ("AREA", "OFF", "IC", "M", "TEMP", "DTEMP"):
             pos = [1, 2, 3, 4]
@@ -146,7 +152,8 @@ def branch_names(text):
             kw = t[0].upper()
             in_sub = kw == ".SUBCKT" or (in_sub and kw != ".ENDS")
             continue
-        poly = len(t) > 3 and t[3].upper() in ("POLY", "VALUE", "VOL", "CUR", "TABLE")  # ngspice rebuilds these: no e1#branch
+        poly = (len(t) > 3 and t[3].upper() in ("POLY", "VALUE", "VOL", "CUR", "TABLE", "FREQ")) or \
+               (len(t) > 2 and t[2].upper() == "FREQ")  # ngspice rebuilds these: no e1#branch (FREQ: an xfer)
         if not in_sub and not (poly and t[0][0].upper() in "EH") and (t[0][0].upper() in "VLEH" or (t[0][0].upper() == "B" and re.search(r"\bv\s*=", line, re.I))):
             out.append(t[0].lower())
     return out

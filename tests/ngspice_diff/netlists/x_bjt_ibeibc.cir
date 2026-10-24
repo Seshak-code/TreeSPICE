@@ -1,0 +1,16 @@
+* Gummel-Poon IBE / IBC (the BE and BC diodes' own saturation currents in place of IS), forward and reverse,
+* at 100 C (each by its own emission coefficient; TLEV 3: powers of 1 + TIS1 dT); ISS with IBC's factor
+vb b 0 DC 0.7
+vc c 0 DC 2
+q1 c b 0 qa
+q2 c2 b 0 qb temp=100
+vc2 c2 0 DC 2
+q3 c3 b 0 s qc temp=100
+vc3 c3 0 DC -0.3
+vs s 0 DC -1
+.model qa npn is=1e-16 ibe=2e-16 ibc=5e-16 bf=120 br=3 nf=1.02 nr=1.05 vaf=60 ise=1e-14 ne=1.6
+.model qb npn is=1e-16 ibe=2e-16 ibc=5e-16 bf=120 br=3 nf=1.02 nr=1.05 iss=1e-17 ns=1.1 xti=3.5 eg=1.12
+.model qc npn is=1e-16 ibe=2e-16 ibc=5e-16 bf=120 br=3 tlev=3 tis1=0.03 tis2=-1e-5 iss=1e-17 tiss1=0.02
+.dc vb 0.3 0.9 0.01
+.print dc i(vc) i(vc2) i(vc3) i(vb) i(vs)
+.end

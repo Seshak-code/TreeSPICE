@@ -1,0 +1,12 @@
+* XSPICE capacitoric (its voltage integrates its current) and inductoric (its current integrates its voltage), with
+* initial conditions: at the operating point they hold ic (the inductor a current source), then integrate
+v1 a 0 pulse(0 2 20n 5n 5n 100n 250n)
+r1 a c 1k
+a1 c 0 cap1
+.model cap1 capacitoric(c=50p ic=0.5)
+r2 a l 200
+a2 l 0 ind1
+.model ind1 inductoric(l=10u ic=1m)
+rl l 0 5k
+.tran 0.5n 500n
+.end

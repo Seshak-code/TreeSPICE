@@ -1,0 +1,10 @@
+* XSPICE s_xfer in AC: a second-order low-pass (denormalized_freq), a band-pass with the numerator at full order
+VA a 0 DC 0 AC 1
+a1 a o1 lp
+.model lp s_xfer(num_coeff=[1] den_coeff=[1 1.414 1] denormalized_freq=6.283e4 gain=2)
+a2 a o2 bp
+.model bp s_xfer(num_coeff=[0.5 1e3 0] den_coeff=[1 2e3 4e8])
+R1 o1 0 1k
+R2 o2 0 1k
+.ac dec 10 10 1meg
+.end

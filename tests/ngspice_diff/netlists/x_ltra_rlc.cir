@@ -1,0 +1,13 @@
+* LTRA RLC line (R = 5 ohm/m): convolution terms with a pulse and a capacitive far end; and a mixedinterp line
+v1 a 0 pulse(0 1 0.2n 0.2n 0.2n 3n 8n)
+rs a in 50
+o1 in 0 out 0 rline
+rl out 0 1k
+cl out 0 1p
+rs2 a in2 75
+o2 in2 0 out2 0 rline2
+rl2 out2 0 30
+.model rline ltra r=5 l=250n c=100p len=1.5
+.model rline2 ltra r=20 l=300n c=90p len=0.8 mixedinterp
+.tran 10p 15n
+.end

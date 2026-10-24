@@ -1,0 +1,10 @@
+* time   a    b    c
+0        0s   1s   Uu
+1.5n     1s   1s   0z
+*  comment line
+3n       1s   0r   1z
+
+4.2e-9,  0s,  0s,  0s
+6n       Us   1s   1s
+8n=      1s   1z   0s
+1.0e-8   0s   1s   1u

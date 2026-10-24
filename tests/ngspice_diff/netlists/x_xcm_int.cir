@@ -1,0 +1,12 @@
+* XSPICE int and d_dt in transient: a triangle from an integrated square wave (limits, out_ic); the derivative of a
+* sine (d_dt is a difference over the step, so a kinked input would compare the two simulators' step choices)
+VA a 0 PULSE(-1 1 0 10n 10n 490n 1u)
+a1 a o1 i1
+.model i1 int(gain=2e6 out_ic=-0.2 out_lower_limit=-0.6 out_upper_limit=0.8 limit_range=0.05)
+VS s 0 SIN(0 1 1meg)
+a2 s o2 d1
+.model d1 d_dt(gain=1e-7 out_offset=0.1 out_lower_limit=-5 out_upper_limit=5)
+R1 o1 0 1k
+R2 o2 0 1k
+.tran 2n 3u
+.end

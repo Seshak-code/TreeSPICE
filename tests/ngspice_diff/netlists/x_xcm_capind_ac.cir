@@ -1,0 +1,10 @@
+* XSPICE capacitoric in AC: 1/(jwc) on its current (inductoric: test_engine_fixes; ngspice 47 gives it jwl)
+v1 a 0 DC 1 AC 1
+r1 a c 1k
+a1 c 0 cap1
+.model cap1 capacitoric(c=50p ic=0.5)
+r2 c d 2k
+a2 d 0 cap2
+.model cap2 capacitoric(c=10p)
+.ac dec 5 100k 1g
+.end

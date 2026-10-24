@@ -1,0 +1,11 @@
+* Diode soft reverse recovery small-signal: the qp node's TT/VP lag of the diffusion admittance (ngspice dioacld)
+VB 1 0 DC 0.7 AC 1
+R1 1 2 100
+D1 2 0 DVP
+VR 3 0 DC 0.65 AC 1
+R2 3 4 1k
+D2 4 0 DVP2
+.model DVP D(IS=1e-14 TT=5n CJO=10p VJ=0.8 M=0.33 RS=5 VP=0.3)
+.model DVP2 D(IS=1e-14 TT=20n VP=0.8)
+.ac dec 10 1k 10G
+.end

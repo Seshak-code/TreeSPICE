@@ -1,0 +1,8 @@
+* time  a      b
+# a comment
+; and another
+0.5     1.0,   10
+1.5     2.0    20
+2       -1     5   extra columns are ignored
+3.5     0.5    -2
+6       3      0

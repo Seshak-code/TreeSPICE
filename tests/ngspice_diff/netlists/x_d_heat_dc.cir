@@ -1,0 +1,11 @@
+* Diode self-heating (D a k tj THERMAL, RTH0: ngspice dioload): tj is the junction's rise, the card at T0 + v(tj);
+* RS dissipates too, tj also loads an external thermal resistance. Tight tolerances: ngspice's temperature
+* partials are not all exact, its Newton stops at RELTOL (8e-4 off here)
+VD a 0 DC 0
+R1 a k 10
+D1 k 0 tj DH THERMAL
+RTX tj 0 100
+.model DH D(IS=1e-12 N=1.2 RS=0.5 CJO=10p TT=5n EG=1.11 XTI=3 BV=20 IBV=1e-4 RTH0=50 CTH0=1e-6 TRS1=3e-3 IKF=1)
+.options reltol=1e-7 abstol=1e-15 vntol=1e-12
+.dc VD -21 3 0.05
+.end

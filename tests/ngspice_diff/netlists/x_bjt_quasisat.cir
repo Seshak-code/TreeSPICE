@@ -1,0 +1,12 @@
+* Gummel-Poon with Kull quasi-saturation (RCO, VO, GAMMA, QCO): output curves through quasi-saturation, with RC
+* in series (C - RC - Cx - Rci - C'), and a second device at 120 C with QUASIMOD 1 (RCO, VO, GAMMA temperature laws)
+ib 0 b DC 0
+vc c 0 DC 0
+q1 c b 0 qs
+ib2 0 b2 DC 50u
+q2 c b2 0 qt temp=120
+.model qs npn is=1e-15 bf=150 br=3 vaf=80 rb=20 rc=2 re=0.5 rco=50 vo=2 gamma=1e-10 qco=1e-12 cjc=1p cje=2p tf=0.2n
+.model qt npn is=1e-15 bf=150 br=3 vaf=80 rco=50 vo=2 gamma=1e-10 quasimod=1 cn=2.2 d=0.7 vg=1.18
+.dc vc 0 5 0.02 ib 20u 100u 40u
+.print dc i(vc)
+.end

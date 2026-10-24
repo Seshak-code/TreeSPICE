@@ -9,6 +9,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -36,16 +37,27 @@ inline Val resolve(Val a, Val b) {
     return {c[0] == '0' ? L0 : c[0] == '1' ? L1 : LU, c[1] == 's' ? SS : c[1] == 'r' ? SR : c[1] == 'z' ? SZ : SU};
 }
 
-enum class Kind { BUF, INV, AND, NAND, OR, NOR, XOR, XNOR, TRI, PULLUP, PULLDOWN, DFF, ADC, DAC };
+enum class Kind { BUF, INV, AND, NAND, OR, NOR, XOR, XNOR, TRI, PULLUP, PULLDOWN, DFF, JKFF, TFF, SRFF, DLATCH, SRLATCH, OPENC, OPENE, FDIV, LUT, SOURCE, OSC, PWM, STATE, RAM, ADC, DAC };
 struct Port { int node = -1; bool inv = false; };  // a digital node, or -1 (NULL)
 struct Inst {
     std::string name;
     Kind kind = Kind::BUF;
-    std::vector<Port> in, out;  // digital; DFF in: data clk set reset, out: out Nout; tristate in: in enable
+    std::vector<Port> in, out;  // digital; flip-flops / latches in: data (JK, SR: two) clk (latch: enable) set reset, out: out Nout; tristate in: in enable
     std::vector<int> analog;    // adc_bridge inputs / dac_bridge outputs (global analog nodes)
     std::vector<int> vsrc;      // dac_bridge: its voltage source per output (global block)
-    double rise = 1e-9, fall = 1e-9;              // output delays (tristate: its delay, both)
-    double clk = 1e-9, set = 1e-9, reset = 1e-9;  // d_dff: added to rise / fall
+    double rise = 1e-9, fall = 1e-9;              // output delays (tristate: its delay, both; open collector / emitter: open_delay is the open edge)
+    double clk = 1e-9, set = 1e-9, reset = 1e-9;  // flip-flops (latch: clk is enable_delay): added to rise / fall
+    double data = 1e-9;                           // latches: data_delay / sr_delay; d_ram: read_delay
+    int addr = 0, select = 1;                     // d_ram: address lines; select_value (in: data, address, write_en, select)
+    int div = 2, high = 1, icount = 0;            // d_fdiv: div_factor, high_cycles, i_count
+    std::vector<Lv> table;                        // d_lut: the output per input word (in[0] the low bit)
+    std::vector<double> times;                    // d_source: each row's time (increasing) and its outputs
+    std::vector<std::vector<Val>> rows;           // d_source, d_state: the outputs per row (d_state: its state's)
+    std::vector<int> state, nextState;            // d_state: each row's state and next state, the inputs it matches
+    std::vector<std::vector<Lv>> match;           //   (U: x, don't care); a state's rows are contiguous
+    std::vector<double> ctl, freq;                // d_osc / d_pwm: the control table (ctl increasing) to frequency / duty
+    double duty = 0.5, phase = 0.0;               // d_osc: duty_cycle; both: init_phase (degrees)
+    double period = 1e-6;                         // d_pwm: 1 / frequency
     Lv ic = L0;
     bool inertial = false;                        // inertial_delay (buffer, inverter, gates): a pulse shorter than the delay is dropped
     double lo = 0.1, hi = 0.9;                                             // adc_bridge in_low / in_high
@@ -81,7 +93,7 @@ public:
             st_[i].prev.assign(x.in.size(), LU);
             st_[i].when.assign(x.out.size(), -1.0);
             st_[i].iprev.assign(x.out.size(), LU);
-            st_[i].adc.assign(x.kind == Kind::ADC ? x.analog.size() : 0, LU);
+            st_[i].adc.assign(x.kind == Kind::ADC ? x.analog.size() : 0, static_cast<Lv>(3));  // none yet: the first sample posts, U too
             st_[i].dac.assign(x.kind == Kind::DAC ? x.analog.size() : 0, -1e300);
         }
     }
@@ -92,6 +104,7 @@ public:
         const auto &n = *net_;
         for (size_t i = 0; i < n.insts.size(); ++i)
             if (n.insts[i].kind == Kind::ADC) sampleAdc((int)i, 0.0, v, true);
+            else if (n.insts[i].kind == Kind::OSC || n.insts[i].kind == Kind::PWM) oscStart((int)i, v);
         for (int pass = 0; pass < 200; ++pass) {  // event passes until nothing changes
             bool any = false;
             for (size_t i = 0; i < n.insts.size(); ++i) any |= eval((int)i, 0.0, true);
@@ -104,6 +117,8 @@ public:
                     st_[i].dac[k] = dacTarget(n.insts[i], level(n.insts[i].in[k]));
                     dc.push_back({n.insts[i].vsrc[k], st_[i].dac[k]});
                 }
+        for (size_t i = 0; i < n.insts.size(); ++i)
+            if (n.insts[i].kind == Kind::SOURCE) sourceRow((int)i);
         log_.clear();
         for (size_t k = 0; k < node_.size(); ++k) log_.push_back({0.0, (int)k, node_[k]});
         return dc;
@@ -119,8 +134,11 @@ public:
 
     // The first pending event after x (infinity when none): the transient lands a step on it
     double next(double x) const {
-        for (const auto &[t, e] : queue_) if (t > x) return t;
-        return 1e300;
+        double best = 1e300;
+        for (const auto &[t, e] : queue_) if (t > x) { best = t; break; }
+        for (size_t i = 0; i < st_.size(); ++i)
+            if ((net_->insts[i].kind == Kind::OSC || net_->insts[i].kind == Kind::PWM) && st_[i].wake > x) best = std::min(best, st_[i].wake);
+        return best;
     }
 
     // An accepted time point t: process the events up to t, then sample the adc_bridges at t.
@@ -135,12 +153,14 @@ public:
                 queue_.erase(queue_.begin());
                 st_[e.inst].drive[e.port] = e.v;
                 touched.push_back(net_->insts[e.inst].out[e.port].node);
+                if (net_->insts[e.inst].kind == Kind::SOURCE && e.port == 0) { ++st_[e.inst].count; sourceRow(e.inst); }
             }
             propagate(touched, te, false);
         }
         const auto &n = *net_;
         for (size_t i = 0; i < n.insts.size(); ++i)
             if (n.insts[i].kind == Kind::ADC) sampleAdc((int)i, t, v, false);
+            else if (n.insts[i].kind == Kind::OSC || n.insts[i].kind == Kind::PWM) oscCall((int)i, t, v, false);
         return ramps_;
     }
 
@@ -156,6 +176,11 @@ private:
         std::vector<double> dac;       // dac_bridge: the voltage each output heads for
         std::vector<double> when;      // inertial: the pending change's time per output (<= now: none)
         std::vector<Lv> iprev;         // inertial: the output's value before that change
+        int count = 0;                 // d_fdiv: the edge count; d_source: the next row; d_state: the state
+        Lv osc = L0;                   // d_osc: its output (ngspice state->last), set at oscT; its next call at wake
+        Lv sel = L0;                   // d_ram: selected at the last call; its words, word-major
+        std::vector<Lv> mem;
+        double oscT = 0.0, wake = -1.0;
     };
     std::shared_ptr<const Net> net_;
     std::vector<Val> node_;
@@ -225,7 +250,7 @@ private:
         if (x.inertial) {
             if (s.when[p] <= t) { s.iprev[p] = old.v; s.when[p] = t + delay; }
             else if (v.v != s.iprev[p]) {
-                queue(i, p, {s.iprev[p], SS}, t + (s.when[p] - t) / 2.0);
+                queue(i, p, {s.iprev[p], drive(x, s.iprev[p])}, t + (s.when[p] - t) / 2.0);
                 if (v.v == LU) delay = s.iprev[p] == L0 ? x.rise : x.fall;
                 s.when[p] = t + delay;
             } else {
@@ -235,6 +260,28 @@ private:
         }
         queue(i, p, v, t + std::max(delay, 1e-12));  // a zero delay is 1 ps in ngspice
         return true;
+    }
+    // d_source: queue its next row (one at a time, as ngspice, so a long file does not fill the queue)
+    void sourceRow(int i) {
+        const auto &x = net_->insts[i];
+        const size_t k = st_[i].count;
+        if (k >= x.times.size()) return;
+        for (size_t p = 0; p < x.out.size(); ++p) queue(i, (int)p, x.rows[k][p], x.times[k]);
+    }
+    // An output's strength at level l: d_open_c drives only 0, d_open_e only 1 (the other level is high impedance)
+    static St drive(const Inst &x, Lv l) {
+        if (l == LU) return x.kind == Kind::OPENC || x.kind == Kind::OPENE ? SU : SS;
+        return x.kind == Kind::OPENC && l == L1 ? SZ : x.kind == Kind::OPENE && l == L0 ? SZ : SS;
+    }
+    // The flip-flops' and latches' t = 0 set / reset: each wins only with the other at 0
+    static Lv asyncDc(Lv set, Lv rst, Lv q) {
+        return set == L1 && rst == L1 ? LU : set == L1 && rst == L0 ? L1 : set == L0 && rst == L1 ? L0 : q;
+    }
+    // ngspice's cm_eval_jk_result / cm_eval_sr_result: 00 holds, 01 resets, 10 sets, 11 toggles (JK) or is U (SR); U in gives U
+    static Lv jkSr(Lv a, Lv b, Lv old, bool jk) {
+        if (a == LU || b == LU) return LU;
+        if (a == L0) return b == L0 ? old : L0;
+        return b == L0 ? L1 : jk ? invert(old) : LU;
     }
     // ngspice's delay choice: rise to 1, fall to 0; to U, rise from 0 and fall from 1
     double edge(const Inst &x, Val old, Lv now, double base) const {
@@ -273,28 +320,152 @@ private:
             break;
         }
         case Kind::TRI: out(0, in[0], in[1] == L1 ? SS : in[1] == L0 ? SZ : SU, 0); break;
+        case Kind::OPENC: case Kind::OPENE: out(0, in[0], drive(x, in[0]), 0); break;
+        case Kind::FDIV: {
+            // ngspice d_fdiv: a rising input (to 1 from 0 or U) counts; at div_factor + 1 the count wraps to 1 and the
+            // output rises, at high_cycles + 1 it falls. t = 0: i_count outside [0, div_factor) is 0; the output is 1
+            // for a count in [1, high_cycles], else 0
+            Lv q = s.last[0].v;
+            if (dc) {
+                s.count = x.icount >= 0 && x.icount < x.div ? x.icount : 0;
+                q = s.count > 0 && s.count <= x.high ? L1 : L0;
+            } else if (in[0] != s.prev[0] && in[0] == L1) {
+                if (++s.count == x.div + 1 || s.count == 1) { s.count = 1; q = L1; }
+                else if (s.count == x.high + 1) q = L0;
+            }
+            out(0, q, SS, 0);
+            break;
+        }
+        case Kind::SOURCE:  // ngspice d_source: a row at t = 0 is the DC value, else U; the rest are queued (sourceRow)
+            if (dc) {
+                s.count = !x.times.empty() && x.times[0] == 0.0 ? 1 : 0;
+                for (size_t p = 0; p < x.out.size(); ++p) changed |= post(i, (int)p, s.count ? x.rows[0][p] : Val{LU, SU}, t, 0.0, true);
+            }
+            break;
+        case Kind::STATE: {
+            // ngspice d_state: reset rising to 1 enters reset_state (reset_delay); else, reset not at 1, a clock rising
+            // to 1 takes the first of the state's rows whose inputs match (clk_delay). The outputs are the state's.
+            // XSPICE starts clk and reset's previous values at 0, not at their t = 0 values: a clock already at 1 at
+            // t = 0 is an edge on the first transient call.
+            const size_t ni = x.in.size() - 2;
+            const Lv clk = in[ni], rst = in[ni + 1];
+            auto enter = [&](int st, double delay) {
+                s.count = st;
+                const size_t r = std::find(x.state.begin(), x.state.end(), st) - x.state.begin();
+                for (size_t p = 0; p < x.out.size(); ++p) changed |= post(i, (int)p, x.rows[r][p], t, delay, dc);
+            };
+            if (dc) {
+                enter(x.icount, 0.0);
+                in[ni] = in[ni + 1] = L0;
+            } else if (rst != s.prev[ni + 1]) {
+                if (rst == L1) enter(x.icount, x.reset);
+            } else if (rst != L1 && clk != s.prev[ni] && clk == L1) {
+                for (size_t r = 0; r < x.state.size(); ++r) {
+                    if (x.state[r] != s.count) continue;
+                    bool ok = true;
+                    for (size_t k = 0; k < ni && ok; ++k) ok = x.match[r][k] == LU || x.match[r][k] == in[k];
+                    if (ok) { enter(x.nextState[r], x.clk); break; }
+                }
+            }
+            break;
+        }
+        case Kind::RAM: {
+            // ngspice d_ram: selected (select lines equal select_value's bits) with write_en 1 stores data_in at the
+            // address and drives it at high impedance; with write_en 0 / U it reads the address (an address bit at
+            // U reads U; a write there makes the whole RAM U). Deselecting tristates the outputs (Uz). All after read_delay.
+            const size_t w = x.out.size(), na = x.addr, ns = x.in.size() - w - na - 1;
+            const Lv we = in[w + na];
+            Lv sel = L1;
+            for (size_t k = 0; k < ns; ++k) if (in[w + na + 1 + k] != ((x.select >> k) & 1 ? L1 : L0)) sel = L0;
+            bool unknown = false;
+            size_t word = 0;
+            for (size_t k = 0; k < na; ++k) { unknown |= in[w + k] == LU; word |= size_t{in[w + k] == L1} << k; }
+            auto drive = [&](auto value, St strength) {
+                for (size_t b = 0; b < w; ++b) changed |= post(i, (int)b, {value(b), strength}, t, dc ? 0.0 : x.data, dc);
+            };
+            auto read = [&] { drive([&](size_t b) { return unknown ? LU : s.mem[word * w + b]; }, SS); };
+            auto write = [&] {
+                if (unknown) std::fill(s.mem.begin(), s.mem.end(), LU);
+                else for (size_t b = 0; b < w; ++b) s.mem[word * w + b] = in[b];
+                drive([&](size_t b) { return unknown ? LU : in[b]; }, SZ);
+            };
+            if (dc) {
+                s.mem.assign((size_t{1} << na) * w, x.ic);
+                if (sel == L1 && we == L0) drive([&](size_t) { return x.ic; }, SS);
+                else drive([](size_t) { return LU; }, SZ);
+            } else if (sel != s.sel) {
+                if (sel == L1) { if (we == L0) read(); else write(); }
+                else if (we == L0) drive([](size_t) { return LU; }, SZ);
+            } else if (sel == L1) {
+                if (we == L1) write(); else read();
+            }
+            s.sel = sel;
+            break;
+        }
+        case Kind::LUT: {
+            size_t idx = 0;
+            for (size_t k = 0; k < in.size(); ++k) idx |= size_t{in[k] == L1} << k;
+            out(0, any(LU) ? LU : x.table[idx], SS, 0);
+            break;
+        }
         case Kind::PULLUP: out(0, L1, SR, 0); break;
         case Kind::PULLDOWN: out(0, L0, SR, 0); break;
-        case Kind::DFF: {
-            // ngspice d_dff: a set or reset change acts at once; otherwise a rising clock (to 1 from 0 or U)
-            // with set and reset at 0 takes the data. Set and reset at U keep an output that agrees.
-            const Lv d = in[0], clk = in[1], set = in[2], rst = in[3];
+        case Kind::DFF: case Kind::JKFF: case Kind::TFF: case Kind::SRFF: {
+            // ngspice d_dff / d_jkff / d_tff / d_srff (one set / reset logic): a set or reset change acts at once;
+            // otherwise a rising clock (to 1 from 0 or U) with neither set nor reset at 1 takes the next state.
+            // Set and reset at U keep an output that agrees.
+            const size_t nd = x.kind == Kind::JKFF || x.kind == Kind::SRFF ? 2 : 1;
+            const Lv clk = in[nd], set = in[nd + 1], rst = in[nd + 2];
             const Lv old = s.last[0].v;
             Lv q = old;
             double base = 0.0;
-            if (dc) q = set == L1 && rst == L1 ? LU : set == L1 ? L1 : rst == L1 ? L0 : x.ic;
-            else if (set != s.prev[2]) {
+            if (dc) q = asyncDc(set, rst, x.ic);
+            else if (set != s.prev[nd + 1]) {
                 base = x.set;
                 if (set == L1) q = rst == L1 ? LU : L1;
                 else if (set == L0) q = rst == L1 ? L0 : old;
                 else q = rst == L1 ? (old == L0 ? L0 : LU) : (old == L1 ? L1 : LU);
-            } else if (rst != s.prev[3]) {
+            } else if (rst != s.prev[nd + 2]) {
                 base = x.reset;
                 if (rst == L1) q = set == L1 ? LU : L0;
                 else if (rst == L0) q = set == L1 ? L1 : old;
                 else q = set == L1 ? (old == L1 ? L1 : LU) : (old == L0 ? L0 : LU);
-            } else if (clk != s.prev[1] && clk == L1 && set == L0 && rst == L0) {
+            } else if (clk != s.prev[nd] && clk == L1 && set != L1 && rst != L1) {
                 base = x.clk;
+                const Lv a = in[0], b = nd > 1 ? in[1] : LU;
+                if (x.kind == Kind::DFF) q = a;
+                else if (x.kind == Kind::TFF) q = a == L1 ? invert(old) : a == L0 ? old : LU;
+                else q = jkSr(a, b, old, x.kind == Kind::JKFF);
+            }
+            out(0, q, SS, base);
+            out(1, invert(q), SS, base);
+            break;
+        }
+        case Kind::DLATCH: case Kind::SRLATCH: {
+            // ngspice d_dlatch / d_srlatch: a set change acts, else a reset change, else an enable change, else a data change.
+            // Releasing set or reset (to 0 or U) while enabled takes the data at once; set and reset at U count as 0.
+            const bool sr = x.kind == Kind::SRLATCH;
+            const size_t nd = sr ? 2 : 1;
+            const Lv en = in[nd], set = in[nd + 1], rst = in[nd + 2];
+            const Lv old = s.last[0].v;
+            const Lv d = sr ? jkSr(in[0], in[1], old, false) : in[0];
+            Lv q = old;
+            double base = 0.0;
+            if (dc) {
+                if (en == L1) q = !sr ? in[0] : in[0] == L1 && in[1] == L0 ? L1 : in[0] == L0 && in[1] == L1 ? L0 : x.ic;
+                else q = x.ic;
+                q = asyncDc(set, rst, q);
+            } else if (set != s.prev[nd + 1]) {
+                base = x.set;
+                q = set == L1 ? (rst == L1 ? LU : L1) : rst == L1 ? L0 : en == L1 ? d : old;
+            } else if (rst != s.prev[nd + 2]) {
+                base = x.reset;
+                q = rst == L1 ? (set == L1 ? LU : L0) : set == L1 ? L1 : en == L1 ? d : old;
+            } else if (set != L1 && rst != L1 && en != s.prev[nd]) {
+                base = x.clk;
+                q = en == L1 ? d : old;
+            } else if (set != L1 && rst != L1 && en == L1 && (in[0] != s.prev[0] || (sr && in[1] != s.prev[1]))) {
+                base = x.data;
                 q = d;
             }
             out(0, q, SS, base);
@@ -310,10 +481,61 @@ private:
                 changed = true;
             }
             break;
-        case Kind::ADC: break;  // sampled at time points (sampleAdc)
+        case Kind::ADC: case Kind::OSC: case Kind::PWM: break;  // called at time points (sampleAdc, oscCall)
         }
         s.prev = in;
         return changed;
+    }
+
+    // ngspice d_osc's period (and its fixed duty) or d_pwm's fixed period and duty at control c: the table's
+    // piecewise-linear value, its end segments extended (d_pwm's duty then held to [0.01, 0.99])
+    static std::pair<double, double> oscPD(const Inst &x, double c) {
+        const size_t n = x.ctl.size();
+        size_t k = 0;
+        while (k < n && x.ctl[k] <= c) ++k;
+        if (k > 0) k = k == n ? n - 2 : k - 1;
+        const double y = x.freq[k] + (c - x.ctl[k]) * ((x.freq[k + 1] - x.freq[k]) / (x.ctl[k + 1] - x.ctl[k]));
+        if (x.kind == Kind::PWM) return {x.period, std::clamp(y, 0.01, 0.99)};
+        if (!(y > 0.0)) throw std::runtime_error(x.name + ": d_osc control " + std::to_string(c) + " V gives a frequency <= 0");
+        return {1.0 / y, x.duty};
+    }
+    // t = 0: the state a transition before t = 0 would have left (init_phase into the cycle, which starts low), then
+    // the t = 0 call
+    void oscStart(int i, const std::function<double(int)> &v) {
+        const auto &x = net_->insts[i];
+        auto &s = st_[i];
+        const auto [P, d] = oscPD(x, v(x.analog[0]));
+        double ph = x.phase / 360.0;
+        if (ph < 0.0) ph += 1.0;
+        s.oscT = P * (1.0 - d - ph);
+        if (s.oscT < 0.0) s.osc = L1;
+        else { s.osc = L0; s.oscT = -P * ph; }
+        s.wake = -1.0;
+        oscCall(i, 0.0, v, true);
+    }
+    // ngspice cm_d_osc / cm_d_pwm's event call (each accepted point and its own requests): once 3/4 of the half
+    // period has passed, post the transition at its time from the present period, and ask for a call 4/5 into the next half
+    void oscCall(int i, double t, const std::function<double(int)> &v, bool dc) {
+        const auto &x = net_->insts[i];
+        auto &s = st_[i];
+        const auto [P, d] = oscPD(x, v(x.analog[0]));
+        double delta = P * (s.osc == L1 ? d : 1.0 - d), when = s.oscT + delta;
+        // ponytail: a missed transition (the control raised the frequency within one step) makes ngspice reject
+        // the step and land just before it; the event loop cannot reject steps, so it posts at t, up to a step late
+        if (t >= when) when = t;
+        if (t >= s.oscT + 0.75 * delta) {
+            s.oscT = when;
+            s.osc = invert(s.osc);
+            post(i, 0, {s.osc, SS}, t, when - t, dc);
+            // d_pwm scales the half it just ended by the next one's share (ngspice's delta *= ddc): its request comes
+            // early, and the call then asks again; kept, as the extra call lands an analog step
+            delta = (x.kind == Kind::PWM ? delta : P) * (s.osc == L1 ? d : 1.0 - d);
+            s.wake = s.oscT + 0.8 * delta;
+        } else {
+            // ngspice's t = 0 call sets the output but then marks it unchanged: the node keeps XSPICE's initial 0u
+            if (dc) post(i, 0, {L0, SU}, t, 0.0, true);
+            if (t >= s.oscT) s.wake = s.oscT + 0.8 * delta;
+        }
     }
 
     void sampleAdc(int i, double t, const std::function<double(int)> &v, bool dc) {
