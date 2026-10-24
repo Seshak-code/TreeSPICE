@@ -1086,6 +1086,8 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         for (const auto& [def, kids] : subcktChildren_)
             for (const auto& c : kids) h.children[def].push_back({c.subckt, c.name, c.nodes});
         h.nodeNames = subcktNames_;
+        for (const auto& [def, ics] : subcktICs_)
+            for (const auto& ic : ics) h.seeds[def].push_back({subcktNames_[def].at(ic.node), ic.value, ic.nodeset});
     }
     if (flatten_) {
         for (const auto& pi : topInstances_) {
@@ -1106,8 +1108,8 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             st = 1;
             if (!subcktA_[pi.subckt].empty())
                 throw std::runtime_error(pi.subckt + ": XSPICE devices in a subcircuit need the flattened netlist");
-            if (!subcktICs_[pi.subckt].empty())
-                throw std::runtime_error(pi.subckt + ": .ic / .nodeset in a subcircuit need the flattened netlist");
+            if (!subcktGlobals_[pi.subckt].empty())
+                throw std::runtime_error(pi.subckt + ": .global nets inside a subcircuit need the flattened netlist");
             for (const auto& c : subcktChildren_[pi.subckt]) check(c, depth + 1);
             st = 2;
         };

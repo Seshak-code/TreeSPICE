@@ -98,7 +98,8 @@ public:
     SPICEParseResult parse(const std::string& netlistText, const std::string& baseDir = "", double tempC = NAN,
                            const std::map<std::string, double>& paramOverrides = {}, const SensParam* sens = nullptr);
     // false: the hierarchy only (netlist.hier), no expansion into netlist.instances: O(definitions) for an
-    // array of 1e9 cells (S3). XSPICE devices and .ic / .nodeset inside a subcircuit need the expansion then.
+    // array of 1e9 cells (S3). XSPICE devices, .global nets inside a subcircuit and an .ic / .nodeset on a
+    // subcircuit's node from outside (x1.n) need the expansion then.
     void setFlatten(bool flatten) { flatten_ = flatten; }
 
 private:

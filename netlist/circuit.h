@@ -1242,6 +1242,8 @@ struct Hierarchy {
     std::vector<HierInstance> top;
     std::map<std::string, std::vector<HierInstance>> children;       // definition -> its X instances
     std::map<std::string, std::map<std::string, int>> nodeNames;     // definition -> local node name -> index
+    struct Seed { int node; double value; bool nodeset; };           // a body's .ic / .nodeset (every instance's)
+    std::map<std::string, std::vector<Seed>> seeds;
     // Instances in the expansion (every X at every level): a definition's count is computed once
     double expandedInstances() const {
         std::map<std::string, double> memo;

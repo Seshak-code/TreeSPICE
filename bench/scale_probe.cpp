@@ -11,6 +11,7 @@
 #include <thread>
 #include "osdi/osdi_abi.h"
 #include "osdi/osdi_device.h"
+#include "netlist/hier_partition.h"
 #include <malloc/malloc.h>
 #include <chrono>
 #include <cstdio>
@@ -44,6 +45,10 @@ int main(int argc, char** argv) {
         if (!hr.success) { std::fprintf(stderr, "parse: %s\n", hr.errorMessage.c_str()); return 1; }
         std::printf("hier: %.0f instances expanded, %zu definitions, live %.2f MB, %.2f s\n", hr.netlist.hier.expandedInstances(),
                     hr.netlist.blockDefinitions.size(), liveMB() - h0, std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count());
+        const auto t2 = std::chrono::steady_clock::now();
+        const auto part = hierpart::partition(hr.netlist);  // S3.1
+        std::printf("partition: %zu contexts, %zu net classes, live %.2f MB, %.3f s\n", part.ctx.size(), part.netClasses(),
+                    liveMB() - h0, std::chrono::duration<double>(std::chrono::steady_clock::now() - t2).count());
         return 0;
     }
     const double m0 = liveMB();

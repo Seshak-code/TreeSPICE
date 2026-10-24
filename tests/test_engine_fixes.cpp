@@ -13,6 +13,7 @@
 #include "physics/circuitsim.h"
 #include "netlist/spice_parser.h"
 #include "netlist/numparam.h"
+#include "netlist/hier_partition.h"
 
 #include <array>
 #include <cmath>
@@ -788,6 +789,69 @@ int main() {
             const auto xs = xp.parse("* a in subckt\n.subckt buf a y\naa a y g\n.model g gain(gain=2)\n.ends\nV1 i 0 1\nX1 i o buf\nR1 o 0 1k\n.op\n.end\n");
             check(!xs.success && xs.errorMessage.find("need the flattened netlist") != std::string::npos,
                   "S3.0: XSPICE devices in a subcircuit need the flattened netlist (" + xs.errorMessage + ")");
+        }
+        {   // S3.1: the partition of an unflattened netlist is sound: a flat DC solve of the same circuit (unique: an
+            // array of inverter cells) gives every net of a class one voltage. Bank 0 sees its own driver: two bank,
+            // row and cell contexts; a B source is refused, not partitioned
+            auto arr = [](bool b) {
+                std::string t = "* array\n.subckt cell in vdd\nM1 mid in 0 0 nm W=1u L=0.18u\nM2 mid in vdd vdd pm W=2u L=0.18u\n"
+                                "M3 out mid 0 0 nm W=1u L=0.18u\nM4 out mid vdd vdd pm W=2u L=0.18u\nR1 out 0 50k\n.ends\n"
+                                ".subckt row in vdd\n";
+                for (int i = 0; i < 4; ++i) t += "XC" + std::to_string(i) + " in vdd cell\n";
+                t += ".ends\n.subckt bank in vdd\n";
+                for (int i = 0; i < 4; ++i) t += "XR" + std::to_string(i) + " in vdd row\n";
+                t += ".ends\n.model nm nmos level=1 vto=0.5 kp=200u\n.model pm pmos level=1 vto=-0.5 kp=80u\nVDD vdd 0 1.8\n"
+                     "VIN in 0 0.7\nVIN2 in2 0 1.1\nR9 in 0 1meg\nR10 in2 0 1meg\nXB0 in2 vdd bank\n";
+                for (int i = 1; i < 4; ++i) t += "XB" + std::to_string(i) + " in vdd bank\n";
+                return t + (b ? "B1 x 0 V=v(in)\nR11 x 0 1k\n" : "") + ".op\n.end\n";
+            };
+            const auto flat = run(PrecisionMode::Native_F64, arr(false));
+            SPICEParser hp;
+            hp.setFlatten(false);
+            const auto h = hp.parse(arr(false));
+            bool ok = flat.converged && h.success && !flat.waveformPoints.empty();
+            hierpart::Partition part;
+            if (ok) part = hierpart::partition(h.netlist);
+            std::map<std::pair<int, int>, double> classV;  // (context, color) -> the first flat voltage seen
+            double worst = 0.0;
+            size_t mapped = 0;
+            for (size_t i = 0; ok && i < flat.nodeNames.size(); ++i) {
+                std::string name = flat.nodeNames[i];
+                for (auto& ch : name) ch = (char)std::toupper((unsigned char)ch);
+                if (name.empty()) continue;
+                int ctx = 0, local = -1;
+                if (name.find('.') == std::string::npos) {
+                    const auto it = h.nodeIndex.find(name);
+                    if (it == h.nodeIndex.end()) continue;
+                    local = it->second;
+                } else {
+                    std::vector<const HierInstance*> chain;
+                    if (!h.netlist.hier.resolve(name, chain, local)) { ok = false; break; }
+                    const std::vector<HierInstance>* level = &h.netlist.hier.top;
+                    for (const auto* x : chain) {
+                        const size_t k = (size_t)(x - level->data());
+                        ctx = part.ctx[ctx].child[k];
+                        const auto kids = h.netlist.hier.children.find(x->def);
+                        level = kids == h.netlist.hier.children.end() ? nullptr : &kids->second;
+                    }
+                }
+                const auto key = std::make_pair(ctx, part.ctx[ctx].net[local]);
+                const double v = flat.waveformPoints.back().nodeVoltages[i];
+                if (auto it = classV.find(key); it != classV.end()) worst = std::max(worst, std::abs(it->second - v));
+                else classV[key] = v;
+                ++mapped;
+            }
+            check(ok && mapped > 100 && worst < 1e-9 && part.ctx.size() == 7,
+                  "S3.1: every net of a class has one flat voltage (worst " + std::to_string(worst) + " V over " +
+                      std::to_string(mapped) + " nets; " + std::to_string(part.ctx.size()) + " contexts, " +
+                      std::to_string(classV.size()) + " classes)");
+            SPICEParser bp;
+            bp.setFlatten(false);
+            const auto hb = bp.parse(arr(true));
+            std::string err;
+            try { hierpart::partition(hb.netlist); } catch (const std::exception& e) { err = e.what(); }
+            check(hb.success && err.find("not supported unflattened") != std::string::npos,
+                  "S3.1: a coupling the refinement does not model is refused (" + err + ")");
         }
         {   // .save narrows what a run stores to the vectors .save, .print and .meas name (ngspice saves only those);
             // .save all, or none, keeps every node and branch
