@@ -4,6 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <array>
+#include <type_traits>
 
 /*
  * device_physics.h - Pure Constitutive Equations for Semiconductor Devices
@@ -173,6 +174,7 @@ struct Mos1Params {
     P nfs = 0.0, nsub = 0.0, xd = 0.0, xj = 0.0, ld = 0.0, delta = 0.0;  // NFS [1/cm^2], NSUB given, depletion width coefficient
     P ucrit = 1e4, uexp = 0.0, vmax = 0.0, neff = 1.0;                    // level 2
     P eta = 0.0, theta = 0.0, kappa = 0.2, alpha = 0.0;                   // level 3
+    P kv = 2.0, nv = 0.5, nc = 1.0, gamma1 = 0.0, sigma = 0.0, lambda1 = 0.0;  // level 6 (beta: KC * W / Leff * M)
 };
 
 
@@ -372,6 +374,19 @@ inline T mos1_von(T vbx, const Mos1Params<P>& p)
     return p.polarity * p.vto + p.gamma * (sarg - sphi);
 }
 
+// Level 6 (ngspice mos6load, Sakurai-Newton n-th power law) in the type domain, source/drain already exchanged
+template <typename T, typename P>
+inline MosChannel<T> mos6_channel(T lvgs, T lvbs, T lvds, const Mos1Params<P>& p)
+{
+    using std::exp; using std::log;
+    const T von = mos1_von(lvbs, p) - p.gamma1 * lvbs - p.sigma * lvds, vgon = lvgs - von;
+    if (vgon <= P(0.0)) return {T(0.0), von, T(0.0)};
+    const T lv = log(vgon), vdsat = p.kv * exp(lv * p.nv);
+    T id = p.beta * exp(lv * p.nc) * (1.0 + (p.lambda - p.lambda1 * lvbs) * lvds);  // saturation
+    if (vdsat > lvds) { const T vdst = lvds / vdsat; id = id * (2.0 - vdst) * vdst; }  // linear
+    return {id, von, vdsat};
+}
+
 template <typename T> struct Mos1Currents { T d, s, b; };
 
 template <typename T, typename P>
@@ -391,6 +406,7 @@ inline Mos1Currents<T> mos1_currents(T vd, T vg, T vs, T vb, const Mos1Params<P>
     T cdrain(0.0);
     if (p.level == 2) cdrain = mos2_channel(normal ? vgs : vgd, normal ? vbs : vbd, vdsm, p).id;
     else if (p.level == 3) cdrain = mos3_channel(normal ? vgs : vgd, normal ? vbs : vbd, vdsm, p).id;
+    else if (p.level == 6) cdrain = mos6_channel(normal ? vgs : vgd, normal ? vbs : vbd, vdsm, p).id;
     else if (vgst > P(0.0)) {
         const T betap = p.beta * (1.0 + p.lambda * vdsm);
         cdrain = vgst <= vdsm ? 0.5 * betap * vgst * vgst                // saturation
@@ -460,7 +476,8 @@ inline Mos1Charges<T> mos1_charges(T vd, T vg, T vs, T vb, const Mos1Params<doub
     if (vdsat < 0.0) vdsat = T(0.0);
     if (p.level != 1) {
         const T vdsm = normal ? vgs - vgd : vgd - vgs, lg = normal ? vgs : vgd, lb = normal ? vbs : vbd;
-        const auto ch = p.level == 2 ? mos2_channel(lg, lb, vdsm, p) : mos3_channel(lg, lb, vdsm, p);
+        const auto ch = p.level == 2 ? mos2_channel(lg, lb, vdsm, p) : p.level == 3 ? mos3_channel(lg, lb, vdsm, p)
+                                                                     : mos6_channel(lg, lb, vdsm, p);
         von = ch.von; vdsat = ch.vdsat;
     }
     const auto h = normal ? mos1_meyer(vgs, vgd, von, vdsat, p.phi, p.cox)
@@ -512,6 +529,9 @@ struct DiodeModel {
     P vtb = PhysicsConstants::V_THERMAL_NOM;               // NBV*Vt: the breakdown slope
     P isr = 0.0, vtr = 2.0 * PhysicsConstants::V_THERMAL_NOM;  // recombination: ISR*AREA, NR*Vt
     P gmin = PhysicsConstants::JUNCTION_GMIN;
+    bool swOwn = false;                                    // NS given: the sidewall has its own characteristic (and breakdown)
+    P fcs = 0.5, ikp = 0.0;                                // sidewall FC, knee current (IKP*PJ*M; 0: none)
+    P itun = 0.0, itunsw = 0.0, vtt = 30.0 * PhysicsConstants::V_THERMAL_NOM;  // tunnelling: JTUN*AREA, JTUNSW*PJ, NTUN*Vt
 };
 
 // Breakdown voltage xbv such that the reverse current at -BV is IBV (ngspice
@@ -535,7 +555,7 @@ inline double diode_breakdown_xbv(double bv, double ibv, double is, double vte, 
 template <typename T, typename P>
 inline std::pair<T, T> diode_iq(T vd, const DiodeModel<P>& p)
 {
-    using std::exp;
+    using std::exp; using std::sqrt;
     // Recombination current (ISR, NR; probed on ngspice 47): ISR (exp(vd/(NR Vt)) - 1) ((1 - vd/VJ)^2 + 0.005)^(M/2),
     // held at its -3 N Vt value below that (ngspice's reverse region does not recompute it), also in breakdown
     T crec = T(0.0);
@@ -545,21 +565,31 @@ inline std::pair<T, T> diode_iq(T vd, const DiodeModel<P>& p)
         const T a = 1.0 - v / p.vj;
         crec = p.isr * (exp(v / p.vtr) - 1.0) * pow(a * a + 0.005, p.m / 2.0);
     }
+    // The sidewall (JSW*PJ): its own characteristic when NS is given, breakdown included; else the bottom's,
+    // whose breakdown it does not follow (ngspice dioload evaluates it at the separate sidewall voltage, 0 there)
+    T cdsw(0.0);
+    const bool brk = p.breakdown && vd < -p.xbv;
+    if (p.isw != P(0.0) && p.swOwn)
+        cdsw = vd >= T(-3.0 * p.vtesw) || !brk ? spice_junction(vd, p.isw, p.vtesw) : -p.isw * exp(-(p.xbv + vd) / p.vtb);
     T cdb;
     // breakdown only below the forward region (ngspice dioload's order): a large NBV makes xbv negative (IHP's
     // antenna diodes: xbv = -18 V), and the forward branch still applies there
-    if (p.breakdown && vd < -p.xbv && vd < T(-3.0 * p.vte)) cdb = -p.is * exp(-(p.xbv + vd) / p.vtb) + crec;
+    if (brk && vd < T(-3.0 * p.vte)) cdb = -p.is * exp(-(p.xbv + vd) / p.vtb) + crec;
     else {
-        cdb = spice_junction(vd, p.is, p.vte) + crec;  // the knees act on both (probed)
-        // high-injection knees (ngspice dioload): forward IKF, reverse IKR; the bottom current only
-        using std::sqrt;
-        if (p.ikf > P(0.0) && cdb > T(0.0)) cdb = cdb / (1.0 + sqrt(cdb / p.ikf));
-        else if (p.ikr > P(0.0) && cdb < T(0.0)) cdb = cdb / (1.0 + sqrt(-cdb / p.ikr));
-        if (p.isw != P(0.0)) cdb = cdb + spice_junction(vd, p.isw, p.vtesw);
+        cdb = spice_junction(vd, p.is, p.vte) + crec;
+        if (p.isw != P(0.0) && !p.swOwn) cdsw = spice_junction(vd, p.isw, p.vte);
     }
+    if (p.itunsw != P(0.0)) cdsw = cdsw - p.itunsw * (exp(-vd / p.vtt) - 1.0);  // tunnelling (JTUNSW, JTUN)
+    if (p.itun != P(0.0)) cdb = cdb - p.itun * (exp(-vd / p.vtt) - 1.0);
+    // high-injection knees (ngspice dioload): forward IKF, reverse IKR (breakdown included) on the bottom current
+    // (recombination and tunnelling in it, probed), IKP on the sidewall's
+    if (vd >= T(-3.0 * p.vte)) { if (p.ikf > P(0.0) && cdb > P(1e-18)) cdb = cdb / (1.0 + sqrt(cdb / p.ikf)); }
+    else if (p.ikr > P(0.0) && cdb < P(-1e-18)) cdb = cdb / (1.0 + sqrt(-cdb / p.ikr));
+    if (p.ikp > P(0.0) && cdsw > P(1e-18)) cdsw = cdsw / (1.0 + sqrt(cdsw / p.ikp));
+    const T cd = cdb + cdsw + p.gmin * vd;
     // the transit-time charge follows the junction current with its GMIN (ngspice: TT*GMIN of capacitance at any bias)
-    const T q = depletion_charge(vd, p.cjo, p.m, p.vj, p.fc) + depletion_charge(vd, p.cjsw, p.mjsw, p.vjsw, p.fc) + p.tt * (cdb + p.gmin * vd);
-    return {cdb + p.gmin * vd, q};
+    const T q = depletion_charge(vd, p.cjo, p.m, p.vj, p.fc) + depletion_charge(vd, p.cjsw, p.mjsw, p.vjsw, p.fcs) + p.tt * cd;
+    return {cd, q};
 }
 
 // Gummel-Poon BJT, parameters resolved (AREA applied; ngspice bjt level 1
@@ -580,13 +610,14 @@ struct BjtModel {
     P cjs = 0.0, vjs = 0.75, mjs = 0.0, fc = 0.5;
     P iss = 0.0, vts = PhysicsConstants::V_THERMAL_NOM;       // substrate junction: ISS*AREA, NS*Vt
     P tf = 0.0, xtf = 0.0, ovtf = 0.0, xjtf = 0.0, tr = 0.0;   // ovtf = 1/(1.44 VTF), xjtf = ITF*AREA
+    P td = 0.0;                                                // excess-phase delay PTF*pi/180*TF
 };
 
 // DC terminal currents (into C', B'), the substrate junction current cs (S -> C',
 // ISS diode + GMIN, as ngspice 4 bjtload: it exists even with ISS = 0) and the
 // four charges qbe (B'-E'), qbc (B'-C'), qbx (B-C'), qsub (S-C'), all in the
 // type domain, at junction voltages vbe, vbc (internal), vbx (external base), vsub.
-template <typename T> struct BjtEval { T cc, cb, cs, qb, q[4]; };
+template <typename T> struct BjtEval { T cc, cb, cs, qb, q[4], xf; };
 
 // Base resistance of a bias-dependent RB (ngspice bjtload): RBM + (RB - RBM)/qb, or with IRB the
 // tan() law in the base current cb (qb is not used then).
@@ -604,7 +635,10 @@ inline T bjt_rbb(T qb, T cb, const BjtModel<P>& p)
 }
 
 template <typename T, typename P>
-inline BjtEval<T> bjt_gp(T vbe, T vbc, T vbx, T vsub, const BjtModel<P>& p)
+// Excess phase (ngspice bjtload, Weil's approximation with backward Euler): in transient the forward transfer current
+// cbe/qb is filtered, cc = hist + (arg3 cbe - cbc)/qb with hist from the last two accepted steps; xf is the filtered
+// value to keep. arg3 = 1, hist = 0: none (DC, or PTF = 0).
+inline BjtEval<T> bjt_gp(T vbe, T vbc, T vbx, T vsub, const BjtModel<P>& p, double arg3 = 1.0, double hist = 0.0)
 {
     using std::exp; using std::log; using std::sqrt;
     const P gmin = p.gmin;
@@ -621,7 +655,9 @@ inline BjtEval<T> bjt_gp(T vbe, T vbc, T vbx, T vsub, const BjtModel<P>& p)
     }
     BjtEval<T> r;
     r.qb = qb;
-    r.cc = (cbe - cbc) / qb - cbc / p.br - cbcn;
+    const T cex = cbe * arg3;
+    r.cc = hist + (cex - cbc) / qb - cbc / p.br - cbcn;
+    r.xf = hist + cex / qb;
     r.cb = cbe / p.bf + cben + cbc / p.br + cbcn;
     r.cs = (p.iss != P(0.0) ? spice_junction(vsub, p.iss, p.vts) : T(0.0)) + gmin * vsub;
 
@@ -658,7 +694,34 @@ struct JfetModel {
     P is = 1e-14, vt = PhysicsConstants::V_THERMAL_NOM; // IS*AREA, N*Vt (gate junctions)
     P cgs = 0.0, cgd = 0.0, pb = 1.0, fc = 0.5;        // CGS*AREA, CGD*AREA, PB, FC
     P gmin = PhysicsConstants::JUNCTION_GMIN;
+    bool mes = false;                                  // MESFET (ngspice mesload): Statz channel and charge, B its doping tail
+    P alpha = 2.0;
 };
+
+// MESFET drain current of the normal mode (ngspice mesload, Statz): BETA vgst^2 / (1 + B vgst) (1 + LAMBDA vds),
+// times 1 - (1 - ALPHA vds / 3)^3 below vds = 3 / ALPHA
+template <typename T, typename P>
+inline T mes_channel(T vgst, T vds, const JfetModel<P>& p)
+{
+    if (vgst <= P(0.0)) return T(0.0);
+    T id = p.beta * (1.0 + p.lambda * vds) * vgst * vgst / (1.0 + p.b * vgst);
+    if (vds < 3.0 / p.alpha) { const T a = 1.0 - p.alpha * vds / 3.0; id = id * (1.0 - a * a * a); }
+    return id;
+}
+
+// MESFET total gate charge at vgs, vgd (ngspice qggnew, Statz)
+template <typename T, typename P>
+inline T mes_qgg(T vgs, T vgd, const JfetModel<P>& p)
+{
+    using std::sqrt;
+    const P vcap = 1.0 / p.alpha, del = 0.2, vmax = 0.5;
+    const T veroot = sqrt((vgs - vgd) * (vgs - vgd) + vcap * vcap);
+    const T veff1 = 0.5 * (vgs + vgd + veroot), veff2 = veff1 - veroot;
+    const T vnroot = sqrt((veff1 - p.vto) * (veff1 - p.vto) + del * del);
+    T vnew1 = 0.5 * (veff1 + p.vto + vnroot), ext(0.0);
+    if (vnew1 >= vmax) { ext = (vnew1 - vmax) / std::sqrt(1.0 - vmax / p.pb); vnew1 = T(vmax); }
+    return p.cgs * (2.0 * p.pb * (1.0 - sqrt(1.0 - vnew1 / p.pb)) + ext) + p.cgd * veff2;
+}
 
 // Drain current of the normal mode (vds >= 0) at overdrive vgst (ngspice jfetload).
 template <typename T, typename P>
@@ -684,15 +747,24 @@ inline JfetEval<T> jfet_eval(T vgs, T vgd, const JfetModel<P>& p)
     JfetEval<T> r;
     r.igs = spice_junction(vgs, p.is, p.vt) + p.gmin * vgs;
     r.igd = spice_junction(vgd, p.is, p.vt) + p.gmin * vgd;
-    r.id = vds >= P(0.0) ? jfet_channel(vgs - p.vto, vds, p) : -jfet_channel(vgd - p.vto, -vds, p);
+    if (p.mes) r.id = vds >= P(0.0) ? mes_channel(vgs - p.vto, vds, p) : -mes_channel(vgd - p.vto, -vds, p);
+    else r.id = vds >= P(0.0) ? jfet_channel(vgs - p.vto, vds, p) : -jfet_channel(vgd - p.vto, -vds, p);
     return r;
 }
 
-// Depletion charges of the gate-source and gate-drain junctions (grading 0.5).
+// Depletion charges of the gate-source and gate-drain junctions (grading 0.5). A MESFET's gate charge
+// Q(vgs, vgd) splits between them as ngspice mesload does from the last accepted step prev = {vgs, vgd, qgs, qgd}:
+// each takes the mean of its two one-sided differences, so qgs + qgd follows Q. prev null: the operating point
+// itself (the small-signal C = dQ/dvgs, dQ/dvgd).
 template <typename T, typename P>
-inline std::array<T, 2> jfet_charges(T vgs, T vgd, const JfetModel<P>& p)
+inline std::array<T, 2> jfet_charges(T vgs, T vgd, const JfetModel<P>& p, const double* prev = nullptr)
 {
-    return {depletion_charge(vgs, p.cgs, P(0.5), p.pb, p.fc), depletion_charge(vgd, p.cgd, P(0.5), p.pb, p.fc)};
+    if (!p.mes) return {depletion_charge(vgs, p.cgs, P(0.5), p.pb, p.fc), depletion_charge(vgd, p.cgd, P(0.5), p.pb, p.fc)};
+    auto val = [](const T& v) { if constexpr (std::is_same_v<T, double>) return v; else return v.val; };
+    const double vgs1 = prev ? prev[0] : val(vgs), vgd1 = prev ? prev[1] : val(vgd);
+    const T qa = mes_qgg(vgs, vgd, p), qb = mes_qgg(T(vgs1), vgd, p), qc = mes_qgg(vgs, T(vgd1), p);
+    const double qd = mes_qgg(vgs1, vgd1, p);
+    return {(prev ? prev[2] : 0.0) + 0.5 * (qa - qb + qc - qd), (prev ? prev[3] : 0.0) + 0.5 * (qa - qc + qb - qd)};
 }
 
 

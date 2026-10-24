@@ -1,0 +1,9 @@
+* MESFET AC: common-source stage, Statz gate charge (CGS, CGD), RD / RS
+VDD vdd 0 DC 5
+VG g0 0 DC -0.5 AC 1
+RG g0 g 50
+RL vdd d 1k
+Z1 d g 0 ma
+.model ma NMF(VTO=-1.8 BETA=2e-3 B=0.3 ALPHA=2 LAMBDA=0.04 RD=10 RS=8 CGS=0.4p CGD=0.1p PB=0.9)
+.ac dec 10 1meg 100g
+.end

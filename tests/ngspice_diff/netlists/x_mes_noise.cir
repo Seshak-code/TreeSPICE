@@ -1,0 +1,9 @@
+* MESFET noise: channel 2/3 gm thermal, RD / RS thermal, flicker M KF (Id/M)^AF / f with M=2
+VDD vdd 0 DC 5
+VG g0 0 DC -0.6 AC 1
+RG g0 g 50
+RL vdd d 800
+Z1 d g 0 mz M=2
+.model mz NMF(VTO=-1.8 BETA=2e-3 B=0.3 ALPHA=2 LAMBDA=0.04 RD=10 RS=8 KF=1e-14 AF=1.3)
+.noise v(d) VG dec 5 10 1g
+.end

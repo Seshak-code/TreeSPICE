@@ -1,0 +1,216 @@
+// VDMOS as ngspice 47 runs it (.model VDMOS, M d g s [tj tc] THERMAL): a Verilog-A port of the value
+// statements of ngspice's vdmosload.c, vdmostemp.c and vdmosnoi.c (copyright 1985 Regents of the University
+// of California; VDMOS 2020 Holger Vogt, Dietmar Warning; ngspice's modified BSD). OpenVAF differentiates;
+// ngspice's hand-written Jacobian, limiting and bypass are dropped.
+// M: OSDI's device multiplier scales the whole device like ngspice's m, except two terms ngspice leaves
+// unscaled, which take the instance's mult_i: the breakdown current IBV against M * IS, and the 1e-15 S
+// drain-source shunt without RDS. Flicker noise is M * KF (Id/M)^AF there, so KF takes M^(AF-1).
+`include "disciplines.vams"
+`include "constants.vams"
+
+`define KOVERQ (1.38064852e-23 / 1.6021766208e-19)
+`define BOLTZ 1.38064852e-23
+`define QCHARGE 1.6021766208e-19
+`define REFTEMP 300.15
+`define CTOK 273.15
+
+module vdmos_ng(d, g, s, tj, tc);
+    inout d, g, s, tj, tc;
+    electrical d, g, s, tj, tc;
+    electrical dp, gp, sp, rp, qp, ta;
+
+    parameter real type = 1.0;                     // +1 VDMOSN, -1 VDMOSP (pchan)
+    parameter real vto = 0.0, kp = 0.0, phi = 0.6, lambda = 0.0, theta = 0.0;
+    parameter real rd = 0.0, rs = 0.0, rg = 0.0, tnom = 27.0, kf = 0.0, af = 1.0;
+    parameter real rq = 0.0, vq = 0.0, mtriode = 1.0;
+    parameter real tcvth = 0.0, mu = -1.5, texp0 = 1.5, texp1 = 0.3;
+    parameter real trd1 = 0.0, trd2 = 0.0, trg1 = 0.0, trg2 = 0.0, trs1 = 0.0, trs2 = 0.0, trb1 = 0.0, trb2 = 0.0;
+    parameter real subshift = 0.0, ksubthres = 0.1, tksubthres1 = 0.0, tksubthres2 = 0.0;
+    parameter real bv = 1e99, ibv = 1e-10, nbv = 1.0, rds = 1e15, rb = 0.0, n = 1.0, tt = 0.0;
+    parameter real eg = 1.11, xti = 3.0, is = 1e-14, vj = 0.8, vp = 0.0, cjo = 5e-10, mj = 0.5, fc = 0.5;  // mj: the card's M
+    parameter real cgdmin = 2e-11, cgdmax = 2e-9, a = 1.0, cgs = 1.4e-9;
+    parameter real rthjc = 1.0, rthca = 23.0, cthj = 10e-6;
+    (* type="instance" *) parameter real thermal = 0.0;   // the instance's THERMAL flag
+    (* type="instance" *) parameter real mult_i = 1.0;    // the instance's M (OSDI's m scales the rest)
+    (* type="instance" *) parameter real temp_i = -1.0;   // instance TEMP [K] (< 0: not given)
+    (* type="instance" *) parameter real dtemp_i = 0.0;   // instance DTEMP [K]
+
+    real Temp, Tnom, dt, ratio, vt, vtnom, fact1, fact2, egfet, egfet1, pbfact, pbfact1, arg, pbo, gmaold, gmanew;
+    real Beta, tVth, slope, rd0T, rd1T, gdrain, gsource, ggate, gbody, gshunt, rdq;
+    real vgs, vds, vgd, vgsm, mode, von, vgst, vdsat, t0, t1, betap, vdss, t2, cdrain, vdsn;
+    real vd, vte, vtebrk, isat, tjp, tdep, tcap, tmj, xfc, f1, f2, f3, xbv, cbv, xcbv, tbv, cd, cdb, qdep, sarg;
+    real vqp, kp_, vto_, vdevtemp, pwr, sargcap, ttT, fcx, egx, iter_done, gmin, x, Tnoise, qgd, iqp, qqp, kqp, qdiff;
+    integer selfheat, qs, revrec, iter;
+
+    analog begin
+        // vdmosset.c: defaults that depend on the polarity, and the clamps
+        kp_ = $param_given(kp) ? kp : 15.0 + 5.0 * type;   // IRF540, 9540
+        vto_ = $param_given(vto) ? vto : 3.0 * type;
+        fcx = fc > 0.95 ? 0.95 : fc;
+        egx = eg < 0.1 ? 0.1 : eg;
+        qs = $param_given(rq) && $param_given(vq);
+        selfheat = thermal != 0.0 && $param_given(rthjc);
+        revrec = $param_given(vp) && vp != 0.0 && tt != 0.0;
+        gmin = $simparam("gmin", 1e-12) / mult_i;   // ngspice adds GMIN once, not M times
+
+        // device temperature: the junction node (in deg C) under self-heating, else TEMP / circuit + DTEMP
+        Tnom = tnom + `CTOK;
+        vdevtemp = (temp_i > 0.0 ? temp_i : $temperature) - `CTOK;
+        if (selfheat) Temp = V(tj) + `CTOK;
+        else Temp = temp_i > 0.0 ? temp_i : $temperature + dtemp_i;
+        dt = Temp - Tnom;
+        ratio = Temp / Tnom;
+
+        // vdmostemp.c
+        Beta = kp_ * pow(ratio, mu);
+        tVth = vto_ + tcvth * dt;
+        slope = ksubthres * (1.0 + tksubthres1 * dt + tksubthres2 * dt * dt);
+        if ($param_given(texp0)) rd0T = rd * pow(ratio, texp0);
+        else rd0T = rd * (1.0 + trd1 * dt + trd2 * dt * dt);
+        rd1T = qs ? rq * pow(ratio, texp1) : 0.0;
+        ggate = rg > 0.0 ? 1.0 / (rg * (1.0 + trg1 * dt + trg2 * dt * dt)) : 0.0;
+        gsource = rs > 0.0 ? 1.0 / (rs * (1.0 + trs1 * dt + trs2 * dt * dt)) : 0.0;
+        gbody = rb > 0.0 ? 1.0 / (rb * (1.0 + trb1 * dt + trb2 * dt * dt)) : 0.0;
+        gshunt = $param_given(rds) && rds > 0.0 ? 1.0 / rds : 1e-15 / mult_i;
+
+        vt = `KOVERQ * Temp;
+        vtnom = `KOVERQ * Tnom;
+        fact1 = Tnom / `REFTEMP;
+        fact2 = Temp / `REFTEMP;
+        egfet1 = 1.16 - (7.02e-4 * Tnom * Tnom) / (Tnom + 1108);
+        egfet = 1.16 - (7.02e-4 * Temp * Temp) / (Temp + 1108);
+        arg = -egfet1 / (2.0 * `BOLTZ * Tnom) + 1.1150877 / (`BOLTZ * 2.0 * `REFTEMP);
+        pbfact1 = -2.0 * vtnom * (1.5 * ln(fact1) + `QCHARGE * arg);
+        arg = -egfet / (2.0 * `BOLTZ * Temp) + 1.1150877 / (`BOLTZ * 2.0 * `REFTEMP);
+        pbfact = -2.0 * vt * (1.5 * ln(fact2) + `QCHARGE * arg);
+
+        // body diode at Temp
+        tmj = mj;
+        pbo = (vj - pbfact1) / fact1;
+        gmaold = (vj - pbo) / pbo;
+        tcap = cjo / (1.0 + tmj * (400e-6 * (Tnom - `REFTEMP) - gmaold));
+        tjp = pbfact + fact2 * pbo;
+        gmanew = (tjp - pbo) / pbo;
+        tcap = tcap * (1.0 + tmj * (400e-6 * (Temp - `REFTEMP) - gmanew));
+        vte = n * vt;
+        isat = (is < 1e-28 ? 1e-28 : is) * exp((ratio - 1.0) * egx / vte + xti / n * ln(ratio));
+        xfc = ln(1.0 - fcx);
+        tdep = fcx * tjp;
+        if (tdep > 2.5) begin tjp = 2.5 / n; tdep = n * tjp; end
+        f1 = tjp * (1.0 - exp((1.0 - tmj) * xfc)) / (1.0 - tmj);
+        f2 = exp((1.0 + tmj) * xfc);
+        f3 = 1.0 - fcx * (1.0 + tmj);
+        ttT = tt;
+        xbv = 0.0;
+        if ($param_given(bv)) begin   // ngspice matches IBV against its m-scaled IS: mult_i * isat
+            tbv = abs(bv);
+            cbv = ibv;
+            if (cbv < mult_i * isat * tbv / vt) xbv = tbv;
+            else begin
+                xbv = tbv - nbv * vt * ln(1.0 + cbv / (mult_i * isat));
+                iter_done = 0.0;
+                for (iter = 0; iter < 25; iter = iter + 1) begin
+                    if (iter_done == 0.0) begin
+                        xbv = tbv - nbv * vt * ln(cbv / (mult_i * isat) + 1.0 - xbv / vt);
+                        xcbv = mult_i * isat * (exp((tbv - xbv) / (nbv * vt)) - 1.0 + xbv / vt);
+                        if (abs(xcbv - cbv) <= 1e-3 * cbv) iter_done = 1.0;
+                    end
+                end
+            end
+        end
+
+        // channel (vdmosload.c), type domain
+        vgs = type * V(gp, sp);
+        vds = type * V(dp, sp);
+        vgd = vgs - vds;
+        mode = vds >= 0.0 ? 1.0 : -1.0;
+        vgsm = mode > 0.0 ? vgs : vgd;
+        von = tVth * type;
+        vgst = vgsm - von;
+        vdsat = vgst > 0.0 ? vgst : 0.0;
+        t0 = 1.0 + lambda * vds;      // ngspice: the signed vds, also in inverse mode
+        t1 = 1.0 + theta * vdsat;
+        betap = Beta * t0 / t1;
+        vdss = vds * mtriode * mode;
+        t2 = exp((vgst - subshift) / slope);
+        vgst = slope * ln(1.0 + t2);
+        if (vgst <= vdss) cdrain = betap * vgst * vgst * 0.5;
+        else cdrain = betap * vdss * (vgst - 0.5 * vdss);
+        I(dp, sp) <+ type * mode * cdrain;
+
+        // drain resistance, with quasi-saturation in normal mode (from the external drain-source voltage)
+        gdrain = 0.0;
+        if (rd > 0.0) begin
+            if (qs && mode > 0.0) begin
+                vdsn = type * V(d, s);
+                rdq = rd0T + rd1T * (vdsn / (vdsn + abs(vq)));
+                gdrain = rdq > 0.0 ? 1.0 / rdq + gmin : 1.0 / rd0T;
+            end else gdrain = 1.0 / rd0T;
+            I(d, dp) <+ V(d, dp) * gdrain;
+        end else V(d, dp) <+ 0.0;
+        if (rs > 0.0) I(s, sp) <+ V(s, sp) * gsource; else V(s, sp) <+ 0.0;
+        if (rg > 0.0) I(g, gp) <+ V(g, gp) * ggate; else V(g, gp) <+ 0.0;
+        I(d, s) <+ V(d, s) * gshunt;
+
+        // gate capacitances (DevCapVDMOS): Cgs constant, Cgd(vgd) from CGDMIN to CGDMAX; the charges integrate them
+        sargcap = (cgdmax - cgdmin) / (1.0 + `M_PI / 2.0);
+        x = abs(a * vgd);  // ln(cosh(x)) without overflow
+        if (vgd > 0.0) qgd = sargcap / a * (x + ln(1.0 + exp(-2.0 * x)) - ln(2.0)) + (cgdmax - sargcap) * vgd;
+        else qgd = sargcap * (vgd * atan(a * vgd) - ln(1.0 + a * a * vgd * vgd) / (2.0 * a)) + (cgdmax - sargcap) * vgd;
+        I(gp, dp) <+ type * ddt(qgd);
+        I(gp, sp) <+ type * ddt(cgs * vgs);
+
+        // body diode: anode behind RB at the source, cathode at the external drain
+        if (rb > 0.0) I(s, rp) <+ V(s, rp) * gbody; else V(s, rp) <+ 0.0;
+        vd = type * V(rp, d);
+        vtebrk = nbv * vt;
+        if (vd >= -3.0 * vte) cdb = isat * (exp(vd / vte) - 1.0);
+        else if (!$param_given(bv) || vd >= -xbv) begin
+            arg = 3.0 * vte / (vd * `M_E);
+            cdb = -isat * (1.0 + arg * arg * arg);
+        end else cdb = -isat * exp(-(xbv + vd) / vtebrk);
+        cd = cdb + gmin * vd;
+        if (vd < tdep) begin
+            sarg = exp(-tmj * ln(1.0 - vd / tjp));
+            qdep = tjp * tcap * (1.0 - (1.0 - vd / tjp) * sarg) / (1.0 - tmj);
+        end else
+            qdep = tcap * f1 + tcap / f2 * (f3 * (vd - tdep) + (tmj / (2.0 * tjp)) * (vd * vd - tdep * tdep));
+        if (revrec) begin
+            // soft reverse recovery (VP): the diffusion charge TT * v(qp) relaxes towards TT * id through 1/VP
+            vqp = type * V(qp);
+            iqp = type * (vqp / vp - ttT / vp * cd);
+            qqp = type * ttT * vqp;
+            kqp = 1.0 - vp;
+            qdiff = 0.0;
+        end else begin
+            vqp = 0.0;
+            iqp = V(qp);
+            qqp = 0.0;
+            kqp = 0.0;
+            qdiff = ttT * cdb;
+        end
+        I(rp, d) <+ type * (cd + ddt(qdep + qdiff)) + type * kqp * ddt(type * V(qp));
+        I(qp) <+ iqp + ddt(qqp);
+
+        // self-heating: the dissipated power heats tj; Rthjc to the case, Rthca to the ambient (the circuit's
+        // temperature, or TEMP), Cthj at tj
+        if (selfheat) begin
+            pwr = cdrain * vds * mode + gdrain * V(d, dp) * V(d, dp) + gsource * V(s, sp) * V(s, sp)
+                  + vd * cd + gbody * V(s, rp) * V(s, rp);
+            I(tj) <+ -pwr;
+            I(tj, tc) <+ V(tj, tc) / rthjc;
+            I(tc, ta) <+ V(tc, ta) / rthca;
+            V(ta) <+ vdevtemp;
+        end else V(ta) <+ 0.0;
+        I(tj) <+ ddt((selfheat ? cthj : 0.0) * V(tj));
+
+        // vdmosnoi.c: thermal noise of RD, RS and the channel (2/3 gm) at the circuit temperature (the junction's
+        // under self-heating), flicker KF |Id|^AF / (f Cox^2)
+        Tnoise = selfheat ? Temp : $temperature;
+        I(d, dp) <+ white_noise(4.0 * `BOLTZ * Tnoise * gdrain, "rd");
+        I(s, sp) <+ white_noise(4.0 * `BOLTZ * Tnoise * gsource, "rs");
+        I(dp, sp) <+ white_noise(4.0 * `BOLTZ * Tnoise * 2.0 / 3.0 * abs(ddx(cdrain, V(gp))), "id");
+        I(dp, sp) <+ flicker_noise(kf * pow(mult_i, af - 1.0) * pow(max(abs(cdrain), 1e-38), af)
+                                   / pow(3.9 * 8.854214871e-12 / 1e-7, 2), 1.0, "1overf");
+    end
+endmodule

@@ -49,6 +49,7 @@ struct ModelCard {
     std::string type;        // "NMOS", "PMOS", "D", "NPN", "PNP", "NJFET", "PJFET"
     int level = 1;           // Model level (1 = Shichman-Hodges, 4 = BSIM4, etc.)
     std::map<std::string, double> params;  // Key-value: "KP"->200e-6, "VTO"->0.7, etc.
+    std::map<std::string, std::vector<double>> vectors;  // KEY=[v1 v2 ...] (XSPICE code models' vector parameters)
 
     double get(const std::string& key, double defaultVal) const {
         auto it = params.find(key);
@@ -423,6 +424,8 @@ struct CCCS {
  * a branch current, or a current from + through the source to -) is expr over node voltages and branch
  * currents; refs[k] binds expr->refs[k].
  */
+namespace xspice { struct AnalogModel; }  // physics/xspice_analog.h
+
 struct Behavioural {
     struct Ref {
         int kind = 0;      // 0: V(a,b) over block-local nodes; I() of 1: V source a, 2: inductor a,
@@ -434,6 +437,7 @@ struct Behavioural {
     bool voltage = false;
     std::shared_ptr<const acutesim::numparam::Expr> expr;
     std::vector<Ref> refs;
+    std::shared_ptr<const xspice::AnalogModel> cm;  // an XSPICE analog code model's output over refs, in place of expr
 };
 
 // ============================================================================
@@ -580,6 +584,7 @@ struct SimulationEnvironment {
 struct Diode {
     std::string instanceName;         // e.g. "D1"
     bool off = false;                 // OFF: held at 0 V until the operating point converges without it (ngspice)
+    double ic[1] = {NAN};             // IC=vd: the junction's state at t = 0 under UIC (NaN: from the node voltages)
     int anode;                        // P-type side (+)
     int cathode;                      // N-type side (-)
     // Defaults match SPICE3 D-model defaults and addDiode(); left uninitialised
@@ -606,9 +611,13 @@ struct Diode {
         bool bvGiven = false;
         double isr = 0.0, nr = 2.0;  // recombination current (ISR at the temperature)
         double nbv = NAN;            // breakdown emission coefficient (NaN: N)
+        bool nsGiven = false;        // NS given: the sidewall has its own characteristic (else N's)
+        double fcs = 0.5, ikp = 0.0; // sidewall FC and knee current
+        double jtun = 0.0, jtunsw = 0.0, ntun = 30.0;  // tunnelling (at the temperature)
     } card;
     double area = 1.0;
     double pj = 0.0, mult = 1.0;  // PJ= (sidewall perimeter) and M= (the sidewall terms scale by M, not by AREA)
+    bool areaGiven = false, pjGiven = false;  // else the model's AREA / PJ (ngspice diosetup)
     InstTemp inst;  // card and saturation current are held at the instance temperature (resolved by the parser)
 };
 
@@ -620,6 +629,10 @@ struct Mosfet {
     int body;                         // B (Bulk/Substrate) terminal; E (substrate) of a BSIM-SOI device
     std::vector<int> soiNodes;        // BSIM-SOI P, B, T after E (M d g s e [p [b [t]]]), LEVEL 10/58 only
     std::map<std::string, double> osdiParams;  // instance parameters only an OSDI model takes (BSIM-SOI SOIMOD, RTH0, ...)
+    bool off = false;                 // OFF: held at vgs = vds = vbs = 0 in the first operating-point solve (ngspice INITFIX)
+    double ic[3] = {NAN, NAN, NAN};   // IC=vds,vgs,vbs (ICVDS, ICVGS, ICVBS): the charges' state at t = 0 under UIC
+    bool threeTerm = false;           // M d g s model: a VDMOS (body is ground)
+    bool thermal = false;             // the THERMAL flag (VDMOS self-heating: M d g s tj tc model THERMAL)
     
     // Standard SPICE / PDK Parameters
     std::string modelName;                // .model reference (e.g., "nfet_01v8")
@@ -667,6 +680,7 @@ struct Mosfet {
         int level = 1;
         double vbi = 0.0, mu = 0.0, nfs = 0.0, nsub = 0.0, xd = 0.0, xj = 0.0, delta = 0.0, wd = 0.0, xl = 0.0, xw = 0.0;
         double ucrit = 1e4, uexp = 0.0, vmax = 0.0, neff = 1.0, eta = 0.0, theta = 0.0, kappa = 0.2, alpha = 0.0;
+        double kv = 2.0, nv = 0.5, nc = 1.0, gamma1 = 0.0, sigma = 0.0, lambda1 = 0.0;  // level 6 (kp holds KC)
     } card;
     InstTemp inst;  // card is held at the instance temperature (resolved by the parser)
 
@@ -685,7 +699,9 @@ struct BJT {
     int emitter = -1;                          // E terminal
     int substrate = 0;                         // S terminal (ground when not given, as SPICE)
     int thermal = -1;                          // T terminal of a HICUM (LEVEL 8) device; -1: not given (internal)
+    double m = 1.0;                            // M, already in area; flicker noise is M KF (Ib/M)^AF (ngspice bjtnoise)
     bool off = false;                          // OFF, as Diode::off
+    double ic[2] = {NAN, NAN};                 // IC=vbe,vce: the junctions' state at t = 0 under UIC (NaN: nodes)
     std::string modelName = "default";
     bool isNPN = true;                           // true=NPN, false=PNP
     
@@ -708,6 +724,8 @@ struct BJT {
         double iss = 0.0, ns = 1.0;                        // substrate junction
         bool lateral = false;  // SUBS = -1: substrate junction on the base, not the collector (PNP default)
         double tf = 0.0, xtf = 0.0, vtf = 0.0, itf = 0.0, tr = 0.0;
+        double ptf = 0.0;  // excess phase [degrees] at 1/(2 pi TF)
+        double td = 0.0;   // its delay PTF pi/180 TF, from the TNOM TF (ngspice bjttemp; TTF1/2 do not move it)
     } card;
     double area = 1.0;
     InstTemp inst;  // card, IS and betas are held at the instance temperature (resolved by the parser)
@@ -747,8 +765,10 @@ struct JFET {
     int source = -1;                      // S terminal
     std::string modelName = "default";
     bool isNChannel = true;               // true=N-ch, false=P-ch
-    double m = 1.0;                       // parallel multiplier (scales beta)
+    bool mes = false;                     // a Z element: ngspice's MESFET (Statz, mes*.c) on the JFET terminals
+    double m = 1.0;                       // M, already in area; flicker noise is M KF (Id/M)^AF (ngspice jfetnoi)
     bool off = false;                     // OFF, as Diode::off
+    double ic[2] = {NAN, NAN};            // IC=vds,vgs: the junctions' state at t = 0 under UIC (NaN: nodes)
     
     // Model Parameters
     double beta = 1e-4;                   // Transconductance parameter [A/V^2]
@@ -760,6 +780,7 @@ struct JFET {
     // (scales BETA, IS, CGS, CGD; RD and RS become parser-added series resistors)
     struct Card {
         double is = 1e-14, n = 1.0, b = 1.0, cgs = 0.0, cgd = 0.0, pb = 1.0, fc = 0.5, kf = 0.0, af = 1.0;
+        double alpha = 2.0;  // MESFET saturation voltage parameter (B is its doping tail)
     } card;
     double area = 1.0;
 
@@ -845,6 +866,9 @@ struct TensorBlock {
     std::vector<CCVS> currentControlledVoltageSources;
     std::vector<CCCS> currentControlledCurrentSources;
     std::vector<Behavioural> behavioural;
+    // U lines (uniform distributed RC), expanded into R / C (or diode) ladders once the .model cards are read
+    struct URC { std::string name, model; int n1 = 0, n2 = 0, n3 = 0; double length = 0.0; int lumps = 0; int line = 0; };
+    std::vector<URC> urcs;
     
     // Semiconductors
     std::vector<Diode> diodes;
@@ -1197,6 +1221,8 @@ struct BlockState {
         // jvState 0: none yet -> start at vcrit (ngspice MODEINITJCT).
         double jv[2] = {};
         int jvState = 0;
+        // BJT excess phase (PTF): the filtered transfer current of the last two accepted steps, the last step
+        double xf[2] = {}, hPrev = 0.0;
     };
 
     std::vector<History> capacitorState;

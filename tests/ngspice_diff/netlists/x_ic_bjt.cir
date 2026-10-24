@@ -1,0 +1,8 @@
+* BJT IC=vbe,vce under UIC: the junction charges start there and hold the nodes (v(b) 0.70 V, v(c) 2.07 V at the first point)
+VCC c0 0 DC 5
+RC c0 c 1k
+RB 0 b 10k
+Q1 c b 0 qn IC=0.7,2
+.model qn npn is=1e-15 bf=100 cje=1p cjc=0.5p tf=1n tr=10n
+.tran 0.5n 200n uic
+.end

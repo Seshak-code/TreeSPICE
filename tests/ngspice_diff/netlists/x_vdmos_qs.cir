@@ -1,0 +1,11 @@
+* VDMOS quasi-saturation (RQ, VQ), drain-source shunt RDS, body diode breakdown (BV, IBV, NBV) with VDMOS M grading
+VD x 0 DC 10
+RL x d 1
+VG g 0 DC 6
+M1 d g 0 qs1
+.model qs1 VDMOS(Vto=3 Kp=10 Rd=50m Rq=0.4 Vq=2 Rds=1meg lambda=0.003 Bv=60 Ibv=250u Nbv=2 Is=1p M=0.4 Vj=0.7)
+* ngspice takes the quasi-saturation RD from the previous iterate (no Jacobian term): at its default tolerances the
+* sweep stops 0.15 % short (and depends on the sweep's history), tight ones converge it
+.options reltol=1e-7 abstol=1e-15 vntol=1e-12
+.dc VD -1 64 0.25 VG 4 8 2
+.end

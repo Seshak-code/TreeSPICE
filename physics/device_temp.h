@@ -10,13 +10,14 @@ constexpr double REFTEMP = 300.15;  // ngspice: 27 C
 
 inline double vt(double T) { return PhysicsConstants::K_BOLTZMANN * T / PhysicsConstants::Q_ELECTRON; }
 
-// Silicon band gap [eV]
-inline double egfet(double T) { return 1.16 - 7.02e-4 * T * T / (T + 1108.0); }
+// Band gap [eV]: silicon's, or a diode's TLEV = 2 law EG - GAP1 T^2 / (T + GAP2) (ngspice diotemp)
+struct Gap { double eg = 1.16, gap1 = 7.02e-4, gap2 = 1108.0; };
+inline double egfet(double T, const Gap &g = {}) { return g.eg - g.gap1 * T * T / (T + g.gap2); }
 
 // Junction potential shift (ngspice pbfact)
-inline double pbfact(double T) {
+inline double pbfact(double T, const Gap &g = {}) {
     const double k = PhysicsConstants::K_BOLTZMANN;
-    const double arg = -egfet(T) / (2 * k * T) + 1.1150877 / (k * (REFTEMP + REFTEMP));
+    const double arg = -egfet(T, g) / (2 * k * T) + 1.1150877 / (k * (REFTEMP + REFTEMP));
     return -2 * vt(T) * (1.5 * std::log(T / REFTEMP) + PhysicsConstants::Q_ELECTRON * arg);
 }
 
@@ -30,10 +31,10 @@ inline double isFactor(double T, double Tn, double eg, double xti, double n) {
 
 // A junction's potential pot (at Tn) moved to T, and the factor its zero-bias capacitance gets, for grading
 // mj (ngspice's pbo / gma law, the same in diotemp, bjttemp and mos1temp).
-inline double junctionAt(double &pot, double mj, double Tn, double T) {
+inline double junctionAt(double &pot, double mj, double Tn, double T, const Gap &g = {}) {
     const double fact1 = Tn / REFTEMP, fact2 = T / REFTEMP;
-    const double pbo = (pot - pbfact(Tn)) / fact1, gmaold = (pot - pbo) / pbo;
-    pot = pbfact(T) + fact2 * pbo;
+    const double pbo = (pot - pbfact(Tn, g)) / fact1, gmaold = (pot - pbo) / pbo;
+    pot = pbfact(T, g) + fact2 * pbo;
     const double gmanew = (pot - pbo) / pbo;
     return (1 + mj * (4e-4 * (T - REFTEMP) - gmanew)) / (1 + mj * (4e-4 * (Tn - REFTEMP) - gmaold));
 }

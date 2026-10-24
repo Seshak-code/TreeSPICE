@@ -47,10 +47,11 @@ inline Mos1Params<double> mos1Params(const Mosfet& m, double gmin = PhysicsConst
     p.czbs = (c.cbs > 0.0 ? c.cbs : c.cj * m.geo.as) * M; p.czbssw = c.cjsw * m.geo.ps * M;
     p.mj = c.mj; p.mjsw = c.mjsw; p.pb = c.pb; p.fc = c.fc;
     if (c.level > 1) {
-        p.level = c.level; p.vbi = c.vbi; p.leff = leff; p.weff = weff; p.coxf = 3.9 * 8.854214871e-12 / c.tox; p.mu = c.mu;
+        p.level = c.level; p.vbi = c.vbi; p.leff = leff; p.weff = weff; p.coxf = c.tox > 0.0 ? 3.9 * 8.854214871e-12 / c.tox : 0.0; p.mu = c.mu;
         p.nfs = c.nfs; p.nsub = c.nsub; p.xd = c.xd; p.xj = c.xj; p.ld = c.ld; p.delta = c.delta;
         p.ucrit = c.ucrit; p.uexp = c.uexp; p.vmax = c.vmax; p.neff = c.neff;
         p.eta = c.eta; p.theta = c.theta; p.kappa = c.kappa; p.alpha = c.alpha;
+        p.kv = c.kv; p.nv = c.nv; p.nc = c.nc; p.gamma1 = c.gamma1; p.sigma = c.sigma; p.lambda1 = c.lambda1;
     }
     p.caps = p.cox > 0.0 || p.cgso > 0.0 || p.cgdo > 0.0 || p.cgbo > 0.0 ||
              p.czbd > 0.0 || p.czbdsw > 0.0 || p.czbs > 0.0 || p.czbssw > 0.0;
@@ -72,7 +73,9 @@ inline DiodeModel<double> diodeModel(const Diode& d, double gmin = PhysicsConsta
     p.vte = d.emissionCoefficient_N * vt;
     p.rs = c.rs / d.area;
     p.cjo = c.cjo * d.area; p.vj = c.vj; p.m = c.m; p.fc = c.fc; p.tt = c.tt;
-    p.isw = c.jsw * d.pj * d.mult; p.vtesw = c.ns * vt;
+    p.isw = c.jsw * d.pj * d.mult; p.vtesw = c.ns * vt; p.swOwn = c.nsGiven;
+    p.fcs = c.fcs; p.ikp = c.ikp * d.pj * d.mult;
+    p.itun = c.jtun * d.area; p.itunsw = c.jtunsw * d.pj * d.mult; p.vtt = c.ntun * vt;
     p.cjsw = c.cjsw * d.pj * d.mult; p.mjsw = c.mjsw; p.vjsw = c.php;
     p.ikf = c.ikf * d.area; p.ikr = c.ikr * d.area;
     p.isr = c.isr * d.area; p.vtr = c.nr * vt;
@@ -92,6 +95,7 @@ inline JfetModel<double> jfetModel(const JFET& j, double gmin = PhysicsConstants
     p.beta = j.beta * j.area; p.vto = j.Vto; p.lambda = j.lambda; p.b = c.b;
     p.is = c.is * j.area; p.vt = c.n * j.thermalVoltage_V_T_V;
     p.cgs = c.cgs * j.area; p.cgd = c.cgd * j.area; p.pb = c.pb; p.fc = c.fc;
+    p.mes = j.mes; p.alpha = c.alpha;
     return p;
 }
 
@@ -116,6 +120,7 @@ inline BjtModel<double> bjtModel(const BJT& q, double gmin = PhysicsConstants::J
     p.iss = c.iss * a; p.vts = c.ns * vt;
     p.tf = c.tf; p.xtf = c.xtf; p.ovtf = c.vtf != 0.0 ? 1.0 / (1.44 * c.vtf) : 0.0;
     p.xjtf = c.itf * a; p.tr = c.tr;
+    p.td = c.td;
     return p;
 }
 

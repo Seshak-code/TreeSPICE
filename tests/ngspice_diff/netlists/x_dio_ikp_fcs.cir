@@ -1,0 +1,8 @@
+* Diode sidewall knee IKP and sidewall FCS: forward DC through the knees, and the sidewall depletion charge in AC
+* at forward bias above FCS*VJSW (VJSW = VJ, MJSW = M: ngspice's sidewall charge takes the bottom's F1 there)
+VD a 0 DC 0.6 AC 1
+R1 a k 10
+D1 k 0 dk PJ=100u
+.model dk D(IS=1e-15 JSW=1e-12 IKF=1e-3 IKP=5e-4 CJO=1p CJSW=2e-12 VJ=0.8 PHP=0.8 M=0.4 MJSW=0.4 FC=0.5 FCS=0.5)
+.ac dec 5 1meg 10g
+.end

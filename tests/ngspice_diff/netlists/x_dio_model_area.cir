@@ -1,0 +1,9 @@
+* Diode model AREA and PJ: the instance's default (diosetup), overridden by the instance's own
+VD a 0 DC 0.7
+RA a k1 10
+RB a k2 10
+D1 k1 0 dm
+D2 k2 0 dm 2 PJ=5u
+.model dm D(IS=1e-15 AREA=3 PJ=20u JSW=1e-12 RS=5)
+.dc VD 0 1 0.02
+.end

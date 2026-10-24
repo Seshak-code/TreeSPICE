@@ -1,0 +1,20 @@
+* XSPICE limit (smoothed corners), climit (limits from control inputs), pwl (smoothed breakpoints, limit), current outputs
+VA a 0 DC 0
+VH h 0 DC 1.2
+VL l 0 DC -0.8
+a1 a o1 l1
+.model l1 limit(gain=2 in_offset=0.1 out_lower_limit=-1 out_upper_limit=1.5 limit_range=0.1)
+a2 a h l o2 c1
+.model c1 climit(gain=1.5 upper_delta=0.1 lower_delta=0.05 limit_range=0.2 fraction=true)
+a3 a o3 p1
+.model p1 pwl(x_array=[-1 -0.2 0.5 1.5] y_array=[-2 0.4 0.6 3] input_domain=0.1)
+a4 a %i o4 p2
+.model p2 pwl(x_array=[-1 0 1] y_array=[1m -1m 2m] limit=true fraction=false input_domain=0.05)
+R1 o1 0 1k
+R2 o2 0 1k
+R3 o3 0 1k
+R4 o4 0 1k
+* ngspice converges a code model's sweep only to RELTOL (each point's .op agrees exactly): tight options
+.options reltol=1e-7 abstol=1e-15 vntol=1e-12
+.dc VA -2.5 2.5 0.01
+.end

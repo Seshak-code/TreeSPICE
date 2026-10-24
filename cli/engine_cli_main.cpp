@@ -136,6 +136,72 @@ void printTF(std::ostream& os, const SimulationResponseDTO& r) {
     for (size_t k = 0; k < tf.names.size(); ++k) { std::snprintf(b, sizeof b, "%s = %.6e\n", tf.names[k].c_str(), tf.values[k]); os << b; }
 }
 
+// The raw plots ngspice 47 writes for .noise (spectral densities, then the integrated totals), .tf and .sens
+// (one point; .sens ... ac: complex over frequency), its names and types
+std::vector<OutputTable> noiseTables(const SimulationResponseDTO& r, const std::string& text) {
+    const auto& nz = r.extended.noise;
+    // the input-referred density is a current's when the .noise card's input source is an I source
+    bool currentIn = false;
+    {
+        std::istringstream in(text);
+        for (std::string line; std::getline(in, line);) {
+            std::string low = line;
+            for (auto& c : low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            const size_t a = low.find_first_not_of(" \t");
+            if (a == std::string::npos || low.compare(a, 6, ".noise") != 0) continue;
+            const size_t close = low.find(')', a), src = low.find_first_not_of(" \t,", close == std::string::npos ? a : close + 1);
+            currentIn = src != std::string::npos && low[src] == 'i';
+        }
+    }
+    OutputTable d;
+    d.plotName = "Noise Spectral Density Curves";
+    d.scaleName = "frequency";
+    d.scale = nz.frequencies;
+    OutputTable::Column on{"onoise_spectrum", "voltage-density", {}}, in{"inoise_spectrum", currentIn ? "current-density" : "voltage-density", {}};
+    for (size_t k = 0; k < nz.frequencies.size(); ++k) { on.values.push_back(nz.onoise[k]); in.values.push_back(nz.inoise[k]); }
+    d.columns = {on, in};
+    OutputTable t;
+    t.plotName = "Integrated Noise";
+    t.columns = {{"v(onoise_total)", "voltage", {nz.onoiseTotal}},
+                 {currentIn ? "i(inoise_total)" : "v(inoise_total)", currentIn ? "current" : "voltage", {nz.inoiseTotal}}};
+    return {d, t};
+}
+
+OutputTable tfTable(const SimulationResponseDTO& r) {
+    OutputTable t;
+    t.plotName = "Transfer Function";
+    const auto& tf = r.extended.dcTf;
+    // ngspice's names and order: Transfer_function, <src>#Input_impedance, output_impedance_at_V(...)
+    auto rank = [](const std::string& n) { return n.rfind("transfer", 0) == 0 ? 0 : n.find("#input") != std::string::npos ? 1 : 2; };
+    std::vector<size_t> order(tf.names.size());
+    for (size_t k = 0; k < order.size(); ++k) order[k] = k;
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return rank(tf.names[a]) < rank(tf.names[b]); });
+    for (size_t k : order) {
+        std::string n = tf.names[k];
+        if (n.rfind("transfer", 0) == 0) n[0] = 'T';
+        else if (const size_t p = n.find("#input"); p != std::string::npos) n[p + 1] = 'I';
+        else if (const size_t q = n.find("_at_v("); q != std::string::npos) n[q + 4] = 'V';
+        t.columns.push_back({"v(" + n + ")", "voltage", {tf.values[k]}});
+    }
+    return t;
+}
+
+OutputTable sensTable(const SimulationResponseDTO& r) {
+    OutputTable t;
+    t.plotName = "Sensitivity Analysis";
+    const auto& sn = r.extended.sens;
+    const size_t nf = sn.frequencies.size();
+    t.complexData = nf > 0;
+    if (nf) { t.scaleName = "frequency"; t.scale = sn.frequencies; }
+    for (size_t k = 0; k < sn.names.size(); ++k) {
+        OutputTable::Column c{"v(" + sn.names[k] + ")", "voltage", {}, nf > 0};
+        if (nf == 0) c.values.push_back(sn.values[k]);
+        for (size_t f = 0; f < nf; ++f) c.values.push_back({sn.values[k * nf + f], sn.imag[k * nf + f]});
+        t.columns.push_back(c);
+    }
+    return t;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -236,16 +302,17 @@ int main(int argc, char** argv) {
         }
         try {
             if (an.kind == "tf") {
-                if (!rawPath.empty()) throw std::runtime_error("raw output of .tf is not supported yet");
+                if (!rawPath.empty()) writeRaw(rawFile, tfTable(r), title(text), ascii);
                 printTF(out, r);
             } else if (an.kind == "sens") {
-                if (!rawPath.empty()) throw std::runtime_error("raw output of .sens is not supported yet");
+                if (!rawPath.empty()) writeRaw(rawFile, sensTable(r), title(text), ascii);
                 printSens(out, r);
-            } else if (an.kind == "pz") {
+            } else if (an.kind == "pz") {  // ngspice 47 writes no raw plot for .pz either
                 if (!rawPath.empty()) throw std::runtime_error("raw output of .pz is not supported yet");
                 printPZ(out, r);
             } else if (an.kind == "noise") {
-                if (!rawPath.empty()) throw std::runtime_error("raw output of .noise is not supported yet");
+                if (!rawPath.empty())
+                    for (const auto& t : noiseTables(r, text)) writeRaw(rawFile, t, title(text), ascii);
                 printNoise(out, r);
             } else {
                 const auto prints = requestedSpecs(r, 'p');

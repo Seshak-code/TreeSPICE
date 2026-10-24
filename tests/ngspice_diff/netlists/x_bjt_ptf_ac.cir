@@ -1,0 +1,10 @@
+* BJT excess phase (PTF): AC, the transfer conductance turned by exp(-jw PTF TF)
+VCC vcc 0 DC 5
+VIN in 0 DC 0.75 AC 1 PULSE(0.7 0.8 0.5n 50p 50p 1n 3n)
+RB in b 100
+RC vcc c 1k
+Q1 c b 0 qn
+CL c 0 50f
+.model qn npn is=1e-16 bf=100 tf=50p ptf=60 cje=50f cjc=20f vaf=50
+.ac dec 5 1meg 100g
+.end

@@ -1,0 +1,9 @@
+* VDMOS AC: common-source stage around its operating point, gate resistance, Cgd(vgd), Cgs, body diode depletion capacitance
+VDD vdd 0 DC 20
+VG g0 0 DC 4.2 AC 1
+RG g0 g 50
+RL vdd d 10
+M1 d g 0 amp M=2
+.model amp VDMOS(Vto=3.5 Kp=5 lambda=0.02 theta=0.05 Rd=0.1 Rs=0.05 Rg=4 Cgdmax=1n Cgdmin=30p a=0.5 Cgs=900p Cjo=600p M=0.4)
+.ac dec 10 1k 1g
+.end

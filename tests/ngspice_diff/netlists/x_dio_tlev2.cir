@@ -1,0 +1,8 @@
+* Diode TLEV 2: the band gap EG - GAP1 T^2/(T + GAP2) in IS, ISR, the junction potential and CJO; BV (1 - TCV dT)
+VD a 0 DC 0 AC 1
+R1 a k 100
+D1 k 0 d2
+.model d2 D(TLEV=2 IS=1e-14 N=1.05 ISR=1e-12 NR=2 EG=1.12 GAP1=6.5e-4 GAP2=900 XTI=3 CJO=3p VJ=0.75 M=0.4 BV=10 IBV=1e-5 TCV=8e-4 TNOM=30)
+.temp -40 125
+.dc VD -11 0.9 0.05
+.end

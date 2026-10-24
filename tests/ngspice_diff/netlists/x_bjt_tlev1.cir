@@ -1,0 +1,11 @@
+* BJT TLEV 1 (betas 1 + XTB dT) and TLEVC 1 (CJx (1 + CTx dT), VJx - TVJx dT) at 85 C: DC and the junction capacitances in AC
+VCC c0 0 DC 5
+VB b0 0 DC 0.72 AC 1
+RB b0 b 2k
+RC c0 c 1k
+Q1 c b 0 q1
+.model q1 NPN(IS=1e-16 BF=120 VAF=80 IKF=30m ISE=1e-14 NE=1.5 XTB=2e-3 TLEV=1 TLEVC=1 CJE=2p VJE=0.8 MJE=0.4 CTE=1.5e-3 TVJE=1.6e-3
++ CJC=1p VJC=0.7 MJC=0.3 CTC=1e-3 TVJC=1.4e-3 CJS=0.5p VJS=0.6 CTS=8e-4 TVJS=1e-3 TF=30p)
+.temp 85
+.ac dec 5 1meg 10g
+.end
