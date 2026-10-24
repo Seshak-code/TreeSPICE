@@ -46,9 +46,11 @@ int main(int argc, char** argv) {
         std::printf("hier: %.0f instances expanded, %zu definitions, live %.2f MB, %.2f s\n", hr.netlist.hier.expandedInstances(),
                     hr.netlist.blockDefinitions.size(), liveMB() - h0, std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count());
         const auto t2 = std::chrono::steady_clock::now();
-        const auto part = hierpart::partition(hr.netlist);  // S3.1
-        std::printf("partition: %zu contexts, %zu net classes, live %.2f MB, %.3f s\n", part.ctx.size(), part.netClasses(),
-                    liveMB() - h0, std::chrono::duration<double>(std::chrono::steady_clock::now() - t2).count());
+        hierpart::Partition part;
+        const auto q = hierpart::quotient(hr.netlist, &part);  // S3.1, S3.2
+        std::printf("partition: %zu contexts, %zu net colors; quotient %d nodes, %zu element classes; live %.2f MB, %.3f s\n",
+                    part.ctx.size(), part.netClasses(), q.nl.numGlobalNodes, q.elementClasses, liveMB() - h0,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t2).count());
         return 0;
     }
     const double m0 = liveMB();

@@ -104,13 +104,21 @@ public:
     explicit Refiner(const TensorNetlist& nl) : nl_(nl) {}
 
     Partition run() {
+        const int top = refineCtx("", {});
+        // the contexts reached with the final colors (refinement also met intermediate ones), parents first
         Partition p;
-        p_ = &p;
-        Context top;
-        top.def = "";
-        refine(nl_.globalBlock, nl_.numGlobalNodes, top.pins, topSeeds(), nl_.hier.top, top);
-        p.ctx.push_back(top);
-        for (size_t k = 0; k < nl_.hier.top.size(); ++k) p.ctx[0].child[k] = context(nl_.hier.top[k].def, pinsOf(nl_.hier.top[k], p.ctx[0].net));
+        std::map<int, int> id;
+        std::vector<int> order{top};
+        id[top] = 0;
+        for (size_t k = 0; k < order.size(); ++k)
+            for (int c : refs_[order[k]].child)
+                if (id.emplace(c, (int)order.size()).second) order.push_back(c);
+        for (int r : order) {
+            const Ref& f = refs_[r];
+            Context c{f.def, f.pins, f.net, {}, f.elem};
+            for (int ch : f.child) c.child.push_back(id.at(ch));
+            p.ctx.push_back(std::move(c));
+        }
         return p;
     }
 
@@ -130,8 +138,29 @@ public:
             ready.pop_back();
             for (int k : p.ctx[c].child) { mult[k] += mult[c]; if (--indeg[k] == 0) ready.push_back(k); }
         }
-        auto nodeOf = [&](int col) { return col == ground ? 0 : q.node.emplace(col, (int)q.node.size() + 1).first->second; };
-        auto classOf = [&](const Context& c, int n) { return c.net[n]; };  // a pin's color is its parent's net's
+        // classes: a context's pin is its parent's net (its refined color joins the parent's), any other net its color
+        std::map<int, int> parent;
+        std::function<int(int)> find = [&](int x) {
+            auto it = parent.find(x);
+            if (it == parent.end() || it->second == x) return x;
+            return it->second = find(it->second);
+        };
+        auto unite = [&](int a, int b) {
+            a = find(a); b = find(b);
+            if (a == b) return;
+            if (b == ground) std::swap(a, b);  // ground stays the root of its class
+            parent[b] = a;
+        };
+        for (const auto& c : p.ctx) {
+            const size_t pins = c.def.empty() ? 0 : block(c).pinNames.size();
+            for (size_t n = 1; n <= pins && n < c.net.size(); ++n) unite(c.pins[n - 1], c.net[n]);
+        }
+        std::map<int, int> rootNode;
+        auto nodeOf = [&](int col) {
+            const int r = find(col);
+            return r == find(ground) ? 0 : rootNode.emplace(r, (int)rootNode.size() + 1).first->second;
+        };
+        auto classOf = [&](const Context& c, int n) { return c.net[n]; };
         std::vector<double> size;  // nets per quotient node: each context's own nodes (not its pins), times its instances
         for (size_t ci = 0; ci < C; ++ci) {
             const auto& c = p.ctx[ci];
@@ -229,8 +258,11 @@ public:
             for (int* n : t)
                 if (*n > 0) *n = nodeOf(classOf(c, *n));
         });
-        q.nl.numGlobalNodes = (int)q.node.size();
-        size.resize(q.node.size(), 0.0);
+        for (const auto& c : p.ctx)  // every color of every context, for nodeFor
+            for (size_t n = 1; n < c.net.size(); ++n)
+                if (const int qn = nodeOf(c.net[n]); qn > 0) q.node[c.net[n]] = qn;
+        q.nl.numGlobalNodes = (int)rootNode.size();
+        size.resize(rootNode.size(), 0.0);
         for (double z : size)
             if (!(z >= 1.0)) throw std::runtime_error("quotient: a net class with no nets (internal error)");
         q.nl.classSize = std::move(size);
@@ -255,9 +287,7 @@ public:
 private:
     using Key = std::vector<long long>;
     const TensorNetlist& nl_;
-    Partition* p_ = nullptr;
     std::map<Key, int> colors_;                      // descriptor -> color
-    std::map<std::pair<std::string, std::vector<int>>, int> contexts_;  // (definition, pin colors) -> context
 
     std::map<std::string, int> strs_;                // string -> id (exact)
     int color(const Key& k) { return colors_.emplace(k, (int)colors_.size()).first->second; }
@@ -342,72 +372,68 @@ private:
         return c;
     }
 
-    // The context of definition def with pin colors pins, refined once
-    int context(const std::string& def, const std::vector<int>& pins) {
+    // A definition refined in the context of its pins' colors (memoized). Pins refine like any net (their refined
+    // colors are what a parent's net sees of this child), so a child contributes to its parent's nets by the refined
+    // color of the pin there: interchangeable pins (a row's bit lines) stay one class; the quotient joins each pin
+    // with its parent's net.
+    struct Ref { std::string def; std::vector<int> pins, net, elem, child; };  // child: refs_ indices
+    std::vector<Ref> refs_;
+    std::map<std::pair<std::string, std::vector<int>>, int> memo_;
+
+    int refineCtx(const std::string& def, const std::vector<int>& pins) {
         const auto key = std::make_pair(def, pins);
-        if (auto it = contexts_.find(key); it != contexts_.end()) return it->second;
-        const auto bd = nl_.blockDefinitions.find(def);
-        if (bd == nl_.blockDefinitions.end()) throw std::runtime_error("unknown subcircuit '" + def + "'");
+        if (auto it = memo_.find(key); it != memo_.end()) return it->second;
         static const std::vector<HierInstance> none;
         static const std::vector<Hierarchy::Seed> noSeeds;
-        const auto kids = nl_.hier.children.find(def);
-        const auto seeds = nl_.hier.seeds.find(def);
-        Context c;
-        c.def = def;
-        c.pins = pins;
-        refine(bd->second, bd->second.numInternalNodes, pins, seeds == nl_.hier.seeds.end() ? noSeeds : seeds->second,
-               kids == nl_.hier.children.end() ? none : kids->second, c);
-        const int id = (int)p_->ctx.size();
-        contexts_[key] = id;
-        p_->ctx.push_back(c);
-        for (size_t k = 0; k < c.child.size(); ++k) {
-            const int sub = context((kids->second)[k].def, pinsOf((kids->second)[k], p_->ctx[id].net));
-            p_->ctx[id].child[k] = sub;
-        }
-        return id;
-    }
+        const bool top = def.empty();
+        const auto bd = top ? nl_.blockDefinitions.end() : nl_.blockDefinitions.find(def);
+        if (!top && bd == nl_.blockDefinitions.end()) throw std::runtime_error("unknown subcircuit '" + def + "'");
+        const TensorBlock& b = top ? nl_.globalBlock : bd->second;
+        const int N = top ? nl_.numGlobalNodes : b.numInternalNodes;
+        const auto kidsIt = nl_.hier.children.find(def);
+        const auto& kids = top ? nl_.hier.top : kidsIt == nl_.hier.children.end() ? none : kidsIt->second;
+        const auto seedsIt = nl_.hier.seeds.find(def);
+        const std::vector<Hierarchy::Seed> topS = top ? topSeeds() : std::vector<Hierarchy::Seed>{};
+        const auto& seeds = top ? topS : seedsIt == nl_.hier.seeds.end() ? noSeeds : seedsIt->second;
+        const auto els = elements(b, def);
 
-    // Color refinement of one block's nodes 0..N: pins 1..P start at the context's colors, the rest internal
-    void refine(const TensorBlock& b, int N, const std::vector<int>& pins, const std::vector<Hierarchy::Seed>& seeds,
-                const std::vector<HierInstance>& kids, Context& c) {
-        const auto els = elements(b, c.def);
         std::vector<int> col(N + 1);
         col[0] = color({3, 0});
         for (int n = 1; n <= N; ++n) col[n] = n <= (int)pins.size() ? pins[n - 1] : color({3, 1});
-        for (const auto& s : seeds)
-            if (s.node >= 1 && s.node <= N) col[s.node] = color({4, col[s.node], bits(s.value), s.nodeset});
-        // incidence: per node, (element or child, terminal)
-        std::vector<std::vector<std::pair<int, int>>> inc(N + 1);  // (index: elements first, then children; terminal)
+        for (const auto& sd : seeds)
+            if (sd.node >= 1 && sd.node <= N) col[sd.node] = color({4, col[sd.node], bits(sd.value), sd.nodeset});
+        std::vector<std::vector<std::pair<int, int>>> inc(N + 1);  // per node: (element, terminal) or (els + child, pin)
         for (size_t e = 0; e < els.size(); ++e)
             for (size_t t = 0; t < els[e].t.size(); ++t)
                 if (els[e].t[t] >= 0 && els[e].t[t] <= N) inc[els[e].t[t]].push_back({(int)e, (int)t});
         for (size_t k = 0; k < kids.size(); ++k)
             for (size_t t = 0; t < kids[k].ports.size(); ++t)
                 if (kids[k].ports[t] >= 0 && kids[k].ports[t] <= N) inc[kids[k].ports[t]].push_back({(int)(els.size() + k), (int)t});
-        const int kidDef = 5;
         auto distinct = [](std::vector<int> v) { std::sort(v.begin(), v.end()); return (size_t)(std::unique(v.begin(), v.end()) - v.begin()); };
+        std::vector<int> childRef(kids.size());
         size_t classes = distinct(col);
         for (;;) {
-            std::vector<int> part(els.size() + kids.size());
+            std::vector<int> part(els.size());
             for (size_t e = 0; e < els.size(); ++e) {
                 Key k{6, els[e].id};
                 for (int t : els[e].t) k.push_back(t >= 0 && t <= N ? col[t] : -1);
                 part[e] = color(k);
             }
-            for (size_t x = 0; x < kids.size(); ++x) {
-                Key k{kidDef, strId(kids[x].def)};
-                for (int t : kids[x].ports) k.push_back(t >= 0 && t <= N ? col[t] : -1);
-                part[els.size() + x] = color(k);
-            }
+            for (size_t x = 0; x < kids.size(); ++x) childRef[x] = refineCtx(kids[x].def, pinsOf(kids[x], col));
             std::vector<int> next(N + 1);
             next[0] = col[0];
-            for (int n = 1; n <= (int)pins.size() && n <= N; ++n) next[n] = col[n];  // a pin stays its parent's net
-            for (int n = (int)pins.size() + 1; n <= N; ++n) {
-                std::vector<std::pair<int, int>> m;
-                for (const auto& [i, t] : inc[n]) m.push_back({part[i], t});
+            for (int n = 1; n <= N; ++n) {
+                std::vector<std::pair<int, int>> m;  // (element class, terminal) or (the child's refined pin color, -1)
+                for (const auto& [i, t] : inc[n])
+                    m.push_back(i < (int)els.size() ? std::make_pair(part[i], t) : std::make_pair(refs_[childRef[i - els.size()]].net[t + 1], -1));
                 std::sort(m.begin(), m.end());
                 Key k{7, col[n]};
-                for (const auto& [pc, t] : m) { k.push_back(pc); k.push_back(t); }
+                for (size_t a = 0; a < m.size();) {  // run-length: a bit line meets 1024 equal rows
+                    size_t z = a;
+                    while (z < m.size() && m[z] == m[a]) ++z;
+                    k.push_back(m[a].first); k.push_back(m[a].second); k.push_back((long long)(z - a));
+                    a = z;
+                }
                 next[n] = color(k);
             }
             const size_t nc = distinct(next);
@@ -415,14 +441,28 @@ private:
             if (nc == classes) break;  // refinement only splits: no new class, fixed point
             classes = nc;
         }
-        c.net = col;
-        c.child.assign(kids.size(), -1);
-        c.elem.resize(els.size());
+        // A stable local partition's color ids still carry only as many rounds of history as this context needed, so
+        // a net two rounds from a differing pin could share its id with another context's: final colors name the
+        // context (its definition and pin colors), so equal colors are one context's one class.
+        Key ck{8, strId(def)};
+        ck.insert(ck.end(), pins.begin(), pins.end());
+        const int self = color(ck);
+        for (int n = 1; n <= N; ++n) col[n] = color({9, self, col[n]});
+        Ref r;
+        r.def = def;
+        r.pins = pins;
+        r.net = col;
+        r.elem.resize(els.size());
         for (size_t e = 0; e < els.size(); ++e) {  // the final classes: element and its terminals' colors
             Key k{6, els[e].id};
             for (int t : els[e].t) k.push_back(t >= 0 && t <= N ? col[t] : -1);
-            c.elem[e] = color(k);
+            r.elem[e] = color(k);
         }
+        for (size_t x = 0; x < kids.size(); ++x) r.child.push_back(refineCtx(kids[x].def, pinsOf(kids[x], col)));  // final colors
+        const int id = (int)refs_.size();
+        memo_[key] = id;
+        refs_.push_back(std::move(r));
+        return id;
     }
 };
 

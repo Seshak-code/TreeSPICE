@@ -877,15 +877,16 @@ int main() {
         }
         {   // S3.2 transient: a 6T SRAM writes a 0 into bank 0's row 0 (its word line pulses, its bit lines driven), every
             // cell initialised to 1 by the body's .ic; the quotient circuit runs the flat one's transient, node for
-            // node at the same accepted steps
+            // node at the same accepted steps. Column 0 (written) shares blb with two columns on a pulled-up bl: a
+            // cell's colors must not merge with a neighbour's whose bl differs (qb is two hops from it)
             std::string t = "* sram write\n.subckt cell bl blb wl vdd\nM1 q qb 0 0 nm W=1u L=0.18u\nM2 q qb vdd vdd pm W=1u L=0.18u\n"
                             "M3 qb q 0 0 nm W=1u L=0.18u\nM4 qb q vdd vdd pm W=1u L=0.18u\nM5 bl wl q 0 nm W=1u L=0.18u\n"
                             "M6 blb wl qb 0 nm W=1u L=0.18u\nCq q 0 2f\nCqb qb 0 2f\n.ic v(q)=1.8 v(qb)=0\n.ends\n"
-                            ".subckt row bl blb wl vdd\nXC0 bl blb wl vdd cell\nXC1 bl blb wl vdd cell\nXC2 bl blb wl vdd cell\n.ends\n"
-                            ".subckt bank bl blb vdd\nXR0 bl blb wl0 vdd row\nXR1 bl blb wl1 vdd row\nXR2 bl blb wl2 vdd row\n"
-                            "V0 wl0 0 0\nV1 wl1 0 0\nV2 wl2 0 0\n.ends\n"
-                            ".subckt bankw bl blb vdd\nXR0 bl blb wl0 vdd row\nXR1 bl blb wl1 vdd row\nXR2 bl blb wl2 vdd row\n"
-                            "V0 wl0 0 PULSE(0 1.8 0.2n 0.05n 0.05n 1n 4n)\nV1 wl1 0 0\nV2 wl2 0 0\n.ends\n"
+                            ".subckt row bl blb wl vdd cbl\nXC0 bl blb wl vdd cell\nXC1 cbl blb wl vdd cell\nXC2 cbl blb wl vdd cell\n.ends\n"
+                            ".subckt bank bl blb vdd\nXR0 bl blb wl0 vdd cbl row\nXR1 bl blb wl1 vdd cbl row\nXR2 bl blb wl2 vdd cbl row\n"
+                            "V0 wl0 0 0\nV1 wl1 0 0\nV2 wl2 0 0\nRC cbl vdd 1k\nCC cbl 0 10f\n.ends\n"
+                            ".subckt bankw bl blb vdd\nXR0 bl blb wl0 vdd cbl row\nXR1 bl blb wl1 vdd cbl row\nXR2 bl blb wl2 vdd cbl row\n"
+                            "V0 wl0 0 PULSE(0 1.8 0.2n 0.05n 0.05n 1n 4n)\nV1 wl1 0 0\nV2 wl2 0 0\nRC cbl vdd 1k\nCC cbl 0 10f\n.ends\n"
                             ".model nm nmos level=1 vto=0.5 kp=200u cgso=1e-10 cgdo=1e-10\n.model pm pmos level=1 vto=-0.5 kp=80u cgso=1e-10 cgdo=1e-10\n"
                             "VDD vdd 0 1.8\nVBL bl0 0 0\nVBLB blb0 0 1.8\nXB0 bl0 blb0 vdd bankw\n";
             for (int i = 1; i < 3; ++i)
