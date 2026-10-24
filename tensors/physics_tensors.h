@@ -24,7 +24,7 @@
 inline Mos1Params<double> mos1Params(const Mosfet& m, double gmin = PhysicsConstants::JUNCTION_GMIN) {
     const auto& c = m.card;
     Mos1Params<double> p;
-    p.gmin = gmin;
+    p.gmin = gmin * m.rep;  // S3 quotient: one per device it stands for
     const bool pmos = c.resolved ? c.pmos
                                  : m.modelName.find("PMOS") != std::string::npos || m.modelName.find("pmos") != std::string::npos;
     p.polarity = pmos ? -1.0 : 1.0;
@@ -70,7 +70,7 @@ template <class P>
 inline DiodeModel<P> diodeModel(const Diode& d, const devtemp::DiodeAt<P>& t, double gmin) {
     const auto& c = d.card;
     DiodeModel<P> p;
-    p.gmin = gmin;
+    p.gmin = gmin * d.rep;
     const P vt = t.vt;
     p.is = t.is * d.area;
     p.vte = d.emissionCoefficient_N * vt;

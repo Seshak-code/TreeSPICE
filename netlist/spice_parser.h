@@ -36,6 +36,12 @@ struct OutputRequest { char kind; std::string analysis; std::vector<std::string>
 struct SPICEParseResult {
     TensorNetlist netlist;
     std::map<std::string, int> nodeIndex;  // top-level node name (upper case) -> index
+    // S3 (.options hier): netlist is the quotient circuit of the unflattened parse; nodeIndex maps the top-level
+    // names (and the hierarchical ones the outputs name) to its nodes, sourceIndex the top-level V sources to its
+    // (identical nets and sources share one)
+    bool          hierarchical = false;
+    std::map<std::string, int> sourceIndex;
+    std::map<std::string, double> elementCount;  // a top-level R / V / I name (upper case) -> the identical ones its class stands for
     bool          success = true;
     std::string   errorMessage;
     int           errorLine = -1;
@@ -97,6 +103,10 @@ public:
     // paramOverrides: upper-case global .param values that win over the netlist's (a .step param run)
     SPICEParseResult parse(const std::string& netlistText, const std::string& baseDir = "", double tempC = NAN,
                            const std::map<std::string, double>& paramOverrides = {}, const SensParam* sens = nullptr);
+    // false: the hierarchy only (netlist.hier), no expansion into netlist.instances: O(definitions) for an
+    // array of 1e9 cells (S3). XSPICE devices, .global nets inside a subcircuit and an .ic / .nodeset on a
+    // subcircuit's node from outside (x1.n) need the expansion then.
+    void setFlatten(bool flatten) { flatten_ = flatten; }
 
 private:
     // ── Value and Token Helpers ────────────────────────────────────────
@@ -177,6 +187,7 @@ private:
     // .subckt parsing state. Bodies use LOCAL node numbers (ports 1..P, then
     // internal nodes); X cards are expanded after the whole file is read, so
     // a subcircuit may be defined after use and may contain X cards itself.
+    bool             flatten_ = true;
     bool             inSubckt_ = false;
     std::string      subcktName_;
     std::vector<std::string> subcktPorts_;

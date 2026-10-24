@@ -203,6 +203,20 @@ then the two Roadmap sections it points to. Everything below was verified by run
   - **Next:** stamp triplets as slot-indexed values (~0.4 KB/device BSIM4); per-iteration CSR pattern copies;
     then **S3** (1e9 arrays): a hierarchical contraction plan per cell type, factors shared across identical
     cell inputs, class-compressed instance state (copy-on-write). At 1e9, any per-instance record is too much.
+- **Update 2026-10-24 (Claude Code, scale track S3.0–S3.2, branch `mac/s3`):** 1e9-cell arrays, design in
+  `docs/scale-s3.md` (owner: exact equivalence only, metastable = warning). `.options hier` (or
+  `SPICEParser::setFlatten(false)`) keeps the instance tree (`TensorNetlist::hier`) and solves the **quotient
+  circuit** of the coarsest equitable partition (`netlist/hier_partition.h`): one node per net class, one element
+  per element class scaled by its members (R ÷ m, C × m, MOS/diode/OSDI `m`, V-source `m`), KCL rows ÷ class size.
+  - **Gate met:** `bench/s3_sram.py --banks 1000 --rows 1024 --cols 1024 --hier` (1.05e9 6T cells, write then
+    read of one word): 36 unknowns, 2.2 s, 498 MB peak (the parser's). 8k cells: worst 4e-17 V against flat,
+    same steps, 0.03 s vs 19.3 s. Results table in the doc.
+  - **Refinement:** memoised per (definition, pin colors). A child meets its parent's net through its refined pin
+    color, so symmetric columns merge. Final colors are tagged by context (a local fixed point's raw ids alias
+    across contexts: the S3.2 transient test fails without it).
+  - **Also:** numparam memoises a definition's body `.param` scan (the 1e9 parse was 57 s → 1.9 s).
+  - **Next (S3.3):** AC/noise/sens/tf/pz on the quotient; I/L/Q/J classes with more than one member; `.ic` on a
+    hierarchical path; parser peak memory (line copies, ~18× the text); auto mode.
 - **Status of the plan:** Roadmap Phase 1 (Foundations) is done. See `Roadmap.md` →
   "⚙️ ENGINE FEATURE LIST & VERIFIED SUPPORT STATUS" (what works, by device/analysis, with ✅/⚠️/❌/🚫/❓)
   and "🎯 END-TO-END GOAL & ENGINE SCALE PLAN" (phases and gates).

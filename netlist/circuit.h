@@ -6,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <map>
+#include <functional>
 #include <set>
 #include <cassert>
 #include <iostream>
@@ -233,6 +234,7 @@ struct VoltageSource {
 
     std::string expression;  // Symbolic override for DC/main value
     std::string name;        // instance name (F/H cards reference it)
+    double m = 1.0;          // S3 quotient: identical sources it stands for (its current enters KCL m times)
 };
 
 /*
@@ -640,6 +642,7 @@ struct Diode {
     bool thermalFlag = false;
     struct Heat { devtemp::DiodeLaw law; double t0 = 300.15, rth0 = 0.0, cth0 = 0.0; };
     std::shared_ptr<const Heat> heat;  // null: no self-heating
+    double rep = 1.0;  // S3 quotient: identical diodes it stands for (in area and mult, and its GMIN, which M= leaves alone)
 };
 
 struct Mosfet {
@@ -683,6 +686,7 @@ struct Mosfet {
         int nf = 1;      // Number of fingers
         double mult = 1.0;  // Multiplier (M=): scales beta, the junctions and every capacitance
     } extra;
+    double rep = 1.0;  // S3 quotient: identical devices it stands for (in mult, and its junction GMIN, which M= leaves alone)
 
     // SPICE level-1 .model values, resolved by the parser (SPICE defaults for
     // missing keys). resolved = false (the GUI's Verilog-A path, no cards):
@@ -1233,6 +1237,56 @@ struct ICPackageInstance {
 
 // BlockInstance - A placed instance of a TensorBlock in the global netlist.
 
+// The subcircuit hierarchy as written (S3, docs/scale-s3.md): the top level's X instances (ports: global nodes)
+// and each definition's own (ports: its local nodes, 0 ground). The parser fills it when told not to flatten
+// (SPICEParser::setFlatten); otherwise TensorNetlist::instances is the expansion and this stays empty.
+struct HierInstance { std::string def, name; std::vector<int> ports; };
+struct Hierarchy {
+    std::vector<HierInstance> top;
+    std::map<std::string, std::vector<HierInstance>> children;       // definition -> its X instances
+    std::map<std::string, std::map<std::string, int>> nodeNames;     // definition -> local node name -> index
+    struct Seed { int node; double value; bool nodeset; };           // a body's .ic / .nodeset (every instance's)
+    std::map<std::string, std::vector<Seed>> seeds;
+    // Instances in the expansion (every X at every level): a definition's count is computed once
+    double expandedInstances() const {
+        std::map<std::string, double> memo;
+        std::function<double(const std::string&)> under = [&](const std::string& d) {
+            if (auto m = memo.find(d); m != memo.end()) return m->second;
+            double n = 0.0;
+            if (auto c = children.find(d); c != children.end())
+                for (const auto& x : c->second) n += 1.0 + under(x.def);
+            return memo[d] = n;
+        };
+        double n = 0.0;
+        for (const auto& x : top) n += 1.0 + under(x.def);
+        return n;
+    }
+    // A hierarchical node name X1.X2.N (upper case): the instances it goes through and the node, local to the last
+    // one's definition; false if a part is unknown
+    bool resolve(const std::string& path, std::vector<const HierInstance*>& chain, int& local) const {
+        chain.clear();
+        const std::vector<HierInstance>* level = &top;
+        size_t at = 0;
+        for (size_t dot; (dot = path.find('.', at)) != std::string::npos; at = dot + 1) {
+            const std::string name = path.substr(at, dot - at);
+            const HierInstance* hit = nullptr;
+            for (const auto& x : *level) if (x.name == name) { hit = &x; break; }
+            if (!hit) return false;
+            chain.push_back(hit);
+            const auto c = children.find(hit->def);
+            static const std::vector<HierInstance> none;
+            level = c == children.end() ? &none : &c->second;
+        }
+        if (chain.empty()) return false;
+        const auto names = nodeNames.find(chain.back()->def);
+        if (names == nodeNames.end()) return false;
+        const auto n = names->second.find(path.substr(at));
+        if (n == names->second.end()) return false;
+        local = n->second;
+        return true;
+    }
+};
+
 struct BlockInstance {
     std::string blockName;                // Name of the TensorBlock template
     std::vector<int> nodeMapping;         // Maps local node index -> global node index
@@ -1313,7 +1367,11 @@ public:
     BlockState globalState;
     std::vector<BlockState> instanceStates;              // Index matches instances vector
 
-    std::vector<BlockInstance> instances;                // Placed block instances
+    std::vector<BlockInstance> instances;                // Placed block instances (the expansion of hier)
+    Hierarchy hier;                                      // the subcircuit hierarchy as written (not flattened only)
+    // S3 quotient netlist (hierpart::quotient): nets each node stands for. Its KCL row sums them, the solver divides
+    // it back to one net's (per-net residuals and tolerances, as flat). Empty: every node is one net.
+    std::vector<double> classSize;
     int numGlobalNodes = 0;
 
     // Create the OSDI runtime instance of every OSDI device (global block and

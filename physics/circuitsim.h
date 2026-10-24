@@ -1669,14 +1669,14 @@ public:
     const double scale = nl.environment.global_voltage_scale;
     for (const auto &sl : branchList) {
       auto node = [&](int local) { return sl.map(local) - 1; };  // ground -> -1 (skipped)
-      auto branch = [&](int b, int np, int nn) {  // KCL coupling + v(+) - v(-) in row b
-        add(np, b, 1.0); add(nn, b, -1.0); add(b, np, 1.0); add(b, nn, -1.0);
+      auto branch = [&](int b, int np, int nn, double m = 1.0) {  // KCL coupling (m sources: S3) + v(+) - v(-) in row b
+        add(np, b, m); add(nn, b, -m); add(b, np, 1.0); add(b, nn, -1.0);
       };
       const auto &blk = *sl.blk;
       for (size_t i = 0; i < blk.voltageSources.size(); ++i) {
         const auto &v = blk.voltageSources[i];
         const int b = sl.vs + (int)i;
-        branch(b, node(v.nodePositive), node(v.nodeNegative));
+        branch(b, node(v.nodePositive), node(v.nodeNegative), v.m);
         S.rhs[b] += scale * sourceValue(v, v.voltage_V, tran ? h : 0.0, time);
       }
       // Inductors (+ mutual coupling K: off-diagonal L_ab terms between branch rows)
@@ -2154,6 +2154,9 @@ public:
       addRes(sl.map(b.outNeg), f);
     });
 
+    // S3 quotient: per net, as the stamp (stampAllElements)
+    for (int i = 0; i < (int)netlist.classSize.size() && i < (int)node_residuals.size(); ++i) node_residuals[i] /= netlist.classSize[i];
+
     // 6. Find Max Residual
     double max_err = 0.0;
     for (double val : node_residuals) {
@@ -2546,6 +2549,12 @@ public:
     osdiAll(netlist, v_guess, h, true, false);  // stamped in device order: the same sequence every iteration
     for (size_t i = 0; i < osdiRefs_.size(); ++i) stampOsdi(osdiRefs_[i], osdiI(i), osdiJ(i), v_guess);
 
+    // S3 quotient: a node's KCL row summed its class's nets; one net's (gmin and the pin below stay per net)
+    if (!netlist.classSize.empty()) {
+      matrixBuilder.scaleRows(quotientRowScale(netlist));
+      for (int n = 0; n < (int)netlist.classSize.size() && n < (int)rhsVector.size(); ++n) rhsVector[n] /= netlist.classSize[n];
+    }
+
     // A node no element touches is not a circuit node (ngspice drops it after
     // flattening, e.g. an X pin wired to a port the .subckt never uses): pin it
     // to 0 V. A real floating node (series caps, an undriven gate) still fails.
@@ -2554,6 +2563,12 @@ public:
       if (!used[n]) matrixBuilder.add(n - 1, n - 1, 1.0);
   }
 
+
+  static std::vector<double> quotientRowScale(const TensorNetlist &nl) {
+    std::vector<double> s(nl.classSize.size());
+    for (size_t i = 0; i < s.size(); ++i) s[i] = 1.0 / nl.classSize[i];
+    return s;
+  }
 
   void addDiagonalConditioning(int n, double gmin) {
     // gmin <= 0: no node-to-ground conditioning. Like ngspice, once converged

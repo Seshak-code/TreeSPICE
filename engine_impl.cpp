@@ -42,6 +42,7 @@
 // Full SPICE3f5 parser (must be included OUTSIDE any namespace to avoid
 // double-qualification: the parser itself already declares namespace acutesim)
 #include "netlist/spice_parser.h"
+#include "netlist/hier_partition.h"
 
 namespace acutesim {
 
@@ -74,43 +75,52 @@ static SimulationResponseDTO stepToResponse(const SolverStep& step,
 // .save (ngspice): given, and not "all", the response keeps only the vectors .save, .print and .meas name (their
 // v(...), i(...) and .save's bare node names), so a long transient of a large circuit stores those columns, not
 // every node at every step. Indices into the solution's nodes and branches, ascending; all: no .save.
-struct KeptColumns { bool all = true; std::vector<int> nodes, branches; };
+// hierarchical (S3): one column per name, top-level and named by an output (its node may be another name's); the
+// names, lower case, then name the columns.
+struct KeptColumns { bool all = true; std::vector<int> nodes, branches; std::vector<std::string> nodeNames, branchNames; };
 static KeptColumns keptColumns(const SPICEParseResult& parsed, const CircuitSim& sim) {
     KeptColumns k;
     auto lower = [](std::string x) { for (auto& c : x) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return x; };
     auto upper = [](std::string x) { for (auto& c : x) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c))); return x; };
-    bool save = false;
+    bool save = false, all = false;
     for (const auto& o : parsed.outputs)
         if (o.kind == 's') {
             save = true;
-            for (const auto& sp : o.specs) if (lower(sp) == "all") return k;
+            for (const auto& sp : o.specs) all = all || lower(sp) == "all";
         }
-    if (!save) return k;
-    k.all = false;
-    const auto branches = sim.branchNames(parsed.netlist);
-    std::set<int> nodes, brs;
-    auto node = [&](const std::string& n) {
-        if (const auto it = parsed.nodeIndex.find(upper(n)); it != parsed.nodeIndex.end() && it->second >= 1) nodes.insert(it->second - 1);
-    };
-    auto branch = [&](const std::string& b) {
-        const auto it = std::find(branches.begin(), branches.end(), lower(b));
-        if (it != branches.end()) brs.insert((int)(it - branches.begin()));
-    };
+    // the names the outputs read (upper-case nodes, lower-case sources)
+    std::set<std::string> nodes, brs;
     static const std::regex ref(R"(\b([vi])[a-z]*\(([^()]*)\))", std::regex::icase), bare(R"([A-Za-z0-9_.#:$\[\]]+)");
     for (const auto& o : parsed.outputs)
         for (const auto& spec : o.specs) {
-            if (o.kind == 's' && std::regex_match(spec, bare)) { node(spec); continue; }
+            if (o.kind == 's' && std::regex_match(spec, bare)) { if (lower(spec) != "all") nodes.insert(upper(spec)); continue; }
             for (auto it = std::sregex_iterator(spec.begin(), spec.end(), ref); it != std::sregex_iterator(); ++it) {
                 std::string args = (*it)[2];
                 args.erase(std::remove_if(args.begin(), args.end(), [](unsigned char c) { return std::isspace(c); }), args.end());
-                if (std::tolower(static_cast<unsigned char>((*it)[1].str()[0])) == 'i') { branch(args); continue; }
+                if (std::tolower(static_cast<unsigned char>((*it)[1].str()[0])) == 'i') { brs.insert(lower(args)); continue; }
                 const size_t comma = args.find(',');
-                node(args.substr(0, comma));
-                if (comma != std::string::npos) node(args.substr(comma + 1));
+                nodes.insert(upper(args.substr(0, comma)));
+                if (comma != std::string::npos) nodes.insert(upper(args.substr(comma + 1)));
             }
         }
-    k.nodes.assign(nodes.begin(), nodes.end());
-    k.branches.assign(brs.begin(), brs.end());
+    if (parsed.hierarchical) {
+        k.all = false;
+        for (const auto& [name, idx] : parsed.nodeIndex)
+            if (idx >= 1 && (!save || all || nodes.count(name))) { k.nodes.push_back(idx - 1); k.nodeNames.push_back(lower(name)); }
+        for (const auto& [name, idx] : parsed.sourceIndex)
+            if (!save || all || brs.count(lower(name))) { k.branches.push_back(idx); k.branchNames.push_back(lower(name)); }
+        return k;
+    }
+    if (!save || all) return k;
+    k.all = false;
+    const auto branches = sim.branchNames(parsed.netlist);
+    std::set<int> ni, bi;
+    for (const auto& n : nodes)
+        if (const auto it = parsed.nodeIndex.find(n); it != parsed.nodeIndex.end() && it->second >= 1) ni.insert(it->second - 1);
+    for (const auto& b : brs)
+        if (const auto it = std::find(branches.begin(), branches.end(), b); it != branches.end()) bi.insert((int)(it - branches.begin()));
+    k.nodes.assign(ni.begin(), ni.end());
+    k.branches.assign(bi.begin(), bi.end());
     return k;
 }
 
@@ -143,8 +153,8 @@ static void nameColumns(SimulationResponseDTO& r, const SPICEParseResult& parsed
     if (k.all) return;
     for (auto& p : r.waveformPoints) keepColumns(k, p, r.nodeNames.size(), r.branchNames.size());
     std::vector<std::string> nn, bn;
-    for (int i : k.nodes) nn.push_back(r.nodeNames[i]);
-    for (int i : k.branches) bn.push_back(r.branchNames[i]);
+    for (size_t c = 0; c < k.nodes.size(); ++c) nn.push_back(k.nodeNames.empty() ? r.nodeNames[k.nodes[c]] : k.nodeNames[c]);
+    for (size_t c = 0; c < k.branches.size(); ++c) bn.push_back(k.branchNames.empty() ? r.branchNames[k.branches[c]] : k.branchNames[c]);
     r.nodeNames = std::move(nn);
     r.branchNames = std::move(bn);
 }
@@ -181,6 +191,68 @@ static JobID generateJobID() {
 // partial (or empty) netlist solved anyway, reporting "converged".
 static std::function<void(double)> sweepSetter(TensorNetlist& netlist, const std::string& name);
 
+// S3 (.options hier): the parse's quotient circuit in its place (hier_partition.h), the names mapped to its nodes:
+// the top level's and the hierarchical ones (x1.x2.n) the outputs name. Nets two or more of one context's own share
+// (symmetry) are reported: a bistable cell solved that way sits at its metastable point.
+static std::string toQuotient(SPICEParseResult& out) {
+    hierpart::Partition part;
+    hierpart::Quotient q;
+    try { q = hierpart::quotient(out.netlist, &part); }
+    catch (const std::exception& e) { return std::string("hierarchical solve (.options hier): ") + e.what(); }
+    for (const auto& c : part.ctx) {  // undriven, unseeded nets of one instance that symmetry makes equal
+        if (c.def.empty()) continue;
+        const auto& blk = out.netlist.blockDefinitions.at(c.def);
+        std::set<int> fixed;
+        for (const auto& v : blk.voltageSources) { fixed.insert(v.nodePositive); fixed.insert(v.nodeNegative); }
+        if (const auto sd = out.netlist.hier.seeds.find(c.def); sd != out.netlist.hier.seeds.end())
+            for (const auto& sv : sd->second) fixed.insert(sv.node);
+        std::map<int, std::vector<std::string>> same;
+        for (const auto& [name, local] : out.netlist.hier.nodeNames[c.def])
+            if (local > (int)blk.pinNames.size() && local < (int)c.net.size() && !fixed.count(local)) same[c.net[local]].push_back(name);
+        for (const auto& [col, names] : same)
+            if (names.size() > 1) {
+                std::cerr << "Warning: .options hier: nets";
+                for (const auto& n : names) std::cerr << " " << n;
+                std::cerr << " of " << c.def << " are equal by symmetry (if the cell is bistable, it sits at its metastable point: "
+                             "give it an .ic or .nodeset)\n";
+            }
+    }
+    std::map<std::string, int> idx;
+    for (const auto& [name, n] : out.nodeIndex)
+        if (const int qn = hierpart::nodeFor(out.netlist, out.nodeIndex, part, q, name); qn > 0) idx[name] = qn;
+    static const std::regex ref(R"(\b[vi][a-z]*\(([^()]*)\))", std::regex::icase), bare(R"([A-Za-z0-9_.#:$\[\]]+)");
+    auto named = [&](std::string n) {  // a hierarchical name an output reads
+        for (auto& ch : n) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        if (n.find('.') == std::string::npos || idx.count(n)) return;
+        if (const int qn = hierpart::nodeFor(out.netlist, out.nodeIndex, part, q, n); qn > 0) idx[n] = qn;
+    };
+    for (const auto& o : out.outputs)
+        for (const auto& spec : o.specs) {
+            if (std::regex_match(spec, bare)) named(spec);
+            for (auto it = std::sregex_iterator(spec.begin(), spec.end(), ref); it != std::sregex_iterator(); ++it) {
+                std::string args = (*it)[1];
+                args.erase(std::remove_if(args.begin(), args.end(), [](unsigned char ch) { return std::isspace(ch); }), args.end());
+                const size_t comma = args.find(',');
+                named(args.substr(0, comma));
+                if (comma != std::string::npos) named(args.substr(comma + 1));
+            }
+        }
+    out.netlist = std::move(q.nl);
+    out.nodeIndex = std::move(idx);
+    out.sourceIndex = std::move(q.vsource);
+    out.elementCount = std::move(q.topCount);
+    out.hierarchical = true;
+    return "";
+}
+
+// S3: an element the quotient circuit's class shares with identical ones cannot be swept or varied alone there
+static std::string hierShared(const SPICEParseResult& p, const std::string& name) {
+    if (!p.hierarchical) return "";
+    const auto it = p.elementCount.find(name);
+    if (it != p.elementCount.end() && it->second == 1.0) return "";
+    return name + " stands for identical elements on the hierarchical path (.options hier): it cannot be swept or varied alone";
+}
+
 // The request's netlist at circuit temperature tempC (NaN: the netlist's), with the values of this .step run applied.
 // Returns an error text, or "".
 static std::string parseRequest(const SimulationRequestDTO& req, double tempC, SPICEParseResult& out,
@@ -192,8 +264,11 @@ static std::string parseRequest(const SimulationRequestDTO& req, double tempC, S
     }
     out = SPICEParser().parse(req.source.payload, req.source.baseDir, tempC, params, sens);
     if (!out.success) return "SPICE parse error: " + out.errorMessage;
+    if (!out.netlist.hier.top.empty())
+        if (std::string e = toQuotient(out); !e.empty()) return e;
     for (const auto& s : req.stepValues) {
         if (s.kind != 'E') continue;
+        if (const std::string e = hierShared(out, s.name); !e.empty()) return e;
         const auto set = sweepSetter(out.netlist, s.name);
         if (!set) return ".step element '" + s.name + "' not found at top level (a V, I or R card)";
         set(s.value);
@@ -208,9 +283,14 @@ static std::string parseRequest(const SimulationRequestDTO& req, double tempC, S
 static double cornerTempC(const SimulationRequestDTO& req) { return req.corner.temperature != 27.0 ? req.corner.temperature : NAN; }
 
 static bool deserialiseRequest(const SimulationRequestDTO& req, SPICEParseResult& out,
-                               SimulationResponseDTO& failure, bool listOk = false, bool stepOk = false, bool digitalOk = false) {
+                               SimulationResponseDTO& failure, bool listOk = false, bool stepOk = false, bool digitalOk = false,
+                               bool hierOk = false) {
     if (const std::string e = parseRequest(req, cornerTempC(req), out); !e.empty()) {
         failure.errorDetail = e;
+        return false;
+    }
+    if (out.hierarchical && !hierOk) {  // S3: .op, .dc and .tran so far
+        failure.errorDetail = "this analysis on the hierarchical path (.options hier) is not supported yet";
         return false;
     }
     if (!listOk && out.netlist.environment.temp_count > 1) {
@@ -388,12 +468,19 @@ static SimulationResponseDTO dcRun(const SimulationRequestDTO& req, SPICEParseRe
         const int gpuSoFar = run ? run->sim.gpuFronts : 0;  // a TEMP re-parse keeps the count
         run = std::make_unique<Run>(std::move(p), prec);
         run->sim.gpuFronts = gpuSoFar;
+        for (const auto& v : req.mc.variations) {
+            std::string n = v.componentName;
+            for (auto& ch : n) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            if (const std::string e = hierShared(run->parsed, n); !e.empty()) { r.errorDetail = e; return false; }
+        }
         if (const std::string e = applyVariations(run->parsed.netlist, req.mc.variations, req.mcSeed); !e.empty()) {
             r.errorDetail = e;
             return false;
         }
         run->sim.onConvergenceStep = [&cb](int it, double res) { cb.onConvergenceStep(it, res); };
         for (const auto& d : dims) {
+            if (d.name != "TEMP")
+                if (const std::string e = hierShared(run->parsed, d.name); !e.empty()) { r.errorDetail = e; return false; }
             run->set.push_back(d.name == "TEMP" ? std::function<void(double)>() : sweepSetter(run->parsed.netlist, d.name));
             if (d.name != "TEMP" && !run->set.back()) {
                 r.errorDetail = ".dc source '" + d.name + "' not found at top level";
@@ -454,7 +541,7 @@ SimulationResponseDTO SessionImpl::dispatch_dc_internal(const SimulationRequestD
                                                           const EngineCallbacks& cb) {
     SPICEParseResult parsed;
     SimulationResponseDTO failure;
-    if (!deserialiseRequest(req, parsed, failure, true, true)) return failure;
+    if (!deserialiseRequest(req, parsed, failure, true, true, false, true)) return failure;
     if (!parsed.steps.empty() && req.stepValues.empty())
         return runSteps(req, parsed.steps, [&](const SimulationRequestDTO& q) { return dispatch_dc_internal(q, cb); });
     std::vector<DCConfigDTO> sweeps;  // innermost first
@@ -493,6 +580,11 @@ SimulationResponseDTO SessionImpl::dispatch_dc_internal(const SimulationRequestD
         CircuitSim sim;
         sim.execMode = selectExecMode(precision_);
         sim.onConvergenceStep = [&](int it, double res) { cb.onConvergenceStep(it, res); };
+        for (const auto& v : req.mc.variations) {
+            std::string n = v.componentName;
+            for (auto& ch : n) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            if (const std::string e = hierShared(parsed, n); !e.empty()) { failure.errorDetail = e; return failure; }
+        }
         if (const std::string e = applyVariations(parsed.netlist, req.mc.variations, req.mcSeed); !e.empty()) {
             failure.errorDetail = e;
             return failure;
@@ -581,7 +673,7 @@ SimulationResponseDTO SessionImpl::dispatch_tran_internal(const SimulationReques
                                                             ResultChunkCallback streamCb) {
     SPICEParseResult parsed;
     SimulationResponseDTO failure;
-    if (!deserialiseRequest(req, parsed, failure, false, true, true)) return failure;
+    if (!deserialiseRequest(req, parsed, failure, false, true, true, true)) return failure;
     if (!parsed.steps.empty() && req.stepValues.empty())
         return runSteps(req, parsed.steps, [&](const SimulationRequestDTO& q) { return dispatch_tran_internal(q, cb, streamCb); });
     TensorNetlist& netlist = parsed.netlist;

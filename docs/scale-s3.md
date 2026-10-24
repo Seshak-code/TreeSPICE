@@ -1,6 +1,7 @@
 # S3: simulating 1e9-cell arrays (design, for review)
 
-Status: proposal, 2026-10-24. No code yet. S1 (memory per device, PR #21) is the base.
+Status: S3.0–S3.2 landed (2026-10-24, `.options hier`: `.op`, `.dc`, `.tran`); S3.3 open. S1 (memory per device,
+PR #21) is the base. Results at the end.
 
 ## Goal and gate
 
@@ -85,6 +86,17 @@ Each stage lands with the full matrix (ctest, run_diff, Xyce, cli_check) and its
 2. **S3.1: partition.**
    - **Change:** color refinement over the hierarchy, without flattening. An instance's color depends only on its
      definition and its port colors, so a definition refines once per distinct port-color context.
+   - **As built** (`netlist/hier_partition.h`):
+     - A context (definition, pin colors π) is refined once (memoised). Pins refine like any net, starting from π.
+     - A child meets its parent's net through the child's *refined* color of that pin, not its pin index. A row's
+       1024 bit-line pins are one class when the bank drives them alike.
+     - Final colors are tagged with their context, so equal colors mean one context's one class. A context's
+       local fixed point stops once its own partition is stable, so its raw color ids carry only that many rounds
+       of history. Without the tag, a written cell's `qb` (two hops from `bl`) shared an id with its neighbour's.
+     - The quotient joins each pin's refined color with its parent net's (union-find); those are the net classes.
+     - Descriptors are exact interned integers, run-length encoded (a bit line meets 1024 equal rows).
+     - Devices compare by identity (definition, element index), so symmetry *inside* a cell (M1/M3) is not merged.
+       That costs a constant per cell context, not per instance.
    - **Gate:** a 1e9-cell idle SRAM has O(10) classes; a one-word read has O(word width) more.
 3. **S3.2: quotient solve.**
    - **Change:** assemble the quotient MNA (class unknowns; element classes stamped once, scaled by incidence
@@ -106,3 +118,20 @@ Each stage lands with the full matrix (ctest, run_diff, Xyce, cli_check) and its
 3. **S3.0 changes the parse result's internals.** The flat `instances` list becomes a view, and the GUI and
    driver code that walk `instances` move to that view. That's no change in behaviour, but it touches
    `compute/orchestration`.
+
+## Results (S3.0–S3.2, M4 Pro)
+
+Gate netlist: `bench/s3_sram.py` (6T cells with a body `.ic`, a write then a read of one word, `.tran 0.02n 3.2n`).
+
+| Cells | Path | Unknowns | Wall | Peak RSS | vs flat |
+|---|---|---|---|---|---|
+| 64 | hier | 36 | 0.09 s | 5 MB | worst 1e-15 V, same 269 steps |
+| 8 192 | flat | 17 410 | 19.3 s | 149 MB | |
+| 8 192 | hier | 36 | 0.03 s | 8.7 MB | worst 4e-17 V, same 268 steps |
+| 1 048 576 | hier | 26 | 1.2 s | 289 MB | |
+| 1 049 601 000 | hier | 36 | 2.2 s | 498 MB | |
+
+The written cell flips 1.8 → 0 V and holds through the read; unwritten columns and idle banks hold 1.8 V. At 1e9
+the peak is the parser's (27 MB of text, about 18× in line copies): the hierarchy itself is 0.2 MB, the partition
+0.2 s. Not yet unflattened: B/E/G expressions, F/H, K, W, XSPICE and `.global` inside a subcircuit (refused), I, L,
+Q, J classes of more than one member, an `.ic` on a hierarchical path, AC/noise/sens/tf/pz (S3.3).

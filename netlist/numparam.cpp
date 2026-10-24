@@ -626,6 +626,7 @@ private:
         return it == subckts_.end() ? nullptr : &it->second;
     }
     std::map<std::string, std::string> specialized_;  // key -> emitted subckt name
+    std::map<const Subckt *, Scope> bodyParams_;      // a definition's body .params (their names: X card checks)
     Scope global_;
     Lines defs_;  // specialized .subckt definitions and their hoisted .model cards
 
@@ -754,8 +755,9 @@ private:
         // The body's own .param values are defaults too: an X card overrides them
         // (ngspice; sky130 declares l, w, ... that way). Overridden values win
         // because a scope reads val before raw.
-        Scope body;
-        for (const auto &[bn, bl] : s.body) collectParams(bl, body);
+        auto [bodyIt, bodyNew] = bodyParams_.try_emplace(&s);  // once per definition: a bank body is 1e6 tokens
+        Scope &body = bodyIt->second;
+        if (bodyNew) for (const auto &[bn, bl] : s.body) collectParams(bl, body);
         std::string given, mult;
         for (const auto &[k, v] : pairs(line)) {
             if (k == "M" && !sc.raw.count(k) && !body.raw.count(k)) {  // ngspice scales every device inside

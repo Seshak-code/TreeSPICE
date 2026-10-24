@@ -1,4 +1,4 @@
-// scale_probe <netlist> [tran <step> <stop>]: live heap bytes (macOS malloc zones) after parsing and after the DC
+// scale_probe <netlist> [tran <step> <stop> | hier]: live heap bytes (macOS malloc zones) after parsing and after the DC
 // operating point (or the transient: its peak too, sampled), per device; the scale track's (S1) measure. Prints the
 // sizes of the per-device and per-instance records too.
 #include "netlist/spice_parser.h"
@@ -11,6 +11,7 @@
 #include <thread>
 #include "osdi/osdi_abi.h"
 #include "osdi/osdi_device.h"
+#include "netlist/hier_partition.h"
 #include <malloc/malloc.h>
 #include <chrono>
 #include <cstdio>
@@ -35,6 +36,23 @@ int main(int argc, char** argv) {
     const std::string text = ss.str();
     std::printf("sizeof Mosfet %zu, DeviceCharge %zu, BlockState %zu, BlockInstance %zu\n", sizeof(Mosfet),
                 sizeof(BlockState::DeviceCharge), sizeof(BlockState), sizeof(BlockInstance));
+    if (argc >= 3 && std::string(argv[2]) == "hier") {  // S3.0: the hierarchy only, no expansion
+        const double h0 = liveMB();
+        const auto t = std::chrono::steady_clock::now();
+        SPICEParser hp;
+        hp.setFlatten(false);
+        const auto hr = hp.parse(text, "");
+        if (!hr.success) { std::fprintf(stderr, "parse: %s\n", hr.errorMessage.c_str()); return 1; }
+        std::printf("hier: %.0f instances expanded, %zu definitions, live %.2f MB, %.2f s\n", hr.netlist.hier.expandedInstances(),
+                    hr.netlist.blockDefinitions.size(), liveMB() - h0, std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count());
+        const auto t2 = std::chrono::steady_clock::now();
+        hierpart::Partition part;
+        const auto q = hierpart::quotient(hr.netlist, &part);  // S3.1, S3.2
+        std::printf("partition: %zu contexts, %zu net colors; quotient %d nodes, %zu element classes; live %.2f MB, %.3f s\n",
+                    part.ctx.size(), part.netClasses(), q.nl.numGlobalNodes, q.elementClasses, liveMB() - h0,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t2).count());
+        return 0;
+    }
     const double m0 = liveMB();
     auto t0 = std::chrono::steady_clock::now();
     auto parsed = SPICEParser().parse(text, "");

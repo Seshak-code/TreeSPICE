@@ -13,9 +13,11 @@
 #include "physics/circuitsim.h"
 #include "netlist/spice_parser.h"
 #include "netlist/numparam.h"
+#include "netlist/hier_partition.h"
 
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <complex>
 #include <cstdio>
 #include <string>
@@ -749,6 +751,244 @@ int main() {
             const auto w = session->runDC(req).waveformPoints;
             check(w.size() == 2 && w[0].nodeVoltages[1] == w[1].nodeVoltages[1] && std::abs(w[0].nodeVoltages[1] - 5.0) > 1e-6,
                   "Monte Carlo variation survives the .dc TEMP re-parse");
+        }
+        {   // S3.0: an SRAM written as nested subcircuits (cell -> row of n -> bank of n rows -> n banks) parses without
+            // flattening into its hierarchy: O(definitions), 1e9 cells included; a hierarchical name resolves through
+            // it; the flat path expands the same hierarchy into as many instances
+            auto sram = [](int n) {
+                std::string t = "* nested sram\n.subckt cell bl blb wl vdd\nM1 q qb 0 0 nm W=1u L=0.18u\nM2 q qb vdd vdd pm W=1u L=0.18u\n"
+                                "M3 qb q 0 0 nm W=1u L=0.18u\nM4 qb q vdd vdd pm W=1u L=0.18u\nM5 bl wl q 0 nm W=0.5u L=0.18u\n"
+                                "M6 blb wl qb 0 nm W=0.5u L=0.18u\n.ends\n.subckt row bl blb wl vdd\n";
+                for (int i = 0; i < n; ++i) t += "XC" + std::to_string(i) + " bl blb wl vdd cell\n";
+                t += ".ends\n.subckt bank bl blb vdd\n";
+                for (int i = 0; i < n; ++i) t += "XR" + std::to_string(i) + " bl blb wl" + std::to_string(i) + " vdd row\n";
+                t += ".ends\n.model nm nmos level=1 vto=0.5 kp=200u\n.model pm pmos level=1 vto=-0.5 kp=80u\nVDD vdd 0 1.8\n";
+                for (int i = 0; i < n; ++i) t += "XB" + std::to_string(i) + " bl" + std::to_string(i) + " blb" + std::to_string(i) + " vdd bank\n";
+                return t + ".op\n.end\n";
+            };
+            SPICEParser hp;
+            hp.setFlatten(false);
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto big = hp.parse(sram(1000));
+            const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            std::vector<const HierInstance*> chain;
+            int local = 0;
+            const bool found = big.success && big.netlist.hier.resolve("XB7.XR3.XC999.Q", chain, local);
+            check(big.success && big.netlist.instances.empty() && big.netlist.hier.expandedInstances() == 1e9 + 1e6 + 1e3 &&
+                      found && chain.size() == 3 && chain.back()->def == "CELL" && local > 4 && secs < 5.0,
+                  "S3.0: a 1e9-cell nested SRAM parses unflattened (" + std::to_string(secs) + " s), x1.x2.x3.q resolves" +
+                      (big.success ? "" : ": " + big.errorMessage));
+            SPICEParser fp, hp2;
+            hp2.setFlatten(false);
+            const auto flat = fp.parse(sram(6)), h6 = hp2.parse(sram(6));
+            check(flat.success && h6.success && (double)flat.netlist.instances.size() == h6.netlist.hier.expandedInstances() &&
+                      flat.netlist.instances.size() == 6 * 6 * 6 + 6 * 6 + 6 && flat.netlist.hier.top.empty(),
+                  "S3.0: the flat path expands the hierarchy into its instance count (" + std::to_string(flat.netlist.instances.size()) + ")");
+            SPICEParser xp;
+            xp.setFlatten(false);
+            const auto xs = xp.parse("* a in subckt\n.subckt buf a y\naa a y g\n.model g gain(gain=2)\n.ends\nV1 i 0 1\nX1 i o buf\nR1 o 0 1k\n.op\n.end\n");
+            check(!xs.success && xs.errorMessage.find("need the flattened netlist") != std::string::npos,
+                  "S3.0: XSPICE devices in a subcircuit need the flattened netlist (" + xs.errorMessage + ")");
+        }
+        {   // S3.1: the partition of an unflattened netlist is sound: a flat DC solve of the same circuit (unique: an
+            // array of inverter cells) gives every net of a class one voltage. Bank 0 sees its own driver: two bank,
+            // row and cell contexts; a B source is refused, not partitioned
+            auto arr = [](bool b) {
+                std::string t = "* array\n.subckt cell in vdd\nM1 mid in 0 0 nm W=1u L=0.18u\nM2 mid in vdd vdd pm W=2u L=0.18u\n"
+                                "M3 out mid 0 0 nm W=1u L=0.18u\nM4 out mid vdd vdd pm W=2u L=0.18u\nR1 out 0 50k\n.ends\n"
+                                ".subckt row in vdd\n";
+                for (int i = 0; i < 4; ++i) t += "XC" + std::to_string(i) + " in vdd cell\n";
+                t += ".ends\n.subckt bank in vdd\n";
+                for (int i = 0; i < 4; ++i) t += "XR" + std::to_string(i) + " in vdd row\n";
+                t += ".ends\n.model nm nmos level=1 vto=0.5 kp=200u\n.model pm pmos level=1 vto=-0.5 kp=80u\nVDD vdd 0 1.8\n"
+                     "VIN in 0 0.7\nVIN2 in2 0 1.1\nR9 in 0 1meg\nR10 in2 0 1meg\nXB0 in2 vdd bank\n";
+                for (int i = 1; i < 4; ++i) t += "XB" + std::to_string(i) + " in vdd bank\n";
+                // tight tolerances: flat and quotient are separate Newton runs, equal to roundoff only when converged
+                return t + (b ? "B1 x 0 V=v(in)\nR11 x 0 1k\n" : "") + ".options reltol=1e-10 vntol=1e-13 abstol=1e-16\n.op\n.end\n";
+            };
+            const auto flat = run(PrecisionMode::Native_F64, arr(false));
+            SPICEParser hp;
+            hp.setFlatten(false);
+            const auto h = hp.parse(arr(false));
+            bool ok = flat.converged && h.success && !flat.waveformPoints.empty();
+            hierpart::Partition part;
+            if (ok) part = hierpart::partition(h.netlist);
+            std::map<std::pair<int, int>, double> classV;  // (context, color) -> the first flat voltage seen
+            double worst = 0.0;
+            size_t mapped = 0;
+            for (size_t i = 0; ok && i < flat.nodeNames.size(); ++i) {
+                std::string name = flat.nodeNames[i];
+                for (auto& ch : name) ch = (char)std::toupper((unsigned char)ch);
+                if (name.empty()) continue;
+                int ctx = 0, local = -1;
+                if (name.find('.') == std::string::npos) {
+                    const auto it = h.nodeIndex.find(name);
+                    if (it == h.nodeIndex.end()) continue;
+                    local = it->second;
+                } else {
+                    std::vector<const HierInstance*> chain;
+                    if (!h.netlist.hier.resolve(name, chain, local)) { ok = false; break; }
+                    const std::vector<HierInstance>* level = &h.netlist.hier.top;
+                    for (const auto* x : chain) {
+                        const size_t k = (size_t)(x - level->data());
+                        ctx = part.ctx[ctx].child[k];
+                        const auto kids = h.netlist.hier.children.find(x->def);
+                        level = kids == h.netlist.hier.children.end() ? nullptr : &kids->second;
+                    }
+                }
+                const auto key = std::make_pair(ctx, part.ctx[ctx].net[local]);
+                const double v = flat.waveformPoints.back().nodeVoltages[i];
+                if (auto it = classV.find(key); it != classV.end()) worst = std::max(worst, std::abs(it->second - v));
+                else classV[key] = v;
+                ++mapped;
+            }
+            check(ok && mapped > 100 && worst < 1e-9 && part.ctx.size() == 7,
+                  "S3.1: every net of a class has one flat voltage (worst " + std::to_string(worst) + " V over " +
+                      std::to_string(mapped) + " nets; " + std::to_string(part.ctx.size()) + " contexts, " +
+                      std::to_string(classV.size()) + " classes)");
+            // S3.2: the quotient circuit solves to the flat one's voltages: every flat node against its class's node
+            hierpart::Partition qp;
+            const auto qn = hierpart::quotient(h.netlist, &qp);
+            CircuitSim qsim;
+            auto qnl = qn.nl;
+            const auto qs = qsim.solveDC(qnl);
+            double qworst = 0.0;
+            size_t qmapped = 0;
+            for (size_t i = 0; qs.stats.converged && i < flat.nodeNames.size(); ++i) {
+                std::string name = flat.nodeNames[i];
+                for (auto& ch : name) ch = (char)std::toupper((unsigned char)ch);
+                const int qnode = name.empty() ? -1 : hierpart::nodeFor(h.netlist, h.nodeIndex, qp, qn, name);
+                if (qnode < 0) continue;
+                const double qv = qnode == 0 ? 0.0 : qs.nodeVoltages[qnode - 1];
+                qworst = std::max(qworst, std::abs(qv - flat.waveformPoints.back().nodeVoltages[i]));
+                ++qmapped;
+            }
+            check(qs.stats.converged && qmapped > 100 && qworst < 1e-9,
+                  "S3.2: the quotient circuit (" + std::to_string(qn.nl.numGlobalNodes) + " nodes, " + std::to_string(qn.elementClasses) +
+                      " elements) gives every flat node its voltage (worst " + [&] { char b[32]; std::snprintf(b, 32, "%.3g", qworst); return std::string(b); }() + " V over " +
+                      std::to_string(qmapped) + ")");
+            SPICEParser bp;
+            bp.setFlatten(false);
+            const auto hb = bp.parse(arr(true));
+            std::string err;
+            try { hierpart::partition(hb.netlist); } catch (const std::exception& e) { err = e.what(); }
+            check(hb.success && err.find("not supported unflattened") != std::string::npos,
+                  "S3.1: a coupling the refinement does not model is refused (" + err + ")");
+        }
+        {   // S3.2 transient: a 6T SRAM writes a 0 into bank 0's row 0 (its word line pulses, its bit lines driven), every
+            // cell initialised to 1 by the body's .ic; the quotient circuit runs the flat one's transient, node for
+            // node at the same accepted steps. Column 0 (written) shares blb with two columns on a pulled-up bl: a
+            // cell's colors must not merge with a neighbour's whose bl differs (qb is two hops from it)
+            std::string t = "* sram write\n.subckt cell bl blb wl vdd\nM1 q qb 0 0 nm W=1u L=0.18u\nM2 q qb vdd vdd pm W=1u L=0.18u\n"
+                            "M3 qb q 0 0 nm W=1u L=0.18u\nM4 qb q vdd vdd pm W=1u L=0.18u\nM5 bl wl q 0 nm W=1u L=0.18u\n"
+                            "M6 blb wl qb 0 nm W=1u L=0.18u\nCq q 0 2f\nCqb qb 0 2f\n.ic v(q)=1.8 v(qb)=0\n.ends\n"
+                            ".subckt row bl blb wl vdd cbl\nXC0 bl blb wl vdd cell\nXC1 cbl blb wl vdd cell\nXC2 cbl blb wl vdd cell\n.ends\n"
+                            ".subckt bank bl blb vdd\nXR0 bl blb wl0 vdd cbl row\nXR1 bl blb wl1 vdd cbl row\nXR2 bl blb wl2 vdd cbl row\n"
+                            "V0 wl0 0 0\nV1 wl1 0 0\nV2 wl2 0 0\nRC cbl vdd 1k\nCC cbl 0 10f\n.ends\n"
+                            ".subckt bankw bl blb vdd\nXR0 bl blb wl0 vdd cbl row\nXR1 bl blb wl1 vdd cbl row\nXR2 bl blb wl2 vdd cbl row\n"
+                            "V0 wl0 0 PULSE(0 1.8 0.2n 0.05n 0.05n 1n 4n)\nV1 wl1 0 0\nV2 wl2 0 0\nRC cbl vdd 1k\nCC cbl 0 10f\n.ends\n"
+                            ".model nm nmos level=1 vto=0.5 kp=200u cgso=1e-10 cgdo=1e-10\n.model pm pmos level=1 vto=-0.5 kp=80u cgso=1e-10 cgdo=1e-10\n"
+                            "VDD vdd 0 1.8\nVBL bl0 0 0\nVBLB blb0 0 1.8\nXB0 bl0 blb0 vdd bankw\n";
+            for (int i = 1; i < 3; ++i)
+                t += "VBL" + std::to_string(i) + " bl" + std::to_string(i) + " 0 1.8\nVBLB" + std::to_string(i) + " blb" + std::to_string(i) +
+                     " 0 1.8\nXB" + std::to_string(i) + " bl" + std::to_string(i) + " blb" + std::to_string(i) + " vdd bank\n";
+            t += ".tran 0.02n 1.5n\n.end\n";
+            auto steps = [](TensorNetlist& nl, std::vector<std::pair<double, std::vector<double>>>& out) {
+                CircuitSim sim;
+                return sim.runTransient(nl, 0.02e-9, 1.5e-9, false, [&](const SolverStep& st) {
+                    out.push_back({st.time, st.nodeVoltages});
+                    return true;
+                });
+            };
+            auto flatP = SPICEParser().parse(t);
+            SPICEParser hp;
+            hp.setFlatten(false);
+            auto hierP = hp.parse(t);
+            std::vector<std::pair<double, std::vector<double>>> fw, qw;
+            std::string fe = flatP.success ? steps(flatP.netlist, fw) : flatP.errorMessage, qe = "parse";
+            hierpart::Partition tp;
+            hierpart::Quotient tq;
+            if (hierP.success) {
+                tq = hierpart::quotient(hierP.netlist, &tp);
+                qe = steps(tq.nl, qw);
+            }
+            // flat node -> quotient node, by name
+            std::vector<int> qOf(flatP.netlist.numGlobalNodes + 1, -1);
+            for (const auto& [name, idx] : flatP.nodeIndex)
+                if (idx >= 1 && idx <= flatP.netlist.numGlobalNodes) qOf[idx] = hierpart::nodeFor(hierP.netlist, hierP.nodeIndex, tp, tq, name);
+            // the same accepted steps: step k of each at one time (to roundoff: the step control sees roundoff-level
+            // differences in the voltages)
+            double worst = 0.0, swing = 0.0, dt = 0.0;
+            size_t common = 0;
+            for (size_t k = 0; k < fw.size() && k < qw.size() && fe.empty() && qe.empty(); ++k) {
+                dt = std::max(dt, std::abs(fw[k].first - qw[k].first) / std::max(fw[k].first, 1e-30));
+                ++common;
+                for (int n = 1; n <= flatP.netlist.numGlobalNodes; ++n)
+                    if (qOf[n] > 0) {
+                        worst = std::max(worst, std::abs(fw[k].second[n - 1] - qw[k].second[qOf[n] - 1]));
+                        swing = std::max(swing, std::abs(fw[k].second[n - 1]));
+                    }
+            }
+            char msg[256];
+            std::snprintf(msg, sizeof msg, "S3.2 transient: the SRAM write's quotient (%d nodes for %d) runs flat's %zu steps (%zu; "
+                          "times within %.2g), worst %.3g V", tq.nl.numGlobalNodes, flatP.netlist.numGlobalNodes, fw.size(), qw.size(), dt, worst);
+            check(fe.empty() && qe.empty() && common == fw.size() && fw.size() == qw.size() && fw.size() > 20 && dt < 1e-12 && worst < 1e-9 && swing > 1.0,
+                  std::string(msg) + (fe.empty() ? "" : " flat: " + fe) + (qe.empty() ? "" : " quotient: " + qe));
+            // the same through the session: .options hier runs the quotient, its columns named by the outputs (a
+            // hierarchical internal node and top-level ones); .op and .tran, flat against hierarchical
+            auto session = [&](const std::string& net, bool tran) {
+                auto engine = ISimulationEngine::create();
+                SimulationRequestDTO q;
+                q.source.payload = net;
+                EngineCallbacks c;
+                if (!tran) return engine->createSession()->runDC(q, c);
+                q.transient.stepSizeS = 0.02e-9;
+                q.transient.stopTimeS = 1.5e-9;
+                return engine->createSession()->runTransient(q, c, nullptr);
+            };
+            const std::string saves = ".save v(bl0) v(blb1) v(xb0.xr0.xc0.q) v(xb2.xr1.xc2.qb) i(vbl1)\n";
+            std::string flatNet = t, hierNet = t;
+            flatNet.insert(flatNet.rfind(".tran"), saves);
+            hierNet.insert(hierNet.rfind(".tran"), saves + ".options hier\n");
+            for (bool tran : {false, true}) {
+                const auto f = session(flatNet, tran), h = session(hierNet, tran);
+                bool same = f.converged && h.converged && f.waveformPoints.size() == h.waveformPoints.size() && !f.waveformPoints.empty() &&
+                            f.nodeNames.size() == 4 && f.branchNames.size() == 1;
+                double w = 0.0;
+                for (size_t c = 0; same && c < f.nodeNames.size(); ++c) {
+                    const auto it = std::find(h.nodeNames.begin(), h.nodeNames.end(), f.nodeNames[c]);
+                    same = it != h.nodeNames.end();
+                    for (size_t k = 0; same && k < f.waveformPoints.size(); ++k)
+                        w = std::max(w, std::abs(f.waveformPoints[k].nodeVoltages[c] - h.waveformPoints[k].nodeVoltages[it - h.nodeNames.begin()]));
+                }
+                same = same && h.branchNames == f.branchNames;
+                for (size_t k = 0; same && k < f.waveformPoints.size(); ++k)
+                    w = std::max(w, std::abs(f.waveformPoints[k].branchCurrents[0] - h.waveformPoints[k].branchCurrents[0]) * 1e3);
+                check(same && w < 1e-9, std::string("S3.2 session: .options hier ") + (tran ? ".tran" : ".op") +
+                          " reports the flat run's saved vectors (" + std::to_string(f.waveformPoints.size()) + " points, worst " +
+                          [&] { char b2[32]; std::snprintf(b2, 32, "%.3g", w); return std::string(b2); }() + ")" + (h.converged ? "" : ": " + h.errorDetail));
+            }
+            {   // refused on the hierarchical path: AC (not yet), sweeping a source its class shares (vbl1 = vbl2)
+                std::string acNet = hierNet;
+                acNet.replace(acNet.rfind(".tran"), std::string::npos, ".ac lin 1 1k 1k\n.end\n");
+                auto engine = ISimulationEngine::create();
+                SimulationRequestDTO q;
+                q.source.payload = acNet;
+                EngineCallbacks c;
+                const auto ra = engine->createSession()->runAC(q, c);
+                std::string dcNet = hierNet;
+                dcNet.replace(dcNet.rfind(".tran"), std::string::npos, ".dc VBL1 0 1.8 0.9\n.end\n");
+                q.source.payload = dcNet;
+                const auto rd = engine->createSession()->runDC(q, c);
+                std::string okNet = hierNet;
+                okNet.replace(okNet.rfind(".tran"), std::string::npos, ".dc VDD 1.6 1.8 0.1\n.end\n");
+                q.source.payload = okNet;
+                const auto ro = engine->createSession()->runDC(q, c);
+                check(!ra.converged && ra.errorDetail.find("hierarchical path") != std::string::npos && !rd.converged &&
+                          rd.errorDetail.find("stands for identical") != std::string::npos && ro.converged && ro.waveformPoints.size() == 3,
+                      "S3.2 session: AC and a shared source's sweep are refused, a unique source's .dc runs (" + ra.errorDetail + " | " +
+                          rd.errorDetail + ")");
+            }
         }
         {   // .save narrows what a run stores to the vectors .save, .print and .meas name (ngspice saves only those);
             // .save all, or none, keeps every node and branch
