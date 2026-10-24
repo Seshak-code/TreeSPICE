@@ -124,8 +124,13 @@ def node_map(text):
             w = re.sub(r"\s*=\s*", "=", line).split()
             w = w[:next((k for k, x in enumerate(w) if "=" in x or x.upper() == "PARAMS:"), len(w))]
             pos = range(1, len(w) - 1)
-        if c in "EGFH" and len(t) > 3 and t[3].upper() in ("POLY", "VALUE", "VOL", "CUR", "TABLE"):
+        if c in "EGFH" and len(t) > 3 and t[3].upper() in ("POLY", "VALUE", "VOL", "CUR", "TABLE", "FREQ"):
             pos = [1, 2]  # behavioural forms: the control nodes are not at the linear positions
+        if c in "EG" and len(t) > 2 and t[2].upper() == "FREQ": pos = [1]  # E n1 FREQ ...: one output node
+        if c in "EG" and any(x.upper() == "FREQ" for x in t[2:4]):  # an expression input: the engine's B source node first
+            ex = line[line.upper().index("FREQ") + 4:].strip()
+            ex = ex[1:ex.find("}")].strip() if ex.startswith("{") else ""
+            if ex and not re.fullmatch(r"[a-z_][a-z0-9_]*|v\(.*\)", ex, re.I): m.setdefault("GEN_NODE_" + t[0][1:].upper(), len(m) + 1)
         if c == "N":  # N<name> <terminals...> <model> [params]: terminals precede the first model name
             pos = range(1, next((k for k in range(1, len(t)) if t[k].upper() in models), 1))
         if c == "M" and len(t) > 4 and t[4].upper() in models: pos = [1, 2, 3]  # a 3-node VDMOS
@@ -147,7 +152,8 @@ def branch_names(text):
             kw = t[0].upper()
             in_sub = kw == ".SUBCKT" or (in_sub and kw != ".ENDS")
             continue
-        poly = len(t) > 3 and t[3].upper() in ("POLY", "VALUE", "VOL", "CUR", "TABLE")  # ngspice rebuilds these: no e1#branch
+        poly = (len(t) > 3 and t[3].upper() in ("POLY", "VALUE", "VOL", "CUR", "TABLE", "FREQ")) or \
+               (len(t) > 2 and t[2].upper() == "FREQ")  # ngspice rebuilds these: no e1#branch (FREQ: an xfer)
         if not in_sub and not (poly and t[0][0].upper() in "EH") and (t[0][0].upper() in "VLEH" or (t[0][0].upper() == "B" and re.search(r"\bv\s*=", line, re.I))):
             out.append(t[0].lower())
     return out

@@ -296,6 +296,91 @@ std::vector<std::pair<int, std::string>> SPICEParser::preprocessLines(
 // `.lib <section>` and `.endl` of <file> (PDK corners: .lib models.lib tt). Paths
 // are relative to the including file. Spliced lines carry the including card's
 // line number, which is also reported (errLine) when a file or section is missing.
+// ngspice inpcom replace_freq: E/G n1 [n2] FREQ {expr} [=] [MAG|DB] [RAD|DEG] [R_I] values becomes an xfer
+// code model (A_GEN<name>) driven by the input node, v(a[, b]), or a B source (B_GEN<name>) for any other
+// expression, and .model GEN_MODEL<name> xfer table = [values]; <name> drops the type letter, as ngspice. A line
+// the rewrite does not take (ngspice's: a value word over 3 characters in place of a keyword ...) stays as is.
+static std::vector<std::pair<int, std::string>> replaceFreq(const std::vector<std::pair<int, std::string>>& lines) {
+    std::vector<std::pair<int, std::string>> out;
+    auto ws = [](char c) { return c == ' ' || c == '\t'; };
+    auto low = [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); };
+    for (const auto& [num, line] : lines) {
+        const char t = low(line.empty() ? ' ' : line[0]);
+        auto keep = [&]() { out.push_back({num, line}); };
+        if (t != 'e' && t != 'g') { keep(); continue; }
+        const std::string l = [&] { std::string s; for (char c : line) s += low(c); return s; }();
+        const size_t n = l.size();
+        auto skipWs = [&](size_t i) { while (i < n && ws(l[i])) ++i; return i; };
+        auto skipNon = [&](size_t i) { while (i < n && !ws(l[i])) ++i; return i; };
+        const size_t e = 1, eE = skipNon(e), n1 = skipWs(eE), n1E = skipNon(n1);
+        const size_t fq = l.find("freq", n1E);
+        if (fq == std::string::npos || !ws(l[fq - 1]) || fq + 4 >= n || !ws(l[fq + 4])) { keep(); continue; }
+        size_t n2 = skipWs(n1E), n2E = 0;
+        if (n2 == fq) n2 = std::string::npos;
+        else {
+            n2E = skipNon(n2);
+            if (fq != skipWs(n2E)) { keep(); continue; }
+        }
+        size_t ex = skipWs(fq + 4);
+        if (ex >= n || l[ex] != '{') { keep(); continue; }
+        ex = skipWs(ex + 1);
+        size_t exE = l.find('}', ex);
+        if (exE == std::string::npos) { keep(); continue; }
+        while (exE > ex && ws(l[exE - 1])) --exE;
+        // the input: a plain name, or v(node) / v(n1, n2)
+        size_t in = std::string::npos, inE = 0;
+        bool diff = false;
+        if (ex < exE && !(l[ex] >= '0' && l[ex] <= '9')) {
+            size_t k = ex;
+            while (k < exE && ((l[k] >= '0' && l[k] <= '9') || (l[k] >= 'a' && l[k] <= 'z') || l[k] == '_')) ++k;
+            if (k == exE) { in = ex; inE = exE; }
+        }
+        if (exE - ex >= 3 && l[ex] == 'v' && l[ex + 1] == '(' && l[exE - 1] == ')') {
+            in = ex + 2; inE = exE - 1;
+            const size_t cm = l.find(',', in);
+            diff = cm != std::string::npos && cm < inE;
+        }
+        size_t kw = skipWs(exE + 1);
+        if (kw < n && l[kw] == '=') kw = skipWs(kw + 1);
+        bool db = true, rad = false, ri = false, gotKey, bad = false;
+        size_t list;
+        do {
+            list = kw;
+            if (kw < n && l[kw] == '{') ++kw;
+            std::string key;
+            while (kw < n && !ws(l[kw]) && l[kw] != '}' && key.size() < 3) key += l[kw++];
+            if (kw < n && l[kw] == '}') ++kw;
+            if (kw >= n || !ws(l[kw])) { bad = true; break; }
+            gotKey = true;
+            if (key == "mag") db = false;
+            else if (key == "db") db = true;
+            else if (key == "rad") rad = true;
+            else if (key == "deg") rad = false;
+            else if (key == "r_i") ri = true;
+            else gotKey = false;
+            if (gotKey) list = skipWs(kw);
+            kw = list;
+        } while (gotKey);
+        size_t listE = n;
+        while (listE > list && ws(l[listE - 1])) --listE;
+        if (bad || list >= n || listE <= list + 1) { keep(); continue; }
+        auto s = [&](size_t a, size_t b) { return line.substr(a, b - a); };  // the original case
+        const std::string name = s(e, eE), pt = t == 'e' ? "v" : "i";
+        const std::string outPort = n2 != std::string::npos ? "%" + pt + "d(" + s(n1, n1E) + " " + s(n2, n2E) + ")"
+                                                            : "%" + pt + "(" + s(n1, n1E) + ")";
+        if (in != std::string::npos) {
+            const std::string inPort = diff ? "%vd(" + s(in, inE) + ")" : s(in, inE);
+            out.push_back({num, "a_gen_" + name + " " + inPort + " " + outPort + " gen_model_" + name});
+        } else {
+            out.push_back({num, "b_gen_" + name + " gen_node_" + name + " 0 v=" + s(ex, exE)});
+            out.push_back({num, "a_gen_" + name + " gen_node_" + name + " " + outPort + " gen_model_" + name});
+        }
+        out.push_back({num, ".model gen_model_" + name + " xfer " + (ri ? "r_i=true" : rad ? "rad=true" : !db ? "db=false" : "") +
+                                " table = [" + s(list, listE) + "]"});
+    }
+    return out;
+}
+
 std::vector<std::pair<int, std::string>> SPICEParser::expandIncludes(
     const std::vector<std::pair<int, std::string>>& lines, const std::string& dir, int depth, int& errLine)
 {
@@ -416,6 +501,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     int incLine = 0;
     try {
         lines = expandIncludes(lines, baseDir, 0, incLine);
+        lines = replaceFreq(lines);  // before numparam, as ngspice: the braces are FREQ's
         // .step and .meas are taken out before numparam sees them: their 'expr' and bare words are theirs
         lines.erase(std::remove_if(lines.begin(), lines.end(), [&](const std::pair<int, std::string>& nl) {
             if (nl.first == 1) return false;
@@ -2678,7 +2764,8 @@ namespace acutesim {
 // %d / %v before a port name its type (the model decides it anyway).
 void SPICEParser::parseXspice(const std::string& line, int lineNum) {
     std::string spaced;
-    for (char c : line) spaced += c == '[' || c == ']' ? std::string(" ") + c + " " : c == '(' || c == ')' ? std::string(" ") : std::string(1, c);
+    for (char c : line)  // commas separate as blanks do (ngspice INPgetNetTok): %vd(a, b), %vd(a,b)
+        spaced += c == '[' || c == ']' ? std::string(" ") + c + " " : c == '(' || c == ')' || c == ',' ? std::string(" ") : std::string(1, c);
     std::istringstream ss(spaced);
     std::vector<std::string> w;
     for (std::string t; ss >> t;) w.push_back(t);
