@@ -4,9 +4,9 @@ Status: proposal, 2026-10-24. No code yet. S1 (memory per device, PR #21) is the
 
 ## Goal and gate
 
-Simulate an SRAM-like array of 1e9 cells (6e9 transistors) on one machine (M4 Pro, 26 GB). Cover DC, transient and
+Simulate an SRAM-like array of 1e9 cells (6e9 transistors) on one machine (M4 Pro, 24 GB). Cover DC, transient and
 AC, with answers equal to a flat solve of the same netlist within roundoff. Gate: a 1e9-cell, hierarchically
-written 6T SRAM. Run a write and then a read of one word through a transient, within 26 GB. Also check equivalence
+written 6T SRAM. Run a write and then a read of one word through a transient, within 24 GB. Also check equivalence
 against the flat engine on arrays small enough to run flat (1e3 to 1e5 cells).
 
 ## What blocks it today (measured or read in the code)
