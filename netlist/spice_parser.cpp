@@ -612,6 +612,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                         else if (k == "ITL2") env.itl2 = (int)positive(k, v);
                         else if (k == "ITL4") env.itl4 = (int)positive(k, v);
                         else if (k == "MAXORD") env.maxord = (int)positive(k, v);
+                        else if (k == "BYPASS") env.bypass = v != 0.0;  // (TREESPICE_BYPASS=0 too, at instantiateOsdi)
                         else if (k != "SCALE") std::cerr << "Warning: .options " << k << " is ignored\n";
                     }
                     // ponytail: chgtol has no counterpart in the engine's LTE (an absolute bound scaled by RELTOL and TRTOL): warned, ignored
@@ -1867,8 +1868,9 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         if (auto it = result_.netlist.blockDefinitions.find(result_.netlist.instances[k].blockName);
             it != result_.netlist.blockDefinitions.end())
             result_.netlist.instanceStates[k].initialize(it->second);
+    if (const char* b = std::getenv("TREESPICE_BYPASS"); b && std::atoi(b) == 0) result_.netlist.environment.bypass = false;
     try {  // OSDI instances: parameters, setup_instance, node collapsing
-        result_.netlist.instantiateOsdi(result_.netlist.environment.ambient_temp_K);
+        result_.netlist.instantiateOsdi(result_.netlist.environment.ambient_temp_K, result_.netlist.environment.bypass);
     } catch (const std::exception& e) {  // "<BLOCK>#<k>.<name>: ..." or "<name>: ...": the device's line
         const std::string what = e.what(), who = what.substr(0, what.find(':'));
         const size_t hash = who.find('#'), dot = who.rfind('.');

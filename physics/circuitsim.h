@@ -827,8 +827,10 @@ public:
   // the KCL audit and the history update. J: dI/dx = G + coef*C (row-major).
   // accept: store this point as the accepted step. A fatal model error gives NaN.
   static std::mutex &osdiErrorMutex() { static std::mutex m; return m; }
+  // Cout: the reactive Jacobian C (row-major) of this evaluation (AC).
   std::vector<double> osdiCurrents(const OsdiRef &r, const std::vector<double> &v, double h,
-                                   std::vector<double> *J = nullptr, bool accept = false) const {
+                                   std::vector<double> *J = nullptr, bool accept = false,
+                                   std::vector<double> *Cout = nullptr) const {
     const size_t L = r.n.size();
     std::vector<double> x(L), I(L);
     for (size_t k = 0; k < L; ++k) x[k] = r.n[k] > 0 && r.n[k] <= (int)v.size() ? v[r.n[k] - 1] : 0.0;
@@ -840,27 +842,34 @@ public:
     // analysis, is not evaluated; its stored f, q extrapolate linearly with G, C
     // (error O(dv^2)). 98 % of the evaluations of a 1000-stage BSIM4 chain transient
     // were such. Never for the Jacobian at an operating point itself (AC, noise,
-    // sensitivity run with limitJunctions_ off). TREESPICE_BYPASS=0 evaluates always.
-    static const bool bypassOn = [] { const char *s = std::getenv("TREESPICE_BYPASS"); return !s || std::atoi(s) != 0; }();
-    bool bypass = bypassOn && limitJunctions_ && in.evalFlags == flags && in.evalAt.size() == L;
+    // sensitivity run with limitJunctions_ off). .options bypass=0 (or TREESPICE_BYPASS=0) evaluates always,
+    // and the devices keep no copy of their last evaluation (memory).
+    const double *at = in.evalAt();
+    bool bypass = limitJunctions_ && in.kept(flags);
     for (size_t k = 0; bypass && k < L; ++k)
-      bypass = std::abs(x[k] - in.evalAt[k]) <= 1e-3 * std::max(std::abs(x[k]), std::abs(in.evalAt[k])) + 1e-6;
+      bypass = std::abs(x[k] - at[k]) <= 1e-3 * std::max(std::abs(x[k]), std::abs(at[k])) + 1e-6;
     in.gmin = gmin_;
-    if (!bypass && !in.evaluate(x.data(), flags, 0.0)) {
-      std::lock_guard<std::mutex> lock(osdiErrorMutex());  // devices evaluate in parallel
-      osdiFatal_ = r.dev->instanceName + ": " + in.error();  // reported instead of a singular matrix
+    thread_local osdi::Eval ev;  // this evaluation (devices evaluate in parallel)
+    if (!bypass && !in.evaluate(x.data(), flags, 0.0, ev)) {
+      std::lock_guard<std::mutex> lock(osdiErrorMutex());
+      osdiFatal_ = r.dev->instanceName + ": " + osdi::Instance::error();  // reported instead of a singular matrix
       std::fill(I.begin(), I.end(), NAN);
       if (J) J->assign(L * L, 0.0);
       return I;
     }
-    std::vector<double> f(in.f()), q(in.q());  // at x: as evaluated, or extrapolated when bypassed
-    if (bypass)
-      for (size_t a = 0; a < L; ++a)
+    auto G = [&](size_t a, size_t b) { return bypass ? in.G(a, b) : ev.G[a * L + b]; };
+    auto C = [&](size_t a, size_t b) { return bypass ? in.C(a, b) : ev.C[a * L + b]; };
+    std::vector<double> f(L), q(L);  // at x: as evaluated, or extrapolated when bypassed
+    for (size_t a = 0; a < L; ++a) {
+      f[a] = bypass ? in.f(a) : ev.f[a];
+      q[a] = bypass ? in.q(a) : ev.q[a];
+      if (bypass)
         for (size_t b = 0; b < L; ++b) {
-          const double d = x[b] - in.evalAt[b];
-          f[a] += in.G(a, b) * d;
-          q[a] += in.C(a, b) * d;
+          const double d = x[b] - at[b];
+          f[a] += G(a, b) * d;
+          q[a] += C(a, b) * d;
         }
+    }
     for (size_t k = 0; k < L; ++k)
       if (!std::isfinite(f[k]) || !std::isfinite(q[k])) {
         // An extreme Newton iterate may do this and the homotopy recovers, so it
@@ -875,15 +884,24 @@ public:
     const bool trap = tran && integrator->getType() == IntegrationType::TRAPEZOIDAL;
     const double coef = !tran ? 0.0 : trap ? 2.0 / h : 1.0 / h;
     for (size_t k = 0; k < L; ++k) {
-      const double iq = tran ? coef * (q[k] - in.qPrev[k]) - (trap ? in.iPrev[k] : 0.0) : 0.0;
+      const double iq = tran ? coef * (q[k] - in.qPrev()[k]) - (trap ? in.iPrev()[k] : 0.0) : 0.0;
       I[k] = f[k] + iq;
-      if (accept) { in.qPrev[k] = q[k]; in.iPrev[k] = iq; }
+      if (accept) { in.qPrev()[k] = q[k]; in.iPrev()[k] = iq; }
     }
-    if (accept) { in.vHist[2] = in.vHist[1]; in.vHist[1] = in.vHist[0]; in.vHist[0] = x; }
+    if (accept) {
+      std::copy(in.vHist(1), in.vHist(1) + L, in.vHist(2));
+      std::copy(in.vHist(0), in.vHist(0) + L, in.vHist(1));
+      std::copy(x.begin(), x.end(), in.vHist(0));
+    }
     if (J) {
       J->assign(L * L, 0.0);
       for (size_t a = 0; a < L; ++a)
-        for (size_t b = 0; b < L; ++b) (*J)[a * L + b] = in.G(a, b) + coef * in.C(a, b);
+        for (size_t b = 0; b < L; ++b) (*J)[a * L + b] = G(a, b) + coef * C(a, b);
+    }
+    if (Cout) {
+      Cout->assign(L * L, 0.0);
+      for (size_t a = 0; a < L; ++a)
+        for (size_t b = 0; b < L; ++b) (*Cout)[a * L + b] = C(a, b);
     }
     // A branch-current unknown (V(a,b) <+ 0 branches, e.g. BSIM4's body network with
     // rbodymod off, which closes a loop of zero-volt branches) gets 1 uOhm in series,
