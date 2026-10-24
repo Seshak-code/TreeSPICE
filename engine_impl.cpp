@@ -604,7 +604,7 @@ SimulationResponseDTO SessionImpl::dispatch_tran_internal(const SimulationReques
             pt.nodeVoltages = step.nodeVoltages;
             pt.branchCurrents = step.branchCurrents;
             keepColumns(kept, pt, fullNodes, fullBranches);
-            result.waveformPoints.push_back(pt);
+            if (req.transient.keepPoints) result.waveformPoints.push_back(pt);
             if (streamCb) streamCb(pt, stepIdx);
             cb.onTimeStep(step.time, stopTime);
             ++stepIdx;
