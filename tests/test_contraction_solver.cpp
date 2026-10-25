@@ -1,4 +1,4 @@
-// test_contraction_solver.cpp — tensor-contraction solver vs dense LU.
+// test_contraction_solver.cpp — tensor-contraction solver: backward error, plans, reuse.
 // Covers: grid (unsymmetric), circuit-like graph with supply-net hubs and
 // VCVS rows (1e10 off-diagonals: pivoting stress), disconnected components,
 // n=1, long chain; prints plan size and timings up to 1e6 unknowns. With a GPU,
@@ -97,20 +97,17 @@ static double backwardError(const Csr_matrix& A, const std::vector<double>& x, c
     return w;
 }
 
-static void compareDense(const char* name, const Csr_matrix& A) {
+static void compareDense(const char* name, const Csr_matrix& A) {  // the componentwise backward error of a direct solve
     auto b = rhsFor(A.rows, 7);
     auto plan = planContraction(A);
     auto rc = solveContraction(A, b, plan);
-    auto rd = solveLU_Pivoted(A, b);
-    double bc = backwardError(A, rc.solution, b), bd = backwardError(A, rd.solution, b);
     char label[160];
-    std::snprintf(label, sizeof label, "%s n=%d fronts=%zu: backward error (dense %.0e)", name, A.rows,
-                  plan.fronts.size(), bd);
-    check(rc.converged && bc <= std::max(1e-13, bd), label, bc);
+    std::snprintf(label, sizeof label, "%s n=%d fronts=%zu: backward error", name, A.rows, plan.fronts.size());
+    check(rc.converged && backwardError(A, rc.solution, b) <= 1e-13, label, rc.converged ? backwardError(A, rc.solution, b) : 1.0);
 }
 
 int main() {
-    std::printf("== correctness vs dense LU ==\n");
+    std::printf("== correctness (backward error) ==\n");
     if (gpuFrontLuAvailable()) {  // grid 300: peak front ~570, past the default GPU cutoff (512)
         auto A = grid(300, true); auto b = rhsFor(A.rows, 3);
         auto r = solveContraction(A, b, planContraction(A));
@@ -118,6 +115,14 @@ int main() {
               "GPU FP32 fronts + FP64 refinement: backward error", backwardError(A, r.solution, b));
     } else std::printf("  (no GPU: FP32 front path not exercised)\n");
     compareDense("grid 30x30 unsymmetric", grid(30, true));
+    {   // a singular system has no solution: an empty one, never zeros a caller could take for an answer
+        MatrixConstructor M;
+        M.setDimensions(2, 2);
+        M.add(0, 0, 1.0); M.add(0, 1, 1.0); M.add(1, 0, 1.0); M.add(1, 1, 1.0);
+        const auto S = M.createCsr();
+        const auto r = solveContraction(S, {1.0, 2.0}, planContraction(S));
+        check(!r.converged && r.solution.empty(), "singular: no solution (converged=0, size)", (double)r.solution.size());
+    }
     compareDense("circuit+hubs+VCVS", circuit(1500, 1));
     compareDense("circuit+hubs+VCVS", circuit(1500, 2));
     {   // 200 random small E-source networks: every one needs off-diagonal pivots

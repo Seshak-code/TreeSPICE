@@ -24,8 +24,8 @@ SKIP_CARDS = re.compile(r"^\s*\.(step|sens|hb|mpde|data|func|global_param|sampli
                         r"embeddedsampling|pce|lin|noise)\b", re.I | re.M)
 
 SKIP_WHY = {  # card -> why this comparison cannot judge it
-    "step": ".step: multi-run gold, no .step in the engine yet",
-    "sens": ".sens: Xyce sensitivity output, no engine analysis",
+    "step": ".step: multi-run gold (one table per step), which this harness does not split",
+    "sens": ".sens: Xyce's sensitivity output format, which this harness does not parse",
     "hb": ".hb: harmonic balance, no engine analysis", "mpde": ".mpde: Xyce MPDE analysis, no engine analysis",
     "data": ".data: Xyce tabular sweep, multi-run gold", "func": ".func: engine has no user functions (ngspice does)",
     "global_param": ".global_param: Xyce-only global parameter card",

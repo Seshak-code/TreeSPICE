@@ -74,6 +74,8 @@ private:
 
     // Non-virtual hot-path helpers (defined in engine_impl.cpp)
     // These call CircuitSim / WebGPUSolver directly — ZERO vtable overhead
+    // Every entry point's last step: success and the final status (a cancel stays Cancelled and is not a result)
+    SimulationResponseDTO& finish(SimulationResponseDTO& r);
     SimulationResponseDTO dispatch_dc_internal(const SimulationRequestDTO&,
                                                  const EngineCallbacks&);
     SimulationResponseDTO dispatch_ac_internal(const SimulationRequestDTO&,

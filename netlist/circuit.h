@@ -496,39 +496,10 @@ struct PDKPowerDomain {
     }
 };
 
-/*
- * Signal Source (Waveform Generator)
- * Models complex signal inputs (Clock, Data, Noise).
- */
-struct SignalSource {
-    std::string name;              // "CLK", "DATA_IN"
-    int nodePositive;
-    int nodeNegative;
-    
-    enum WaveformType { DC, PULSE, SINE, PWL, NOISE } type;
-    
-    double amplitude_V;
-    double frequency_Hz;
-    double phase_deg;
-    double offset_V;
-    double duty_cycle;             // 0.0 to 1.0 (Pulse only)
-    double rise_time_s;            // (Pulse only)
-    double fall_time_s;            // (Pulse only)
-    
-    // For future PWL
-    std::vector<std::pair<double, double>> points;
-};
 
 // ============================================================================
 // DIGITAL VERIFICATION COMPONENTS (Phase 13)
 // ============================================================================
-
-enum class LogicState {
-    LOW = 0,
-    HIGH = 1,
-    UNKNOWN = 2, // X
-    IMPEDANCE = 3 // Z
-};
 
 struct BusProbe {
     std::string name;             // e.g., "DATA_BUS"
@@ -553,11 +524,7 @@ struct BusProbe {
 struct SimulationEnvironment {
     double ambient_temp_K = 300.15;   // 27°C
     int temp_count = 1;               // values in the netlist's .temp list: more than one is for .op/.dc only
-    double temp_ramp_K_per_s = 0.0;   // For thermal cycling
     
-    // Process Corners (Monte Carlo)
-    enum Corner { TT, FF, SS, SF, FS } process = TT;
-    double vdd_variation_sigma = 0.0; // σ for MC
     double global_voltage_scale = 1.0; // PVT Voltage Scale
     bool gmin_stepping = true;         // .options gminsteps=0 (ngspice): DC goes straight to source stepping
 
@@ -566,10 +533,6 @@ struct SimulationEnvironment {
     int itl1 = 100, itl2 = 50, itl4 = 0, maxord = 2;
     bool gear = false;                 // .options method=gear
     bool bypass = true;                // .options bypass=0: no device bypass, and no per-device copy of its last evaluation
-    
-    // Noise Profile
-    bool thermal_noise_enabled = false;
-    bool flicker_noise_enabled = false;
 };
 
 
@@ -901,10 +864,8 @@ struct TensorBlock {
     std::vector<CurrentSource> currentSources;
 
     // System Simulation Sources (Phase 2.9)
-    std::vector<SignalSource> signalSources;
     
     // PDK Power Domains (Phase 1.3)
-    std::vector<PDKPowerDomain> powerDomains;
     
     // Controlled Sources
     std::vector<VCVS> voltageControlledVoltageSources;
@@ -929,7 +890,6 @@ struct TensorBlock {
     
     // Aux
     std::vector<Probe> probes;
-    std::vector<BusProbe> busProbes;
 
     // --- Phase 1.5: Parasitic Extraction Support ---
     struct ParasiticResistor {
@@ -955,16 +915,9 @@ struct TensorBlock {
     std::vector<ParasiticCapacitor> parasiticCapacitors;
     std::vector<WireSegment> wireSegments;
 
-    bool isFrozen = false;       // Phase 1: Structural Immutability
     size_t topologyHash = 0;     // Phase 4: Symbolic Reuse Key
 
     // --- Helper Methods ---
-    void freeze() {
-        if (isFrozen) return;
-        isFrozen = true;
-        computeTopologyHash();
-    }
-
     void computeTopologyHash() {
         // Phase 1.4: Canonical Graph Hashing
         // Uses orientation-invariant edges and BFS-based node relabeling.
@@ -999,14 +952,12 @@ struct TensorBlock {
     }
 
     void updateNodeCount(int node) {
-        if (isFrozen) return; // Prevent node count updates on frozen blocks
         if (node > numInternalNodes) numInternalNodes = node;
     }
 
     void addResistor(const std::string& name, int n1, int n2, double R) {
         assert(n1 >= 0 && n2 >= 0 && "Node indices must be not negative");
         assert(R > 0 && "Resistance must be positive");
-        if (isFrozen) return;
         resistors.push_back({name, n1, n2, R});
         updateNodeCount(n1); updateNodeCount(n2);
     }
@@ -1018,7 +969,6 @@ struct TensorBlock {
     void addCapacitor(const std::string& name, int n1, int n2, double C) {
         assert(n1 >= 0 && n2 >= 0 && "Node indices must be not negative");
         assert(C > 0 && "Capacitance must be positive");
-        if (isFrozen) return;
         Capacitor cap = {name, n1, n2, C};
         capacitors.push_back(cap);
         updateNodeCount(n1); updateNodeCount(n2);
@@ -1030,7 +980,6 @@ struct TensorBlock {
     void addInductor(const std::string& name, int n1, int n2, double L) {
         assert(n1 >= 0 && n2 >= 0 && "Node indices must be not negative");
         assert(L > 0 && "Inductance must be positive");
-        if (isFrozen) return;
         Inductor ind = {name, n1, n2, L};
         ind.model_name = "ind_generic";
 
@@ -1043,38 +992,17 @@ struct TensorBlock {
     }
     void addVoltageSource(int nPos, int nNeg, double V, std::string type = "") {
         assert(nPos >= 0 && nNeg >= 0 && "Node indices must be not negative");
-        if (isFrozen) return;
         voltageSources.push_back({nPos, nNeg, V, type});
         updateNodeCount(nPos); updateNodeCount(nNeg);
     }
     void addCurrentSource(int nPos, int nNeg, double I) {
-        if (isFrozen) return;
         currentSources.push_back({nPos, nNeg, I});
         updateNodeCount(nPos); updateNodeCount(nNeg);
     }
     
     // System Simulation Helpers
     
-    void addSignalSource(const std::string& name, int nPos, int nNeg, 
-                         SignalSource::WaveformType type, double amp, double freq) {
-        if (isFrozen) return;
-        SignalSource src;
-        src.name = name;
-        src.nodePositive = nPos;
-        src.nodeNegative = nNeg;
-        src.type = type;
-        src.amplitude_V = amp;
-        src.frequency_Hz = freq;
-        // Defaults
-        src.phase_deg = 0.0;
-        src.offset_V = 0.0;
-        src.duty_cycle = 0.5;
-        
-        signalSources.push_back(src);
-        updateNodeCount(nPos); updateNodeCount(nNeg);
-    }
     void addDiode(const std::string& name, int anode, int cathode, double Is, double N = 1.0, double Vt = PhysicsConstants::V_THERMAL_NOM) {
-        if (isFrozen) return;
         Diode d;
         d.instanceName = name;
         d.anode = anode;
@@ -1092,7 +1020,6 @@ struct TensorBlock {
     }
     void addMosfet(const std::string& name, int D, int G, int S, int B, 
                    const std::string& model, double W, double L) {
-        if (isFrozen) return;
         Mosfet m;
         m.instanceName = name;
         m.drain = D; m.gate = G; m.source = S; m.body = B;
@@ -1106,7 +1033,6 @@ struct TensorBlock {
                 const std::string& model, bool isNPN = true,
                 double betaF = 100.0, double betaR = 1.0, 
                 double Is = 1e-14, double Vt = PhysicsConstants::V_THERMAL_NOM) {
-        if (isFrozen) return;
         
         BJT newBjt;
         newBjt.instanceName = name;
@@ -1133,7 +1059,6 @@ struct TensorBlock {
     void addJFET(const std::string& name, int D, int G, int S, 
                  const std::string& model, bool isNChannel = true,
                  double beta = 1e-4, double Vto = -2.0, double lambda = 0.01) {
-        if (isFrozen) return;
         
         JFET newJfet;
         newJfet.instanceName = name;
@@ -1149,13 +1074,7 @@ struct TensorBlock {
         jfets.push_back(newJfet);
         updateNodeCount(D); updateNodeCount(G); updateNodeCount(S);
     }
-    void addTransmissionLine(int p1p, int p1n, int p2p, int p2n, double Z0, double Td, const std::string& name = "") {
-        if (isFrozen) return;
-        transmissionLines.push_back({p1p, p1n, p2p, p2n, Z0, Td, name});
-        updateNodeCount(p1p); updateNodeCount(p1n); updateNodeCount(p2p); updateNodeCount(p2n);
-    }
     void addProbe(const std::string& name, int nPos, int nNeg) {
-        if (isFrozen) return;
         probes.push_back({name, nPos, nNeg});
         // NOTE: Probes do NOT call updateNodeCount because they are passive observers
         // and should not inflate the matrix dimensions.
@@ -1163,23 +1082,19 @@ struct TensorBlock {
 
     // Dependent Sources
     void addVCVS(int outPos, int outNeg, int ctrlPos, int ctrlNeg, double gain, std::string role = "") {
-        if (isFrozen) return;
         voltageControlledVoltageSources.push_back({outPos, outNeg, ctrlPos, ctrlNeg, gain, role});
         updateNodeCount(outPos); updateNodeCount(outNeg); updateNodeCount(ctrlPos); updateNodeCount(ctrlNeg);
     }
     void addVCCS(int outPos, int outNeg, int ctrlPos, int ctrlNeg, double gm, std::string role = "") {
-        if (isFrozen) return;
         voltageControlledCurrentSources.push_back({outPos, outNeg, ctrlPos, ctrlNeg, gm, role});
         updateNodeCount(outPos); updateNodeCount(outNeg); updateNodeCount(ctrlPos); updateNodeCount(ctrlNeg);
     }
     void addCCVS(int outPos, int outNeg, int ctrlPos, int ctrlNeg, double rm, std::string role = "") {
-        if (isFrozen) return;
         // Sensing via ctrlPos-ctrlNeg (small sense resistor model in stamps.h)
         currentControlledVoltageSources.push_back({outPos, outNeg, ctrlPos, ctrlNeg, rm, role});
         updateNodeCount(outPos); updateNodeCount(outNeg); updateNodeCount(ctrlPos); updateNodeCount(ctrlNeg);
     }
     void addCCCS(int outPos, int outNeg, int ctrlPos, int ctrlNeg, double alpha, std::string role = "") {
-        if (isFrozen) return;
         currentControlledCurrentSources.push_back({outPos, outNeg, ctrlPos, ctrlNeg, alpha, role});
         updateNodeCount(outPos); updateNodeCount(outNeg); updateNodeCount(ctrlPos); updateNodeCount(ctrlNeg);
     }
@@ -1215,28 +1130,7 @@ struct SubCircuitDefinition {
     // Pin-to-NetUUID Mapping (Persistence)
     // Stores the original NetUUID string of the net connected to this pin at creation time.
     std::vector<std::string> pinNetUUIDs;
-    
-    // Helper to get internal node for a given pin
-    int getInternalNode(int pinIndex) const {
-        auto it = pinToInternalNode.find(pinIndex);
-        return (it != pinToInternalNode.end()) ? it->second : -1;
-    }
-};
 
-/*
- * ICPackageInstance - An instance of a SubCircuitDefinition placed on the schematic.
- * Stores the mapping from package pins to global netlist nodes.
- */
-struct ICPackageInstance {
-    std::string instanceName;                 // e.g., "U1"
-    std::string subcircuitName;               // Reference to SubCircuitDefinition
-    
-    // Pin-to-Global-Node Mapping (set during netlist generation)
-    std::map<int, int> pinToGlobalNode;       // Key: pin index, Value: global node
-    
-    // Position (for GUI)
-    double x = 0.0, y = 0.0;
-    double rotation = 0.0;
 };
 
 // BlockInstance - A placed instance of a TensorBlock in the global netlist.
@@ -1338,7 +1232,6 @@ struct BlockState {
     std::vector<LineHistory> lineState;
     std::vector<ltra::History> ltraState;  // per LossyLine: its accepted history
     std::vector<std::shared_ptr<osdi::Instance>> osdiState;  // per OsdiDevice (TensorNetlist::instantiateOsdi)
-    std::vector<std::vector<BusProbe::DigitalSample>> busProbeState; 
     // Future: BJT OP, etc.
 
     // Initialize state based on block definition
@@ -1357,7 +1250,6 @@ struct BlockState {
         bjtState.resize(block.bjts.size());
         jfetState.resize(block.jfets.size());
         osdiState.resize(block.osdiDevices.size());
-        busProbeState.resize(block.busProbes.size());
         lineState.resize(block.transmissionLines.size());
         ltraState.resize(block.lossyLines.size());
     }
@@ -1422,7 +1314,7 @@ public:
     }
 
     void defineBlock(TensorBlock block) {
-        block.freeze();
+        block.computeTopologyHash();
         blockDefinitions[block.name] = block;
     }
     
@@ -1514,12 +1406,6 @@ public:
         if (nPos > numGlobalNodes) numGlobalNodes = nPos;
         if (nNeg > numGlobalNodes) numGlobalNodes = nNeg;
     }
-    void addSignalSource(const std::string& name, int nPos, int nNeg, 
-                         SignalSource::WaveformType type, double amp, double freq) {
-        globalBlock.addSignalSource(name, nPos, nNeg, type, amp, freq);
-        if (nPos > numGlobalNodes) numGlobalNodes = nPos;
-        if (nNeg > numGlobalNodes) numGlobalNodes = nNeg;
-    }
     void addDiode(const std::string& name, int anode, int cathode, double Is) {
         globalBlock.addDiode(name, anode, cathode, Is);
         globalState.diodeState.emplace_back();
@@ -1552,10 +1438,6 @@ public:
         globalBlock.addJFET(name, D, G, S, model, isNChannel, beta, Vto, lambda);
         numGlobalNodes = std::max({numGlobalNodes, D, G, S});
     }
-    void addTransmissionLine(int p1p, int p1n, int p2p, int p2n, double Z0, double Td, const std::string& name = "") {
-        globalBlock.addTransmissionLine(p1p, p1n, p2p, p2n, Z0, Td, name);
-        numGlobalNodes = std::max({numGlobalNodes, p1p, p1n, p2p, p2n});
-    }
     void addProbe(const std::string& name, int nPos, int nNeg) {
         globalBlock.addProbe(name, nPos, nNeg);
         // NOTE: Probes do NOT inflate numGlobalNodes because they are passive observers.
@@ -1575,13 +1457,6 @@ public:
     void addCCCS(int outPos, int outNeg, int ctrlPos, int ctrlNeg, double alpha, std::string role = "") {
         globalBlock.addCCCS(outPos, outNeg, ctrlPos, ctrlNeg, alpha, role);
         numGlobalNodes = std::max({numGlobalNodes, outPos, outNeg, ctrlPos, ctrlNeg});
-    }
-    void addBusProbe(const std::string& name, const std::vector<int>& nodes) {
-        BusProbe bp;
-        bp.name = name;
-        bp.bit_width = nodes.size();
-        bp.nodeIndices = nodes;
-        globalBlock.busProbes.push_back(bp);
     }
 };
 

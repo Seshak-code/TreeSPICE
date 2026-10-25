@@ -1,7 +1,6 @@
 #pragma once
 #include <vector>
 #include <string>
-#include <chrono>
 
 /*
  * simtrace.h
@@ -136,27 +135,3 @@ struct SolverStep
     std::vector<double> branchCurrents;  // V/L/E/H/B-voltage branches, CircuitSim::branchNames order
 };
 
-class SolverTrace 
-{
-public:
-    std::string netlistName;
-    std::string timestamp;
-    std::vector<SolverStep> steps;
-
-    SolverTrace() {
-        auto now = std::chrono::system_clock::now();
-        auto in_time_t = std::chrono::system_clock::to_time_t(now);
-        timestamp = std::ctime(&in_time_t);
-    }
-
-    void addStep(double t, const std::vector<double>& voltages, const SolverStats& stats) {
-        steps.push_back({t, voltages, stats});
-    }
-
-    void clear() {
-        steps.clear();
-    }
-
-    size_t size() const { return steps.size(); }
-    const SolverStep& lastStep() const { return steps.back(); }
-};

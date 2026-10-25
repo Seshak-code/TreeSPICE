@@ -9,7 +9,7 @@ sys.path.insert(0, DIFF_DIR)
 
 from run_diff import analysis, node_map, run_ngspice, interp, num, cards
 
-ENGINE = os.path.abspath(os.path.join(ROOT, "build-gcc", "acutesim_engine_dump"))
+ENGINE = os.environ.get("TREESPICE_DUMP", os.path.join(ROOT, "build", "acutesim_engine_dump"))  # env: another build
 OSDI_DIR = os.path.abspath(os.path.join(ROOT, "datasets", "osdi"))
 
 cases = [
@@ -139,3 +139,4 @@ for r in results:
 for r in results:
     if r["drift"]:
         print(f"\n{r['drift']}")
+sys.exit(1 if any(r["bound_violation"] for r in results) else 0)

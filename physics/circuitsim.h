@@ -30,14 +30,9 @@
 #include "../tensors/physics_tensors.h"
 #include "stamps.h"
 
-// ============================================================================
-// CIRCUITSIM CLASS
-// ============================================================================
-
 #include "../infrastructure/simtrace.h"
 #include "../infrastructure/tensorscheduler.h"
 #include "corner_config.h"
-#include "../solvers/neural_seeder.h"
 #include "../solvers/lte_controller.h"
 
 // ============================================================================
@@ -45,14 +40,6 @@
 // ============================================================================
 
 #include "../math/integration_method.h"
-
-/**
- * CircuitSim is the primary engine of the simulator.
- */
-
-// ... (SimTrace/TensorScheduler includes)
-
-// ... (Previous includes) ...
 
 /*
  * Heuristic Arbiter for Adaptive Integration (Hardened).
@@ -63,7 +50,6 @@ class IntegratorArbiter {
 private:
   std::vector<double> prev_voltages;
   std::vector<double> prev_prev_voltages;
-  std::vector<double> node_weights; 
   double prev_energy = 0.0;
   double prev_dt = 1e-9; 
   int instability_counter = 0;
@@ -132,41 +118,12 @@ public:
     int n = netlist.numGlobalNodes;
     prev_voltages.assign(n, 0.0);
     prev_prev_voltages.assign(n, 0.0);
-    node_weights.assign(n, 1e-12);
     prev_dv_dt_.assign(n, 0.0);
     taaInitialized_ = false;
     stepsAccepted_ = 0;
     prev_energy = 0.0;
     prev_dt = 1e-9;
     instability_counter = 0;
-
-    auto addWeight = [&](int node, double w) {
-      if (node > 0 && node <= n)
-        node_weights[node - 1] += std::abs(w);
-    };
-
-    for (const auto &r : netlist.globalBlock.resistors) {
-      double g = 1.0 / r.resistance_ohms;
-      addWeight(r.nodeTerminal1, g);
-      addWeight(r.nodeTerminal2, g);
-    }
-    for (const auto &c : netlist.globalBlock.capacitors) {
-      addWeight(c.nodePlate1, c.capacitance_farads);
-      addWeight(c.nodePlate2, c.capacitance_farads);
-    }
-    
-    // Add hierarchical weights
-    for (const auto &inst : netlist.instances) {
-        auto it = netlist.blockDefinitions.find(inst.blockName);
-        if (it != netlist.blockDefinitions.end()) {
-            const auto &block = it->second;
-            auto mapNode = [&](int local) { return local == 0 ? 0 : inst.nodeMapping[local-1]; };
-            for (const auto &c : block.capacitors) {
-                addWeight(mapNode(c.nodePlate1), c.capacitance_farads);
-                addWeight(mapNode(c.nodePlate2), c.capacitance_farads);
-            }
-        }
-    }
   }
 
   const std::vector<double> &getPrevVoltages() const { return prev_voltages; }
@@ -182,7 +139,6 @@ public:
       if (stepsAccepted_ < 2) return 0.0;
       
       double c_factor = dt / (dt + prev_dt);
-      double sum_sq_error = 0.0;
       double max_err = 0.0;
       int count = 0;
 
@@ -194,7 +150,6 @@ public:
           double err = std::abs(current_voltages[i] - v_pred) * c_factor;
           double w_err = err / getNorm(current_voltages[i]);
           
-          sum_sq_error += w_err * w_err;
           max_err = std::max(max_err, w_err);
           count++;
       }
@@ -209,7 +164,6 @@ public:
           double v_branch = getVc(mapNode(c.nodePlate1)) - getVc(mapNode(c.nodePlate2));
           double v_pred = hist.v[0] + (hist.v[0] - hist.v[1]) * (dt / prev_dt);
           double w_err = std::abs(v_branch - v_pred) * c_factor / getNorm(v_branch);
-          sum_sq_error += w_err * w_err;
           max_err = std::max(max_err, w_err);
           count++;
         }
@@ -237,17 +191,13 @@ public:
            double err = std::abs(vgs - vgs_pred) * c_factor;
            double w_err = err / getNorm(vgs);
            
-           sum_sq_error += w_err * w_err;
-           max_err = std::max(max_err, w_err);
+            max_err = std::max(max_err, w_err);
            count++;
       }
 
       if (count == 0) return 0.0;
 
-      // Return Max-Norm (Conservative) effectively, but could switch to RMS
-      // Standard SPICE uses RMS, but Max-Norm guarantees no single node deviates.
-      // We return Max-Norm as it safely bounds RMS.
-      return max_err;
+      return max_err;  // the max norm: no single node deviates (it bounds the RMS SPICE uses)
   }
 
   // M4: Formal Passivity Checks (Static)
@@ -295,8 +245,8 @@ public:
     // linear-extrapolation mismatch (≈ h²·v''/2), which overestimates the
     // actual TRAPEZOIDAL truncation error (≈ h³·v'''/12) by a factor of
     // ~12·τ/h.  For an RC circuit with dt/τ=0.22 this ratio is ~27×.
-    // Setting the threshold at 30.0 means: the step is accepted when the
-    // predictor mismatch is < 30×getNorm(v), which corresponds to roughly
+    // Setting the threshold at 35 means: the step is accepted when the
+    // predictor mismatch is < 35×getNorm(v), which corresponds to roughly
     // 0.6% relative voltage error — consistent with standard SPICE LTE targets.
     // Real instabilities (NR oscillations, diverging active circuits) produce
     // LTE values well above 100 and are still caught by this guard.
@@ -439,9 +389,6 @@ public:
   // Converged solution of the prior solve (seeder history, dV/dt)
   std::vector<double> prevVoltages_;
 
-  // Gap 4: Neural convergence seeder — physics-informed dV/dt extrapolation.
-  // Records each converged solution and uses history for next initial guess.
-  NeuralSeeder neuralSeeder_;
 
   // Gap 5: LTE-based adaptive timestep controller (truncation error, step size).
   LTEController lteController_;
@@ -1391,14 +1338,16 @@ public:
   
 
   // Phase 1.8: PVT Application
-  void applyCorner(TensorNetlist &netlist, const acutesim::physics::CornerConfig& corner) {
-      netlist.environment.process = (SimulationEnvironment::Corner)corner.process;
-      
-      // If voltage scale is 0 or negative, ignore (safety)
-      if (corner.voltageScale > 0.1) {
-          netlist.environment.global_voltage_scale = corner.voltageScale;
-      }
-
+  // A corner's supply scale (every V source). Its temperature is the netlist's (parse it at the corner's); a process
+  // corner is the PDK's model section (.lib ... ff), which no global setting replaces. Returns why it cannot run, or "".
+  [[nodiscard]] std::string applyCorner(TensorNetlist &netlist, const acutesim::physics::CornerConfig& corner) {
+      std::string p = corner.name;
+      for (auto &ch : p) ch = (char)std::toupper((unsigned char)ch);
+      if (corner.process != acutesim::physics::ProcessCorner::TT || (p != "" && p != "TT" && p != "NOMINAL"))
+          return "process corner '" + corner.name + "': select it with the PDK's .lib section (only TT runs as given)";
+      if (!(corner.voltageScale > 0.0)) return "corner supply scale " + std::to_string(corner.voltageScale) + " is not positive";
+      netlist.environment.global_voltage_scale = corner.voltageScale;
+      return "";
   }
   
   // Deterministic RNG (FNV-1a Hash + Box-Muller)
@@ -1466,7 +1415,6 @@ private:
   // NR Parameters (Using centralized PhysicsConstants)
   // Note: Kept as local constexpr for backward compatibility; prefer PhysicsConstants::
   static constexpr int MAX_NR_ITER = PhysicsConstants::MAX_NR_ITER;
-  static constexpr double PCG_TOL = 1e-10;
   static constexpr int PCG_MAX_ITER = 1000;
 
   /**
@@ -2394,15 +2342,7 @@ public:
 
 
   /**
-   * stampBlockNonLinear
-   * Linearizes and stamps non-linear elements (Diodes, MOSFETs, BJTs) for a specific
-   * block instance.
-   * Uses Forward-Mode Automatic Differentiation (AD) via Dual<double>.
-   */
-  /**
-   * stampSoABlock
-   * Uses Structure-of-Arrays (SoA) tensors for batch processing.
-   * Calls specialized SIMD-friendly physics kernels and then stamps the results.
+   * stampSoABlock: the linear elements (R, C, I) of the global block from its SoA tensors.
    */
   void stampSoABlock(TensorizedBlock& block, const std::vector<double>& v_guess, double h = 0.0,
                      IntegrationType intType = IntegrationType::TRAPEZOIDAL) {

@@ -23,33 +23,6 @@ constexpr double Q_ELECTRON = 1.602176634e-19; // Coulombs
 constexpr double V_THERMAL_NOM = K_BOLTZMANN * 300.15 / Q_ELECTRON;
 
 // =============================================================================
-// DEVICE DEFAULTS (Silicon)
-// =============================================================================
-
-/** Default diode saturation current (Silicon PN Junction) */
-constexpr double IS_DEFAULT_DIODE = 1e-14; // Amperes
-
-/** Default emission coefficient (Ideal diode) */
-constexpr double N_DEFAULT_DIODE = 1.0;
-
-/** Default BJT saturation current */
-constexpr double IS_DEFAULT_BJT = 1e-14; // Amperes
-
-/** Default BJT forward beta */
-constexpr double BETA_F_DEFAULT = 100.0;
-
-/** Default BJT reverse beta */
-constexpr double BETA_R_DEFAULT = 1.0;
-
-
-// =============================================================================
-// SOLVER HEURISTICS
-// =============================================================================
-
-/** Voltage source internal resistance (Norton equivalent) */
-constexpr double R_VSOURCE_INTERNAL = 1e-3; // Ohms
-
-// =============================================================================
 // TOLERANCES
 // =============================================================================
 
@@ -74,12 +47,6 @@ constexpr double KCL_RELTOL = 1e-10;
 // ngspice PIVTOL: a DC solution factored through a pivot at or below it is singular
 constexpr double PIVTOL = 1e-13;
 
-/** Conductance used to short an inductor at DC. Same 1 mOhm as the Norton
- *  voltage-source stamp, so stamps and KCL audits stay consistent.
- *  ponytail: not an ideal short (I*1mOhm error); exact fix is an MNA branch
- *  current row, which the voltage-domain-only matrix doesn't have yet. */
-constexpr double DC_SHORT_G = 1e3; // Siemens
-
 /** Junction exponent cap: above Vj = JUNCTION_EXP_ARG_MAX * N*Vt every diode/BJT
  *  kernel continues linearly instead of exponentially (overflow guard only).
  *  Was 30: with SPICE's BJT IS=1e-16 the junction went linear at 1.07 mA,
@@ -88,24 +55,12 @@ constexpr double DC_SHORT_G = 1e3; // Siemens
  *  pnjlim (which bypasses limiting above this cap) bounds NR overshoot. */
 constexpr double JUNCTION_EXP_ARG_MAX = 50.0;
 
-/** PCG solver tolerance */
-constexpr double PCG_TOL = 1e-10;
-
-/** Minimum time step to prevent underflow */
-constexpr double DT_MIN = 1e-18; // Seconds
-
 /** Maximum NR iterations */
 constexpr int MAX_NR_ITER = 50;
 
-/** Maximum PCG iterations */
-constexpr int MAX_PCG_ITER = 1000;
-
 /** ngspice GMIN: 1e-12 S in parallel with every PN junction (diode, BJT),
- *  in the AoS models, every SoA kernel and both KCL audits. Never node-to-ground. */
+ *  in every junction model and the KCL audits. Never node-to-ground. */
 constexpr double JUNCTION_GMIN = 1e-12;  // the default; a run's .options gmin travels in each device's parameters (.gmin)
-
-/** GMIN stepping stages */
-constexpr int GMIN_STEPS = 10;
 
 // =============================================================================
 // HELPER FUNCTIONS

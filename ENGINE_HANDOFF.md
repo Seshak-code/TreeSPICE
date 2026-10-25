@@ -316,8 +316,9 @@ pointer in OpenVLSI and run its integration suites there.
 
 ```bash
 cmake -S . -B build && cmake --build build -j10
-ctest --test-dir build      # test_engine_fixes, test_contraction_solver, test_convergence_engine
-TMPDIR=/private/tmp/claude-502 python3 tests/ngspice_diff/run_diff.py   # ~2 min; needs ngspice (brew install ngspice)
+ctest --test-dir build      # test_engine_fixes, test_contraction_solver, test_convergence_engine, test_transient_session
+python3 tests/ngspice_diff/run_diff.py   # ~2 min; needs ngspice (brew install ngspice)
+python3 tests/cli_check.py              # the treespice CLI
 python3 tests/xyce_diff.py              # 0 FAIL expected; needs datasets/xyce
 python3 tests/ibmpg_diff.py -k ibmpg2   # needs datasets/ibmpg
 ```
@@ -329,7 +330,7 @@ test_parallel_monte_carlo, test_driver_swap, test_flow and test_simulation.
 
 - `tests/test_engine_fixes.cpp` = one regression check per fix (analytic/hand-derived references,
   CPU and GPU modes). Add a check there for every engine fix.
-- `build/acutesim_engine_dump <netlist> <cpu|gpu> <dc|tran|ac|noise> [step stop]` prints
+- `build/acutesim_engine_dump <netlist> <cpu|gpu> <dc|tran|ac|noise|pz|sens|tf> [step stop]` prints
   machine-readable waveforms (node order = first appearance, subckt bodies excluded).
 - **Golden DB updates:** never accept `--update` wholesale. Run it in a scratch copy, splice only the
   entries whose change you have derived physically, and say why in the commit (see commits

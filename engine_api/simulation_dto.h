@@ -102,9 +102,8 @@ struct SimulationSourceDTO {
 };
 
 struct TransientConfigDTO {
-    double stopTimeS = 1e-6;   // 0 (either): the netlist's .tran
-    double stepSizeS = 1e-9;
-    double maxStepS  = 1e-8;
+    double stopTimeS = 0.0;    // 0 (either): the netlist's .tran
+    double stepSizeS = 0.0;
     bool   uic       = false;   // start from .ic / IC= values, skip the DC bias
     bool   keepPoints = true;   // false: each step goes only to the stream callback (a long run of a large circuit)
 };

@@ -1073,6 +1073,21 @@ int main() {
             check(ok && worst < 1e-9 && !refused.converged && refused.errorDetail.find("stands for 4 identical nets") != std::string::npos,
                   std::string(msg) + " (" + fn.errorDetail + hn.errorDetail + ft.errorDetail + ht.errorDetail + " | " + refused.errorDetail + ")");
         }
+        {   // a corner runs only what the engine models: its supply scale; a process corner is the PDK's .lib section
+            CircuitSim sim;
+            TensorNetlist nl;
+            acutesim::physics::CornerConfig c;
+            c.name = "ff";
+            const std::string ff = sim.applyCorner(nl, c);
+            c.name = "TT";
+            c.voltageScale = 0.0;
+            const std::string zero = sim.applyCorner(nl, c);
+            c.voltageScale = 1.1;
+            const std::string tt = sim.applyCorner(nl, c);
+            check(ff.find(".lib section") != std::string::npos && !zero.empty() && tt.empty() &&
+                      nl.environment.global_voltage_scale == 1.1,
+                  "applyCorner refuses a process corner and a non-positive supply, applies TT's scale (" + ff + " | " + zero + ")");
+        }
         {   // S3.3: the metastable warning names a latch's q / qb (two identical inverters couple them in different roles),
             // not nets driven alike (a resistor-driven bus that one instance meets at interchangeable pins)
             auto warned = [&](const std::string& net) {

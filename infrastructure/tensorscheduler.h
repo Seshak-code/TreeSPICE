@@ -1,101 +1,24 @@
 #pragma once
 #include "../netlist/circuit.h"
-#include <vector>
 #include <map>
 #include <string>
-#include <iostream>
-#include <cassert>
+#include <vector>
 
-#ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-#endif
-
-/*
- * tensorscheduler.h
- * Tensor Scheduler - Manages batching, structural reuse, and hardware selection.
- */
-
-
-// Hardware Backend Types
-enum class SolverBackend {
-    CPU_SEQUENTIAL,  // Baseline (for debugging)
-    CPU_OPENMP,      // Multi-threaded CPU
-    WEBGPU_COMPUTE   // Future: GLSL/WGSL Compute Shaders
-};
-
-// --- SOLID: Dependency Inversion - Abstract Interface ---
-
-// Interface for hardware detection (DIP - Dependency Inversion Principle).
-// Allows mocking in unit tests and swapping detection strategies.
-class IHardwareDetector {
-public:
-    virtual ~IHardwareDetector() = default;
-    virtual SolverBackend detectBestBackend() const = 0;
-};
-
-// Default implementation of IHardwareDetector.
-class HardwareManager : public IHardwareDetector {
-public:
-    SolverBackend detectBestBackend() const override {
-        #ifdef __EMSCRIPTEN__
-            // Check for WebGPU availability via JS interop
-            // This requires -s USE_WEBGPU=1 during compilation
-            // For now, we assume if we are in Wasm with the feature flag, we use it.
-            return SolverBackend::WEBGPU_COMPUTE;
-        #else
-            return SolverBackend::CPU_OPENMP;
-        #endif
-    }
-};
-
-// SolverJob - Represents a batch of identical-topology block instances to solve together.
+// SolverJob: the instances of one block definition (they share its element values)
 struct SolverJob {
     const TensorBlock* blockTmpl;
     std::vector<int> instanceIds;
-
-    double calculateCost() const {
-        assert(blockTmpl != nullptr && "SolverJob must have a valid block template");
-        double componentWeight = blockTmpl->resistors.size() + 
-                                blockTmpl->mosfets.size() * 5.0 + 
-                                blockTmpl->capacitors.size() * 2.0;
-        double nodeWeight = blockTmpl->numInternalNodes * 10.0;
-        return (componentWeight + nodeWeight) * instanceIds.size();
-    }
 };
 
-// TensorScheduler - Groups instances by topology for efficient batched solving.
-// Uses IHardwareDetector for Dependency Inversion.
-class TensorScheduler 
-{
-
+// TensorScheduler: groups the netlist's instances by block definition for the per-block audits and stamps
+class TensorScheduler {
 public:
     std::vector<SolverJob> jobs;
-    SolverBackend activeBackend;
-    
-    TensorScheduler() {
-        HardwareManager defaultDetector;
-        activeBackend = defaultDetector.detectBestBackend();
-    }
-    
-    // SOLID: Dependency Injection constructor
-    explicit TensorScheduler(const IHardwareDetector& detector) {
-        activeBackend = detector.detectBestBackend();
-    }
-    
-    /*
-     * Analyzes the netlist and groups identical blocks into jobs.
-     *
-     * Optimizations:
-     * 1. Groups instances by block definition (one template per block).
-     * 2. Calculates expected Job Cost for backend load balancing.
-     */
 
     void schedule(const TensorNetlist& netlist) {
         jobs.clear();
-        
-        // Group by block definition: instances of one block share its element
-        // values. Grouping by topology hash (which ignores values) audited and
-        // stamped every same-shaped block with the first one's values.
+        // By block definition, not topology hash: the hash ignores values, so same-shaped blocks would be
+        // audited and stamped with the first one's
         std::map<std::string, std::vector<int>> byBlock;
         for (int i = 0; i < (int)netlist.instances.size(); ++i)
             if (netlist.blockDefinitions.count(netlist.instances[i].blockName))

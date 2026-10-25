@@ -429,8 +429,7 @@ SimulationResponseDTO SessionImpl::runDC(const SimulationRequestDTO& req,
     result.solveTimeMs = std::chrono::duration<double, std::milli>(elapsed).count();
     result.jobId = jobId_;
 
-    result.success = result.converged;  // driver-path consumers read success
-    status_.store(result.converged ? JobStatus::Completed : JobStatus::Failed);
+    finish(result);
     return result;
 }
 
@@ -575,6 +574,17 @@ static SimulationResponseDTO dcRun(const SimulationRequestDTO& req, SPICEParseRe
     return r;
 }
 
+SimulationResponseDTO& SessionImpl::finish(SimulationResponseDTO& r) {
+    const bool cancelled = status_.load() == JobStatus::Cancelled;
+    if (cancelled) {
+        r.converged = false;
+        if (r.errorDetail.empty()) r.errorDetail = "Cancelled.";
+    }
+    r.success = r.converged;  // driver-path consumers read success
+    status_.store(cancelled ? JobStatus::Cancelled : r.converged ? JobStatus::Completed : JobStatus::Failed);
+    return r;
+}
+
 SimulationResponseDTO SessionImpl::dispatch_dc_internal(const SimulationRequestDTO& req,
                                                           const EngineCallbacks& cb) {
     SPICEParseResult parsed;
@@ -643,8 +653,7 @@ SimulationResponseDTO SessionImpl::runAC(const SimulationRequestDTO& req,
     SimulationResponseDTO result = dispatch_ac_internal(req, cb);
     if (result.converged) attachMeasures(result);
     result.jobId = jobId_;
-    result.success = result.converged;  // driver-path consumers read success
-    status_.store(result.converged ? JobStatus::Completed : JobStatus::Failed);
+    finish(result);
     return result;
 }
 
@@ -672,6 +681,7 @@ SimulationResponseDTO SessionImpl::dispatch_ac_internal(const SimulationRequestD
     }
     const auto X = sim.solveAC(netlist, freqs);
     r.converged    = X.size() == freqs.size();
+    if (!r.converged) r.errorDetail = "AC: the small-signal system is singular";
     r.analysisType = AnalysisTypeDTO::AC;
     r.scaleName    = "frequency";
     r.backend      = backendOf(sim, precision_);
@@ -701,8 +711,7 @@ SimulationResponseDTO SessionImpl::runTransient(const SimulationRequestDTO& req,
     SimulationResponseDTO result = dispatch_tran_internal(req, cb, std::move(streamCallback));
     if (result.converged) attachMeasures(result);
     result.jobId = jobId_;
-    result.success = result.converged;  // driver-path consumers read success
-    status_.store(result.converged ? JobStatus::Completed : JobStatus::Failed);
+    finish(result);
     return result;
 }
 
@@ -716,7 +725,7 @@ SimulationResponseDTO SessionImpl::dispatch_tran_internal(const SimulationReques
         return runSteps(req, parsed.steps, [&](const SimulationRequestDTO& q) { return dispatch_tran_internal(q, cb, streamCb); });
     TensorNetlist& netlist = parsed.netlist;
     const bool uic = parsed.tranUIC || req.transient.uic;
-    const double  stopTime = req.transient.stopTimeS != 0 ? req.transient.stopTimeS : parsed.tranStop;  // else the netlist's .tran
+    const double  stopTime = req.transient.stopTimeS != 0 ? req.transient.stopTimeS : parsed.tranStop;  // 0: the netlist's .tran (else validated)
     const double  dt       = req.transient.stepSizeS != 0 ? req.transient.stepSizeS : parsed.tranStep;
 
     CircuitSim sim;
@@ -765,7 +774,7 @@ public:
         SimulationResponseDTO failure;
         if (!deserialiseRequest(req, parsed_, failure, false, false, true)) { err_ = failure.errorDetail; return; }
         sim_.execMode = selectExecMode(prec);
-        const double step = req.transient.stepSizeS > 0 ? req.transient.stepSizeS : parsed_.tranStep;
+        const double step = req.transient.stepSizeS != 0 ? req.transient.stepSizeS : parsed_.tranStep;
         err_ = sim_.beginTransient(parsed_.netlist, step, parsed_.tranUIC || req.transient.uic);
     }
     bool setSource(const std::string& name, double volts, double rampS) override {
@@ -808,24 +817,28 @@ SimulationResponseDTO SessionImpl::runMonteCarlo(const SimulationRequestDTO& req
     status_.store(JobStatus::Running);
     SimulationResponseDTO agg;
     agg.analysisType = AnalysisTypeDTO::MONTE_CARLO;
-    agg.converged    = true;
+    agg.converged    = mc.sampleCount > 0;
     agg.jobId        = jobId_;
+    if (!agg.converged) agg.errorDetail = "Monte Carlo needs at least one sample";
 
-    for (int i = 0; i < mc.sampleCount && status_.load() != JobStatus::Cancelled; ++i) {
+    int done = 0;
+    for (int i = 0; i < mc.sampleCount && status_.load() != JobStatus::Cancelled; ++i, ++done) {
         SimulationRequestDTO run_req = req;
         run_req.mc     = mc;
         run_req.mcSeed = mc.seed + i;
         auto r = dispatch_dc_internal(run_req, cb);
-        if (!r.converged) { agg.converged = false; agg.errorDetail = r.errorDetail; }
+        if (!r.converged && agg.converged) {  // the first failure, by sample
+            agg.converged = false;
+            agg.errorDetail = "sample " + std::to_string(i) + ": " + r.errorDetail;
+        }
         if (!r.waveformPoints.empty()) {
             agg.waveformPoints.push_back(r.waveformPoints.front());
         }
         cb.onProgress(i + 1, mc.sampleCount);
     }
-
-    agg.success = agg.converged;  // driver-path consumers read success
-    status_.store(agg.converged ? JobStatus::Completed : JobStatus::Failed);
-    return agg;
+    if (status_.load() == JobStatus::Cancelled)  // a partial set is not the requested distribution
+        agg.errorDetail = "Monte Carlo cancelled after " + std::to_string(done) + " of " + std::to_string(mc.sampleCount) + " samples";
+    return finish(agg);
 }
 
 // ── Noise ─────────────────────────────────────────────────────────────────
@@ -861,8 +874,7 @@ SimulationResponseDTO SessionImpl::runNoise(const SimulationRequestDTO& req,
         }
         r.backend = backendOf(sim, precision_);
     }
-    r.success = r.converged;  // driver-path consumers read success
-    status_.store(r.converged ? JobStatus::Completed : JobStatus::Failed);
+    finish(r);
     return r;
 }
 
@@ -892,8 +904,7 @@ SimulationResponseDTO SessionImpl::runPoleZero(const SimulationRequestDTO& req,
         }
         r.backend = backendOf(sim, precision_);
     }
-    r.success = r.converged;
-    status_.store(r.converged ? JobStatus::Completed : JobStatus::Failed);
+    finish(r);
     return r;
 }
 
@@ -937,8 +948,7 @@ SimulationResponseDTO SessionImpl::runSens(const SimulationRequestDTO& req,
         }
         r.backend = backendOf(sim, precision_);
     }
-    r.success = r.converged;
-    status_.store(r.converged ? JobStatus::Completed : JobStatus::Failed);
+    finish(r);
     return r;
 }
 
@@ -980,8 +990,7 @@ SimulationResponseDTO SessionImpl::runTF(const SimulationRequestDTO& req,
         }
         r.backend = backendOf(sim, precision_);
     }
-    r.success = r.converged;
-    status_.store(r.converged ? JobStatus::Completed : JobStatus::Failed);
+    finish(r);
     return r;
 }
 

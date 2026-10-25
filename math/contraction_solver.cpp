@@ -857,8 +857,7 @@ SolverResult solve(const Csr_matrix& A, const std::vector<double>& b, const Cont
         res.converged = false;
         res.rankDeficient = true;
         res.finalResidual = 1.0;
-        res.solution.assign(n, 0.0);
-        return res;
+        return res;  // no solution: a caller cannot mistake zeros for one
     }
 
     std::vector<double> x, r(n), dx;
