@@ -525,7 +525,22 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
             if (std::isnan(tempC) && !t.empty() && (toUpper(t[0]) == ".OPTIONS" || toUpper(t[0]) == ".OPTION"))
                 for (size_t i = 1; i + 1 < t.size(); ++i) if (toUpper(t[i]) == "TEMP") try { circuitC = parseValue(t[i + 1]); } catch (...) {}
         }
-        lines = numparam::expand(std::move(lines), incLine, circuitC, paramOverrides);  // .param expressions, subckt parameters, .if
+        // .options seed=N | random: the statistical functions' generator (ngspice's; 1 when none, its default)
+        uint64_t seed = 1;
+        for (const auto& [n, l] : lines) {
+            const auto t = tokenize(l);
+            if (t.empty() || (toUpper(t[0]) != ".OPTIONS" && toUpper(t[0]) != ".OPTION")) continue;
+            for (size_t i = 1; i < t.size(); ++i) {
+                if (toUpper(t[i]) != "SEED") continue;
+                incLine = n;
+                const std::string v = i + 1 < t.size() ? toUpper(t[i + 1]) : "";
+                if (v == "RANDOM" || v == "{RANDOM}") seed = std::random_device{}();
+                else if (v.empty() || v.find_first_not_of("0123456789") != std::string::npos || std::stoull(v) == 0)
+                    throw std::runtime_error(".options seed=" + v + ": a positive integer or random");
+                else seed = std::stoull(v);
+            }
+        }
+        lines = numparam::expand(std::move(lines), incLine, circuitC, paramOverrides, seed);  // .param expressions, subckt parameters, .if
     } catch (const std::exception& e) { return fail(incLine, e.what()); }
 
     // .param values are global in SPICE: resolve them before any card uses one
@@ -598,6 +613,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                             continue;
                         }
                         if (k == "HIER") { flatten_ = kv ? v == 0.0 : false; if (kv) ++i; continue; }  // S3: the quotient circuit
+                        if (k == "SEED") { if (i + 1 < tok.size()) ++i; continue; }  // numparam::expand's generator: read before
                         if (!kv) { if (k != "SCALE" && k != "GMINSTEPS") std::cerr << "Warning: .options " << k << " is ignored\n"; continue; }
                         ++i;
                         if (k == "GMINSTEPS") env.gmin_stepping = v != 0.0;

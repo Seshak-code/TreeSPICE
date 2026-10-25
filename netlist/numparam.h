@@ -11,7 +11,9 @@
 // exact Jacobian from the same code that folds a constant.
 #include <cmath>
 #include <functional>
+#include <cstdint>
 #include <map>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -24,7 +26,8 @@ namespace acutesim { namespace numparam {
 struct Expr {
     enum Op { Const, Time, Ref, Neg, Not, Add, Sub, Mul, Div, Mod, Pow, Lt, Gt, Le, Ge, Eq, Ne, And, Or, Cond, Fn };
     enum F { SQRT, EXP, LN, LOG10, ABS, FLOOR, CEIL, INT, NINT, SQR, SGN, SIN, COS, TAN, ASIN, ACOS, ATAN, SINH,
-             COSH, TANH, ASINH, ACOSH, ATANH, U, URAMP, NOMINAL, POW, PWR, PWRS, ATAN2, HYPOT, MIN, MAX, LIMIT, TABLE };
+             COSH, TANH, ASINH, ACOSH, ATANH, U, URAMP, AGAUSS, GAUSS, AUNIF, UNIF, LIMIT2, POW, PWR, PWRS, ATAN2, HYPOT,
+             MIN, MAX, LIMIT, TABLE };
     struct Node { Op op; double c = 0; F fn = SQRT; std::vector<int> a; };  // Ref: c indexes refs
     struct Sym { char kind; std::string a, b; };  // 'V': V(a) or V(a,b) (nodes); 'I': I(a) (a source), upper case
     std::vector<Node> n;
@@ -38,6 +41,17 @@ struct Expr {
 
 using Lookup = std::function<bool(const std::string &, double &)>;
 
+// Monte Carlo: while a netlist expands, the statistical functions draw from the generator expand() seeds
+// (.options seed=N | random; 1 when none, as ngspice); outside an expansion (a behavioural source at run time) they
+// are their nominal value. draws counts them, so a subcircuit body that drew is specialized per instance (mismatch).
+struct Random {
+    std::mt19937_64 gen;
+    uint64_t draws = 0;
+    double normal();   // N(0, 1), Box-Muller (the same numbers on every platform; std::normal_distribution is not)
+    double uniform();  // [-1, 1)
+};
+extern thread_local Random *rng;
+
 // Evaluate an expression; lookup(NAME, value) resolves an upper-case identifier.
 double eval(const std::string &expr, const Lookup &lookup);
 
@@ -50,7 +64,8 @@ std::string text(const Expr &e);
 // spliced. Line 1 (the title) passes through. errLine: the line an error refers to.
 std::vector<std::pair<int, std::string>> expand(std::vector<std::pair<int, std::string>> lines,
                                                 int &errLine, double tempC = 27.0,  // tempC: TEMPER
-                                                const std::map<std::string, double> &overrides = {});  // upper-case global .param values that win over the netlist's
+                                                const std::map<std::string, double> &overrides = {},  // upper-case global .param values that win over the netlist's
+                                                uint64_t seed = 1);  // the statistical functions' generator (.options seed)
 
 // Evaluate node i. Env: time(), ref(k) (the Dual of e.refs[k]), strict (constants: /0 is an error).
 template <class Env>
@@ -137,7 +152,15 @@ private:
             case Expr::ATANH: return D(std::atanh(v), g / (1 - v * v));
             case Expr::U: return flat(v < 0 ? 0.0 : v > 0 ? 1.0 : 0.5);  // ngspice: u(0) = 0.5
             case Expr::URAMP: return v > 0 ? x : flat(0.0);
-            case Expr::NOMINAL: return x;  // statistical functions: the nominal value (no Monte Carlo)
+            // ngspice's statistical functions (numparam/xpressn.c): a variation or sigma <= 0 is the nominal value
+            case Expr::AGAUSS: case Expr::GAUSS: {
+                const double var = arg(1).val, sig = n.a.size() > 2 ? arg(2).val : 1.0;
+                if (!rng || var <= 0 || sig <= 0) return x;
+                return D(v + (n.fn == Expr::GAUSS ? v * var : var) / sig * rng->normal(), g);
+            }
+            case Expr::UNIF: return rng ? D(v + v * arg(1).val * rng->uniform(), g) : x;
+            case Expr::AUNIF: return rng ? D(v + arg(1).val * rng->uniform(), g) : x;
+            case Expr::LIMIT2: return rng ? D(v + (rng->uniform() > 0 ? arg(1).val : -arg(1).val), g) : x;
             case Expr::POW: return pow(x, arg(1));
             case Expr::PWR: return pow(D(std::abs(v), (v < 0 ? -g : g)), arg(1));  // numparam: |x|^y
             case Expr::PWRS: {  // B sources: sign(x) |x|^y
