@@ -727,6 +727,18 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                     result_.pzPoles = what != "ZER";
                     result_.pzZeros = what != "POL";
                 }
+                else if (keyword == ".STB") {
+                    // .stb dec|oct|lin n fstart fstop probe: the probe a voltage source in the loop, + toward the loop's input
+                    const std::string sw = tok.size() == 6 ? toUpper(tok[1]) : "";
+                    if (sw != "DEC" && sw != "OCT" && sw != "LIN") throw std::runtime_error(".stb expects dec|oct|lin n fstart fstop probe");
+                    result_.stbProbe = toUpper(tok[5]);
+                    if (result_.stbProbe[0] != 'V') throw std::runtime_error(".stb: the probe is a voltage source, not '" + tok[5] + "'");
+                    result_.hasSTB = true;
+                    result_.stbSweep = sw == "DEC" ? "dec" : sw == "OCT" ? "oct" : "lin";
+                    result_.stbPoints = static_cast<int>(parseValue(tok[2]));
+                    result_.stbStart = parseValue(tok[3]);
+                    result_.stbStop = parseValue(tok[4]);
+                }
                 else if (keyword == ".AC") {
                     // .ac dec|oct|lin n fstart fstop
                     const std::string sw = tok.size() == 5 ? toUpper(tok[1]) : "";
