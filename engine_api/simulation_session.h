@@ -83,6 +83,11 @@ public:
         const compute::orchestration::SimulationRequestDTO&,
         const EngineCallbacks& = {}) = 0;
 
+    // .stb: the loop gain at the netlist's .stb probe over its sweep (extended.stb), Middlebrook's double injection.
+    virtual compute::orchestration::SimulationResponseDTO runStb(
+        const compute::orchestration::SimulationRequestDTO&,
+        const EngineCallbacks& = {}) = 0;
+
     // .tf: DC small-signal transfer function and impedances for the netlist's .tf card (extended.dcTf).
     virtual compute::orchestration::SimulationResponseDTO runTF(
         const compute::orchestration::SimulationRequestDTO&,

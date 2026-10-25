@@ -72,7 +72,9 @@ std::vector<std::string> analysisCards(const std::string& text) {
         std::string kw;
         ls >> kw;
         for (auto& c : kw) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (kw == ".op" || kw == ".dc" || kw == ".ac" || kw == ".tran" || kw == ".noise" || kw == ".pz" || kw == ".sens" || kw == ".tf") kinds.push_back(kw.substr(1));
+        if (kw == ".op" || kw == ".dc" || kw == ".ac" || kw == ".tran" || kw == ".noise" || kw == ".pz" || kw == ".sens" || kw == ".tf" ||
+            kw == ".stb")
+            kinds.push_back(kw.substr(1));
     }
     return kinds;
 }
@@ -168,6 +170,53 @@ std::vector<OutputTable> noiseTables(const SimulationResponseDTO& r, const std::
     t.columns = {{"v(onoise_total)", "voltage", {nz.onoiseTotal}},
                  {currentIn ? "i(inoise_total)" : "v(inoise_total)", currentIn ? "current" : "voltage", {nz.inoiseTotal}}};
     return {d, t};
+}
+
+// .stb: one plot, the loop gain over frequency (as Spectre's stb writes loopGain)
+OutputTable stbTable(const SimulationResponseDTO& r) {
+    OutputTable t;
+    t.plotName = "Stability Analysis";
+    t.scaleName = "frequency";
+    t.complexData = true;
+    t.scale = r.extended.stb.frequencies;
+    t.columns = {{"loopgain", "notype", r.extended.stb.loopGain, true}};
+    return t;
+}
+
+// The margins, as Spectre's stb log states them: the phase margin at |T| = 1, the gain margin where the phase crosses
+// -180 degrees (unwrapped), each linear between the two points about it; "none" where it never crosses
+std::string stbMargins(const SimulationResponseDTO& r) {
+    const auto& f = r.extended.stb.frequencies;
+    const auto& T = r.extended.stb.loopGain;
+    std::vector<double> db, ph;
+    for (const auto& t : T) {
+        db.push_back(20 * std::log10(std::abs(t)));
+        double p = std::arg(t) * 180 / M_PI;
+        if (!ph.empty()) p += 360 * std::round((ph.back() - p) / 360);
+        ph.push_back(p);
+    }
+    std::ostringstream o;
+    o.precision(6);
+    auto cross = [&](const std::vector<double>& y, double level, double& at) {
+        for (size_t k = 1; k < y.size(); ++k)
+            if ((y[k - 1] - level) * (y[k] - level) <= 0 && y[k - 1] != y[k]) {
+                const double u = (level - y[k - 1]) / (y[k] - y[k - 1]);
+                at = f[k - 1] + u * (f[k] - f[k - 1]);
+                return k;
+            }
+        return (size_t)0;
+    };
+    double fu = 0, f180 = 0;
+    if (const size_t k = cross(db, 0, fu); k) {
+        const double u = (fu - f[k - 1]) / (f[k] - f[k - 1]), p = ph[k - 1] + u * (ph[k] - ph[k - 1]);
+        o << "Phase margin = " << 180 + p << " deg at " << fu << " Hz\n";
+    } else o << "Phase margin: none (|loop gain| never crosses 1)\n";
+    const double target = !ph.empty() && ph[0] > -180 ? -180 : 180;
+    if (const size_t k = cross(ph, target, f180); k) {
+        const double u = (f180 - f[k - 1]) / (f[k] - f[k - 1]), g = db[k - 1] + u * (db[k] - db[k - 1]);
+        o << "Gain margin = " << -g << " dB at " << f180 << " Hz\n";
+    } else o << "Gain margin: none (the phase never crosses -180 deg)\n";
+    return o.str();
 }
 
 OutputTable tfTable(const SimulationResponseDTO& r) {
@@ -315,6 +364,7 @@ int main(int argc, char** argv) {
                                 : an.kind == "noise" ? session->runNoise(an.req, cb)
                                 : an.kind == "sens" ? session->runSens(an.req, cb)
                                 : an.kind == "tf"   ? session->runTF(an.req, cb)
+                                : an.kind == "stb"  ? session->runStb(an.req, cb)
                                 : an.kind == "pz"   ? session->runPoleZero(an.req, cb)
                                                     : session->runDC(an.req, cb);
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -349,6 +399,9 @@ int main(int argc, char** argv) {
                 in.close();
                 std::remove(rowsPath.c_str());
                 out << ".tran: " << streamed << " points streamed to " << rawPath << "\n";
+            } else if (an.kind == "stb") {
+                out << stbMargins(r);
+                if (!rawPath.empty()) writeRaw(rawFile, stbTable(r), title(text), ascii);
             } else if (an.kind == "tf") {
                 if (!rawPath.empty()) writeRaw(rawFile, tfTable(r), title(text), ascii);
                 printTF(out, r);

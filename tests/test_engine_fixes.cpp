@@ -1234,6 +1234,34 @@ int main() {
                                                         std::to_string(capped) + " with tmax = 50n)");
         check(steps(".tran 1u 10u 0 0") < 0, ".tran tmax <= 0 is an error");
     }
+    {   // .stb: the loop gain at a probe by Middlebrook's double injection, against analytic loops. An inverting gain A
+        // from x drives y through Ro; x is loaded by Rin || C. The loaded loop gain is T = A Zx / (Zx + Ro), Zx = Rin || 1/(jwC);
+        // the voltage injection alone would give A + Ro/Zx (wrong by the loading)
+        auto stb = [](const std::string& load) {
+            auto engine = ISimulationEngine::create();
+            SimulationRequestDTO req;
+            req.source.payload = "* stb\nVPRB x y dc 0\nE1 o 0 0 x 100\nRO o y 1k\n" + load + ".stb dec 5 1k 10meg VPRB\n.end\n";
+            return engine->createSession()->runStb(req, {});
+        };
+        const auto loaded = stb("RIN x 0 1k\nCX x 0 1n\n");
+        double worst = 0, tvOff = 0;
+        for (size_t k = 0; loaded.extended.hasStb && k < loaded.extended.stb.frequencies.size(); ++k) {
+            const double w = 2 * M_PI * loaded.extended.stb.frequencies[k];
+            const std::complex<double> zx = 1e3 / std::complex<double>(1, w * 1e3 * 1e-9), t = 100.0 * zx / (zx + 1e3);
+            worst = std::max(worst, std::abs(loaded.extended.stb.loopGain[k] - t) / std::abs(t));
+            tvOff = std::max(tvOff, std::abs(loaded.extended.stb.tv[k] - (100.0 + 1e3 / zx)) / std::abs(t));
+        }
+        check(loaded.converged && loaded.extended.stb.frequencies.size() == 21 && worst < 1e-9 && tvOff < 1e-9,
+              ".stb: a loaded loop's gain is A Zx/(Zx + Ro) to " + std::to_string(worst) + " (the voltage injection alone is A + Ro/Zx)");
+        const auto ideal = stb("");
+        bool exact = ideal.converged && !ideal.extended.stb.loopGain.empty();
+        for (const auto& t : ideal.extended.stb.loopGain) exact = exact && std::abs(t - 100.0) < 1e-9;
+        check(exact, ".stb: with no load on the loop's input the gain is exactly A (no 0/0 at the ideal break)");
+        auto engine = ISimulationEngine::create();
+        SimulationRequestDTO bad;
+        bad.source.payload = "* stb\nR1 a 0 1k\nV1 a 0 dc 1\n.stb dec 5 1k 1meg R1\n.end\n";
+        check(!engine->createSession()->runStb(bad, {}).converged, ".stb refuses a probe that is not a voltage source");
+    }
     {   // Monte Carlo: ngspice's statistical functions (agauss, gauss, aunif), seeded by .options seed, drawn per instance
         // inside a subcircuit (mismatch); a sigma of 0 is the nominal value
         std::printf("\n== statistical functions ==\n");

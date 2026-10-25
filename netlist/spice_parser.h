@@ -89,6 +89,10 @@ struct SPICEParseResult {
     std::string   tfSource, tfOutSource;  // the input source; the i(vsrc) output source, else empty
     std::string   tfOutLabel;             // ngspice's spelling of the output, lower case: v(2), v(2,3)
     int           tfOut = 0, tfRef = 0;
+    bool          hasSTB = false;    // .stb dec|oct|lin n fstart fstop probe: loop gain at a probe (a voltage source)
+    std::string   stbSweep, stbProbe;
+    int           stbPoints = 0;
+    double        stbStart = 0.0, stbStop = 0.0;
     std::string   acSweep;           // .ac dec|oct|lin n fstart fstop
     int           acPoints = 0;
     double        acStart = 0.0, acStop = 0.0;

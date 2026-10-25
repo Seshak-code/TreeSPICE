@@ -7,6 +7,7 @@
 // If this header compiles without QApplication, you are compliant.
 // ============================================================================
 
+#include <complex>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -39,7 +40,8 @@ enum class AnalysisTypeDTO : int {
     SENSITIVITY = 5,
     TRANSFER_FUNCTION = 6,
     POLE_ZERO         = 7,
-    FOURIER           = 8
+    FOURIER           = 8,
+    STABILITY         = 9
 };
 
 inline std::string analysisTypeToString(AnalysisTypeDTO t) {
@@ -53,6 +55,7 @@ inline std::string analysisTypeToString(AnalysisTypeDTO t) {
         case AnalysisTypeDTO::TRANSFER_FUNCTION: return "TRANSFER_FUNCTION";
         case AnalysisTypeDTO::POLE_ZERO:         return "POLE_ZERO";
         case AnalysisTypeDTO::FOURIER:           return "FOURIER";
+        case AnalysisTypeDTO::STABILITY:         return "STABILITY";
     }
     return "UNKNOWN";
 }
@@ -213,6 +216,12 @@ struct DcTFResultDTO {
     std::vector<double> values;
 };
 
+// .stb: the loop gain at the probe over frequency (Middlebrook's double injection), and the parts it combines
+struct StbResultDTO {
+    std::vector<double> frequencies;
+    std::vector<std::complex<double>> loopGain, tv, ti;  // T, and the voltage and current injections' ratios
+};
+
 struct ExtendedAnalysisResultsDTO {
     bool hasTF = false;
     TFResultDTO tf;          // Bode plot and margins (the app's TRANSFER_FUNCTION handler)
@@ -226,6 +235,8 @@ struct ExtendedAnalysisResultsDTO {
     PoleZeroResultDTO pz;
     bool hasFourier = false;
     FourierResultDTO fourier;
+    bool hasStb = false;
+    StbResultDTO stb;
 };
 
 struct WaveformDataPoint {

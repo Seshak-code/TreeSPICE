@@ -954,6 +954,41 @@ SimulationResponseDTO SessionImpl::runSens(const SimulationRequestDTO& req,
     return r;
 }
 
+// ── Stability: the loop gain at a probe ───────────────────────────────────
+SimulationResponseDTO SessionImpl::runStb(const SimulationRequestDTO& req, const EngineCallbacks& /*cb*/) {
+    status_.store(JobStatus::Running);
+    SimulationResponseDTO r;
+    r.jobId        = jobId_;
+    r.analysisType = AnalysisTypeDTO::STABILITY;
+    SPICEParseResult parsed;
+    if (deserialiseRequest(req, parsed, r, false, false, false, true)) {
+        CircuitSim sim;
+        sim.execMode = selectExecMode(precision_);
+        const auto freqs = parsed.hasSTB ? CircuitSim::acFrequencies(parsed.stbSweep, parsed.stbPoints, parsed.stbStart, parsed.stbStop)
+                                         : std::vector<double>{};
+        const std::string shared = parsed.hasSTB ? hierShared(parsed, parsed.stbProbe) : std::string();
+        if (!parsed.hasSTB)
+            r.errorDetail = "Stability needs .stb dec|oct|lin n fstart fstop probe.";
+        else if (freqs.empty())
+            r.errorDetail = ".stb needs a sweep (0 < fstart <= fstop).";
+        else if (!shared.empty())
+            r.errorDetail = shared;
+        else if (SolverStep dc = sim.solveDC(parsed.netlist); !dc.stats.converged)
+            r.errorDetail = "DC operating point failed before stability analysis: " + dc.stats.error_detail;
+        else {
+            const auto s = sim.solveStb(parsed.netlist, freqs, parsed.stbProbe);
+            r.errorDetail = s.error;
+            r.converged = s.error.empty();
+            r.extended.hasStb = r.converged;
+            r.extended.stb = {freqs, s.loopGain, s.tv, s.ti};
+            r.scaleName = "frequency";
+        }
+        r.backend = backendOf(sim, precision_);
+    }
+    finish(r);
+    return r;
+}
+
 // ── DC transfer function ──────────────────────────────────────────────────
 SimulationResponseDTO SessionImpl::runTF(const SimulationRequestDTO& req,
                                           const EngineCallbacks& /*cb*/) {

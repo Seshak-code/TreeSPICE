@@ -1315,6 +1315,46 @@ CircuitSim::solveAC(TensorNetlist &netlist, const std::vector<double> &freqs) {
   return out;
 }
 
+CircuitSim::StbResult CircuitSim::solveStb(TensorNetlist &netlist, const std::vector<double> &freqs, const std::string &probe) {
+  StbResult r;
+  ACSystem sys;
+  if (!acSystem(netlist, sys)) { r.error = "stb needs a converged DC operating point"; return r; }
+  const int n = sys.n;
+  const auto ev = acExcitation(netlist, probe);  // the probe alone, 1 V: the voltage injection
+  if (ev.empty()) { r.error = "stb probe '" + probe + "' is not a voltage source of the circuit"; return r; }
+  int total = 0, x = -1, y = -1, row = -1;
+  const auto blocks = branchSlots(netlist, total);
+  for (const auto &sl : blocks)
+    for (size_t i = 0; i < sl.blk->voltageSources.size(); ++i)
+      if (sl.blk->voltageSources[i].name == probe) {
+        x = sl.map(sl.blk->voltageSources[i].nodePositive) - 1;
+        y = sl.map(sl.blk->voltageSources[i].nodeNegative) - 1;
+        row = sl.vs + (int)i;
+      }
+  if (x < 0) { r.error = "stb probe '" + probe + "': its + node (the loop's input) is ground"; return r; }
+  std::vector<std::complex<double>> ei(total);  // 1 A into x: the current injection
+  ei[x] += netScale(netlist, x);
+  auto real2 = [n](const std::vector<std::complex<double>> &e) {
+    std::vector<double> b(2 * n);
+    for (int i = 0; i < n && i < (int)e.size(); ++i) b[i] = e[i].real(), b[i + n] = e[i].imag();
+    return b;
+  };
+  const auto bv = real2(ev), bi = real2(ei);
+  for (double f : freqs) {
+    const auto A = acMatrix(sys, 2.0 * M_PI * f, false);
+    const SolverResult sv = solveLinear(A, bv), si = solveLinear(A, bi);
+    if (!sv.converged || !si.converged) { r.error = "stb: the small-signal system is singular at " + std::to_string(f) + " Hz"; return r; }
+    auto at = [&](const SolverResult &s, int k) { return k < 0 ? std::complex<double>() : std::complex<double>(s.solution[k], s.solution[k + n]); };
+    const std::complex<double> vx = at(sv, x), vy = at(sv, y), ip = at(si, row);
+    const std::complex<double> tv = -vy / vx, one(1.0);
+    // T = (Tv Ti - 1)/(Tv + Ti + 2) times (1 - ip)/(1 - ip): no 0/0 where the loop's input draws no current (ip = 1)
+    r.tv.push_back(tv);
+    r.ti.push_back(ip / (one - ip));
+    r.loopGain.push_back((tv * ip - (one - ip)) / ((tv + 2.0) * (one - ip) + ip));
+  }
+  return r;
+}
+
 CircuitSim::NoiseResult CircuitSim::solveNoise(TensorNetlist &netlist, const std::vector<double> &freqs,
                                                int outNode, int refNode, const std::string &inputSource) {
   NoiseResult r;

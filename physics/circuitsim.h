@@ -1250,6 +1250,15 @@ public:
   // V and I sources. Solved as the real 2N system [[G, -wC], [wC, G]] by the
   // contraction solver (one plan for the sweep). Returns x(f): nodes, then branches;
   // empty if solveDC() has not converged on this netlist.
+  // stb: the loop gain at a probe (a voltage source in the loop, its + node toward the loop's input x, its - the
+  // return y) by Middlebrook's double injection on one AC system: the probe driven by 1 V gives Tv = -V(y)/V(x);
+  // 1 A into x gives the probe's current ip and Ti = ip/(1 - ip); T = (Tv Ti - 1)/(Tv + Ti + 2), exact for a single
+  // loop at any probe point (its loading included)
+  struct StbResult {
+    std::vector<std::complex<double>> loopGain, tv, ti;
+    std::string error;
+  };
+  StbResult solveStb(TensorNetlist &netlist, const std::vector<double> &freqs, const std::string &probe);
   std::vector<std::vector<std::complex<double>>> solveAC(TensorNetlist &netlist,
                                                          const std::vector<double> &freqs);
 
