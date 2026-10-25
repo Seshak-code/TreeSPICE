@@ -1219,6 +1219,21 @@ int main() {
         }
     }
 
+    {   // .tran tmax caps the step (it was read and dropped): a 10 us run of a held source takes ~50 steps by
+        // default (min(tstep, tstop/50) = 0.2u, ngspice's), at least 200 with tmax = 50n
+        auto steps = [](const std::string& tran) {
+            auto engine = ISimulationEngine::create();
+            SimulationRequestDTO req;
+            req.source.payload = "* tmax\nV1 1 0 DC 1\nR1 1 0 1k\n" + tran + "\n.end\n";
+            req.transient.keepPoints = true;
+            const auto r = engine->createSession()->runTransient(req, {}, nullptr);
+            return r.converged ? (int)r.waveformPoints.size() : -1;
+        };
+        const int plain = steps(".tran 1u 10u"), capped = steps(".tran 1u 10u 0 50n");
+        check(plain > 0 && plain < 80 && capped >= 200, ".tran tmax caps the step (" + std::to_string(plain) + " steps, " +
+                                                        std::to_string(capped) + " with tmax = 50n)");
+        check(steps(".tran 1u 10u 0 0") < 0, ".tran tmax <= 0 is an error");
+    }
     {   // Monte Carlo: ngspice's statistical functions (agauss, gauss, aunif), seeded by .options seed, drawn per instance
         // inside a subcircuit (mismatch); a sigma of 0 is the nominal value
         std::printf("\n== statistical functions ==\n");

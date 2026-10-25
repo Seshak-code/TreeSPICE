@@ -59,6 +59,7 @@ struct SPICEParseResult {
     double        tranStop = 0.0;
     double        tranStep = 0.0;
     double        tranStart = 0.0;
+    double        tranMax = 0.0;     // .tran's tmax (0: none, so min(tstep, tstop/50) as ngspice)
     bool          tranUIC = false;   // .tran ... UIC: skip the DC operating point
     // .dc SRC start stop step [SRC2 ...]: V/I source, resistor or TEMP; the first is the innermost sweep
     struct DcSweep { std::string name; double start = 0.0, stop = 0.0, step = 0.0; };

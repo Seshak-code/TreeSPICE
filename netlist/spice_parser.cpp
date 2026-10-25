@@ -646,6 +646,10 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                         result_.tranStop = parseValue(tok[2]);
                         // .tran tstep tstop [tstart [tmax]] [UIC]
                         if (tok.size() >= 4 && isValue(tok[3])) result_.tranStart = parseValue(tok[3]);
+                        if (tok.size() >= 5 && isValue(tok[3]) && isValue(tok[4])) {
+                            result_.tranMax = parseValue(tok[4]);
+                            if (!(result_.tranMax > 0.0)) throw std::runtime_error(".tran tmax must be > 0");
+                        }
                     }
                     for (const auto& t : tok)
                         if (toUpper(t) == "UIC") result_.tranUIC = true;

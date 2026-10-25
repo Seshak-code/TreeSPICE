@@ -907,7 +907,7 @@ std::string CircuitSim::beginTransient(TensorNetlist &netlist, double step, bool
   // min(tstep, tstop/100)/100, then doubling under LTE rejection. Starting at tstep
   // sampled a 100 MHz sine only at its zeros and stepped an LC tank one period at a
   // time; LTE has no history to reject the first steps (QA3 BUG-6).
-  tran_.hMax = stop > 0.0 ? std::min(step, stop / 50.0) : step;
+  tran_.hMax = tranMaxStep > 0.0 ? tranMaxStep : stop > 0.0 ? std::min(step, stop / 50.0) : step;  // ngspice: TMAX when given
   tran_.h = (stop > 0.0 ? std::min(step, stop / 100.0) : step) / 100.0;
   tranCorners(netlist);
   // A line is read TD back: a step longer than TD would need the value it is solving for
