@@ -60,8 +60,12 @@ static bool applyCornerAndDC(
     acutesim::physics::CornerConfig corner;
     corner.name           = req.corner.processCorner;
     corner.temperatureC   = req.corner.temperature;
-    corner.voltageScale   = req.corner.supplyVoltage / 1.8;
-    sim.applyCorner(runNetlist, corner);
+    corner.voltageScale   = req.corner.supplyVoltage / 1.8;  // ponytail: nominal supply 1.8 V (the DTO's default)
+    if (const std::string e = sim.applyCorner(runNetlist, corner); !e.empty()) {
+        errOut.success = false;
+        errOut.errorDetail = e;
+        return false;
+    }
 
     dcOut = sim.solveDC(runNetlist);
     if (!dcOut.stats.converged) {
@@ -99,8 +103,12 @@ static SimulationResponseDTO fourierHandler(
     acutesim::physics::CornerConfig corner;
     corner.name           = req.corner.processCorner;
     corner.temperatureC   = req.corner.temperature;
-    corner.voltageScale   = req.corner.supplyVoltage / 1.8;
-    sim.applyCorner(runNetlist, corner);
+    corner.voltageScale   = req.corner.supplyVoltage / 1.8;  // ponytail: nominal supply 1.8 V (the DTO's default)
+    if (const std::string e = sim.applyCorner(runNetlist, corner); !e.empty()) {
+        SimulationResponseDTO r;
+        r.errorDetail = e;
+        return r;
+    }
 
     // Extract stopTime from parameters (default 1ms)
     double stopTime = 1e-3;

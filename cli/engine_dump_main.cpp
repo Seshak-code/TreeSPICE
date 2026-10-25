@@ -18,6 +18,7 @@
 #include "engine_api/simulation_session.h"
 #include "engine_api/simulation_dto.h"
 #include "engine_api/engine_callbacks.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -28,11 +29,19 @@ using namespace acutesim;
 using namespace acutesim::compute::orchestration;
 
 int main(int argc, char** argv) {
-    if (argc < 4) return 2;
+    static const char* modes[] = {"dc", "tran", "ac", "noise", "pz", "sens", "tf"};
+    const std::string mode = argc >= 4 ? argv[3] : "", be = argc >= 3 ? argv[2] : "";
+    const bool known = std::any_of(std::begin(modes), std::end(modes), [&](const char* m) { return mode == m; });
+    if (argc < 4 || !known || (be != "cpu" && be != "gpu") || (mode == "tran" && argc < 6)) {
+        std::fprintf(stderr, "usage: acutesim_engine_dump <netlist> <cpu|gpu> <dc|tran|ac|noise|pz|sens|tf> [step stop]\n"
+                             "  (tran needs step and stop)\n");
+        return 2;
+    }
     std::ifstream f(argv[1]);
+    if (!f) { std::fprintf(stderr, "acutesim_engine_dump: cannot read %s\n", argv[1]); return 2; }
     std::stringstream ss; ss << f.rdbuf();
     auto engine = ISimulationEngine::create();
-    engine->setPrecisionMode(std::string(argv[2]) == "cpu" ? PrecisionMode::Native_F64
+    engine->setPrecisionMode(be == "cpu" ? PrecisionMode::Native_F64
                                                          : PrecisionMode::Mixed);
     auto session = engine->createSession();
     SimulationRequestDTO req;
@@ -42,7 +51,6 @@ int main(int argc, char** argv) {
     // The harness runs a copy of the netlist; TREESPICE_BASEDIR points .include/.lib at the original directory.
     if (const char* d = std::getenv("TREESPICE_BASEDIR")) req.source.baseDir = d;
     EngineCallbacks cb;
-    std::string mode = argv[3];
     SimulationResponseDTO r;
     if (mode == "tran") {
         req.transient.stepSizeS = std::atof(argv[4]);

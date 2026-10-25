@@ -4,7 +4,7 @@
     python3 tests/ibmpg_diff.py [-k ibmpg3] [--mode cpu] [--atol 1e-4]
 
 Reads datasets/ibmpg/ibmpgN.{spice,solution}.bz2 (git-ignored; see ENGINE_HANDOFF.md), runs the engine's
-DC operating point (build/acutesim_engine/acutesim_engine_dump) and compares every node of the solution
+DC operating point (build/acutesim_engine_dump) and compares every node of the solution
 file. The solutions print 6 significant digits, so the default tolerance is 100 uV absolute. Exit 1 on FAIL.
 """
 import argparse, bz2, glob, os, re, resource, subprocess, sys, tempfile, time

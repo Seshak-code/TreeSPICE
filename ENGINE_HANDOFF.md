@@ -229,6 +229,17 @@ then the two Roadmap sections it points to. Everything below was verified by run
   - **Parser memory:** no port names stored for X cards on the hierarchical path, and lines move through
     includes/FREQ/numparam. 1e9 gate: 2.2 s, 498 → 328 MB.
   - **Not done:** an automatic hierarchical mode (it changes what a run without `.save` stores: owner's call).
+- **Update 2026-10-24 (Claude Code, codebase review, TreeSPICE PR #25 `mac/review` + OpenVLSI PR #22):** seven
+  read-only agents reviewed both repos; every finding verified, every "unused" checked in both (OpenVLSI consumes
+  much of this API: the registry, `corner_config.h`, `portable_rng.h`, the builders in `circuit.h`).
+  - **Fixed here:** singular solves returned zeros callers took for results (now no solution); DC Newton zeroed
+    NaN; `applyCorner` ran every process corner as TT (now `[[nodiscard]]` reason); Monte Carlo cancel was
+    success (one `finish()` for all entry points); `TransientConfigDTO` defaults overrode `.tran`; the failure
+    audit missed MOSFET/OSDI/C; ~1,150 dead lines.
+  - **Datasets:** `datasets/` here is a symlink to `Coding Projects/CuteApp/datasets` (git-ignored, downloaded).
+  - **Next:** delete the engine headers only OpenVLSI tests use (`statistical_engine.h`, `sensitivity_analysis.h`,
+    `fpu_control.h`, `emulated_f64.h`, `graph_utils.h`, `netlist_diff.h`) with those tests; benchmark
+    `assembleFast` vs `createCsr`; then the bump of OpenVLSI to the merge commit.
 - **Status of the plan:** Roadmap Phase 1 (Foundations) is done. See `Roadmap.md` →
   "⚙️ ENGINE FEATURE LIST & VERIFIED SUPPORT STATUS" (what works, by device/analysis, with ✅/⚠️/❌/🚫/❓)
   and "🎯 END-TO-END GOAL & ENGINE SCALE PLAN" (phases and gates).
@@ -316,8 +327,9 @@ pointer in OpenVLSI and run its integration suites there.
 
 ```bash
 cmake -S . -B build && cmake --build build -j10
-ctest --test-dir build      # test_engine_fixes, test_contraction_solver, test_convergence_engine
-TMPDIR=/private/tmp/claude-502 python3 tests/ngspice_diff/run_diff.py   # ~2 min; needs ngspice (brew install ngspice)
+ctest --test-dir build      # test_engine_fixes, test_contraction_solver, test_convergence_engine, test_transient_session
+python3 tests/ngspice_diff/run_diff.py   # ~2 min; needs ngspice (brew install ngspice)
+python3 tests/cli_check.py              # the treespice CLI
 python3 tests/xyce_diff.py              # 0 FAIL expected; needs datasets/xyce
 python3 tests/ibmpg_diff.py -k ibmpg2   # needs datasets/ibmpg
 ```
@@ -329,7 +341,7 @@ test_parallel_monte_carlo, test_driver_swap, test_flow and test_simulation.
 
 - `tests/test_engine_fixes.cpp` = one regression check per fix (analytic/hand-derived references,
   CPU and GPU modes). Add a check there for every engine fix.
-- `build/acutesim_engine_dump <netlist> <cpu|gpu> <dc|tran|ac|noise> [step stop]` prints
+- `build/acutesim_engine_dump <netlist> <cpu|gpu> <dc|tran|ac|noise|pz|sens|tf> [step stop]` prints
   machine-readable waveforms (node order = first appearance, subckt bodies excluded).
 - **Golden DB updates:** never accept `--update` wholesale. Run it in a scratch copy, splice only the
   entries whose change you have derived physically, and say why in the commit (see commits

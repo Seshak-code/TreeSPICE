@@ -4,9 +4,11 @@
 on a contraction-tree direct solver.
 
 > **Status: in development.** TreeSPICE solves standard SPICE netlists (DC, sweeps, transient,
-> AC, noise) and is checked against ngspice and Xyce on every change. It is not yet a
-> production simulator: device-model coverage stops at MOSFET level 1, and the GPU path is
-> still being built. Everything below marked *planned* or *open* does not exist yet.
+> AC, noise, poles/zeros, sensitivity, transfer function) and is checked against ngspice and
+> Xyce on every change. Its devices match ngspice's except the models listed under *Not yet
+> supported* (each an explicit error); `.options hier` simulates 1e9-cell arrays
+> (`docs/scale-s3.md`). The GPU path is still being built. Everything below marked *planned* or
+> *open* does not exist yet.
 
 TreeSPICE is the simulation kernel of the OpenVLSI chip-design environment, developed here as a standalone library. Its long-term
 goal is one application where you can design an SoC, attach RAM, run firmware on it and see
@@ -76,26 +78,28 @@ honest expected scaling, not a claim of beating it.
 | Area | Supported |
 |---|---|
 | Analyses | `.op`, `.dc` sweeps, `.tran` (trapezoidal, LTE step control, breakpoints, `uic` / `.ic`), `.ac`, `.noise`, `.pz` (poles/zeros, dense, up to 500 unknowns), `.sens` (DC adjoint sensitivity to top-level R, V and I values; device parameters and AC `.sens` are reported as not supported) |
-| Elements | R, C, L, K (mutual inductance), V/I sources (DC, PULSE, SIN, AC), E/F/G/H controlled sources, J (Shichman–Hodges), X subcircuits (nested, local node scoping) |
+| Elements | R, C, L, K (mutual inductance), V/I sources (DC, PULSE, SIN, PWL, EXP, SFFM, AM, AC), T and LTRA transmission lines, XSPICE A devices, E/F/G/H controlled sources, J (Shichman–Hodges), X subcircuits (nested, local node scoping) |
 | Diode | SPICE level 1: IS, N, RS (internal node), CJO/VJ/M/FC, TT, BV/IBV breakdown, instance AREA/M |
 | BJT | Gummel–Poon: IS, BF/BR, NF/NR, VAF/VAR, IKF/IKR, ISE/NE, ISC/NC, RB/RC/RE (internal nodes), CJE/CJC with XCJC, CJS (substrate node), TF/XTF/VTF/ITF, TR, AREA |
-| MOSFET | Level 1 complete: source/drain swap, body effect, bulk junctions, Meyer gate charge, overlap and junction capacitances |
+| MOSFET | Levels 1, 2, 3 and 6 built in (source/drain swap, body effect, bulk junctions, gate charge, overlap and junction capacitances); LEVEL 8/49 (BSIM3), 14/54 (BSIM4) and 10/58 (BSIM-SOI) cards run through OSDI |
 | Compiled Verilog-A | BSIM4, BSIM-CMG and other OpenVAF models through OSDI (`.osdi <file>`, ngspice's `N` element): DC, transient, AC, noise (flicker included) |
 | Netlist | SPICE syntax with SI suffixes, `.model`, `.param` substitution, `.subckt`, `.include`, `.lib <file> <corner>`. Unknown or unsupported cards are **hard errors**, never silently dropped |
 | Convergence | Plain Newton first, then ngspice's dynamic gmin stepping, then source stepping; gmin across each PN junction as in ngspice; responses fail closed on NaN or non-convergence |
 | Determinism | No `-ffast-math`, round-to-nearest enforced, deterministic parallel solve |
 
-**Not yet supported:** `.param` arithmetic expressions, bias-dependent base resistance (IRB/RBM), excess phase (PTF), flicker noise (KF) of built-in devices, OSDI models that keep state or use `$limit`,
-EXP/PWL/SFFM sources, transmission lines, PZ analysis. The GPU mode currently runs the CPU
-path.
+**Not yet supported** (explicit errors): CPL/TXL lines, BSIM1/2, HiSIM, BSIM3 older than 3.2, the
+exact BSIM4 v5–v7 variants, MESFET LEVEL 2–4 (MESA), and OSDI models that use `$limit`. The GPU
+mode runs the CPU path.
 
 ### How it is verified
 
 Correctness is established by **running** reference simulators. Checklists do not count.
 
-- **ngspice differential harness:** over 100 netlists covering op, dc, tran, ac and noise.
-  Each one is compared waveform-by-waveform against ngspice, on both the CPU and GPU modes.
-- **Xyce regression subset:** 78 device and analysis cases, 0 failures.
+- **ngspice differential harness** (`tests/ngspice_diff`): 1234 comparisons pass, 0 fail, across
+  op, dc, tran, ac, noise, pz, sens and tf, waveform by waveform against ngspice 47 on the CPU and
+  GPU modes.
+- **Xyce regression subset** (`tests/xyce_diff.py`): 193 cases pass; the rest are Xyce-only
+  dialect or analyses it skips, reported by category.
 - **IBM power-grid benchmarks** (Nassif, ASP-DAC 2008): 6 of 6 match the published
   solutions. The largest, ibmpg6, solves in 37 s.
 - Every engine fix adds a regression check derived from an analytic or hand-derived reference.
@@ -268,15 +272,18 @@ at `acutesim_engine/`, using `add_subdirectory(acutesim_engine)` and linking `ac
 ```
 engine_api/    public API: ISimulationEngine, sessions, DTOs, callbacks
 autodiff/      Dual-number forward-mode AD (device Jacobians)
-math/          contraction solver, FPU control, integration methods
+math/          contraction solver, CSR assembly, integration methods
 netlist/       SPICE parser, circuit model, canonical topology hash
 physics/       stateless device models, MNA stamps, KCL audit
 tensors/       structure-of-arrays storage of the linear elements; device-model resolvers
 solvers/       DC / transient / AC / noise, LTE control, analysis registry
-infrastructure/  scheduling, tracing, Monte Carlo
+infrastructure/  instance scheduling, solver traces, post-processing, hardware probe
+osdi/          OSDI (compiled Verilog-A) device loader
+bench/         solver and scale benchmarks (scale_probe, s3_sram.py, klu_bench)
+docs/          design notes (scale-s3.md)
 cli/           treespice (the command-line simulator), acutesim_engine_dump (machine-readable waveforms)
 tests/         C++ suites, ngspice / Xyce / IBM power-grid differential harnesses
-engine_impl.*  session API (.op/.dc/.tran/.ac/.noise)
+engine_impl.*  session API (.op/.dc/.tran/.ac/.noise/.pz/.sens/.tf, Monte Carlo, .step)
 ```
 
 ## References

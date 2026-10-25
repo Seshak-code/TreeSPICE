@@ -12,7 +12,6 @@
 
 #include <sstream>
 
-#include "../infrastructure/safe_utils.h"
 #include "../math/pole_zero.h"
 #include "../physics/circuitsim.h"
 #include "../physics/device_physics.h"
@@ -191,21 +190,11 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
 
         // Topology changed: drop history tied to the old unknown vector
         prevVoltages_.clear();
-        // Gap 4: Reset seeder history on topology change
-        neuralSeeder_.reset();
       }
 
-      // Tensor-contraction direct solver for every circuit (the legacy
-      // treewidth / MPO / Schur routes solved a voltage-only system)
       SolverResult result = solveLinear(matrix, rhsVector);
       lastPivot = result.smallestPivot;
       lastPivotRow = result.rankDeficientRow;
-      if (iteration == 0 && si == 0) {
-        std::cerr << "[TN-ROUTE] CONTRACTION (unknowns=" << nTot
-                  << ", branches=" << nTot - netlist.numGlobalNodes
-                  << ", fronts=" << contractionPlan_->fronts.size()
-                  << ", levels=" << contractionPlan_->levels.size() << ")\n";
-      }
       // Phase 2.9: Capture pivot diagnostics from LU
       if (result.smallestPivot < smallestPivotOverall) {
         smallestPivotOverall = result.smallestPivot;
@@ -227,9 +216,11 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
       }
 
       std::vector<double> v_new = result.solution;
-
-      // NaN Protection using SafeUtils
-      SafeUtils::sanitize_vector(v_new, 0.0);
+      if (!std::all_of(v_new.begin(), v_new.end(), [](double v) { return std::isfinite(v); })) {
+        final_kcl_error = 1e9;  // a non-finite update is a failed step, never zeroed into a "solution"
+        total_iterations += iteration + 1;
+        break;
+      }
 
 
       // Check 1 + 2: Voltage Convergence AND Physical KCL Accuracy
@@ -503,8 +494,6 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
   if (converged) {
     acceptSwitches(netlist);
     prevVoltages_ = voltageEstimate;
-    neuralSeeder_.recordSolution(voltageEstimate, final_kcl_error,
-                                 total_iterations);
   }
 
   lastSolution_ = voltageEstimate;  // full x (incl. branch currents) seeds transient
@@ -1318,6 +1307,7 @@ CircuitSim::solveAC(TensorNetlist &netlist, const std::vector<double> &freqs) {
   std::vector<std::vector<std::complex<double>>> out;
   for (double f : freqs) {
     const SolverResult s = solveLinear(acMatrix(sys, 2.0 * M_PI * f, false), b);
+    if (!s.converged) return {};  // singular at f: no AC result (the caller reports it)
     std::vector<std::complex<double>> x(n);
     for (int i = 0; i < n && i + n < (int)s.solution.size(); ++i) x[i] = {s.solution[i], s.solution[i + n]};
     out.push_back(std::move(x));
@@ -1836,6 +1826,7 @@ bool CircuitSim::coldStartSweep(TensorNetlist &netlist, double totalTime,
       Csr_matrix A = matrixBuilder.createCsr();
 
       subResult = solveLinear(A, rhsVector);
+      if (!subResult.converged) break;  // singular: this micro-step fails
 
       std::vector<double> v_new = subResult.solution;
 
@@ -1947,15 +1938,13 @@ SolverStep CircuitSim::stepTransient(TensorNetlist &netlist, double timeStep,
       const int nTot = systemSize(netlist);
       std::vector<double> nrEstimate = transientSeed(netlist, nTot);
 
-      // Gap 4: Neural seeder dV/dt extrapolation for transient steps.
-      // Uses the two most recent converged solutions to predict the next state.
-      if (!prevVoltages_.empty() && prevVoltages_.size() == nrEstimate.size()) {
-        auto seed =
-            neuralSeeder_.predict(nrEstimate, prevVoltages_, actualTimeStep);
-        if (!seed.empty()) {
-          nrEstimate = std::move(seed);
+      // Newton starts from the two last accepted solutions' dV/dt, extrapolated over this step (the step
+      // clamped to 1 kV/s: no runaway from a fast edge)
+      if (!prevVoltages_.empty() && prevVoltages_.size() == nrEstimate.size() && actualTimeStep > 0.0)
+        for (size_t i = 0; i < nrEstimate.size(); ++i) {
+          const double maxStep = 1000.0 * actualTimeStep;
+          nrEstimate[i] += std::clamp(nrEstimate[i] - prevVoltages_[i], -maxStep, maxStep);
         }
-      }
 
       // ─── TAA: History Rejection ──────────────────────────────────────
       // Reject polynomial predictors for nodes undergoing violent switching.
@@ -1981,10 +1970,8 @@ SolverStep CircuitSim::stepTransient(TensorNetlist &netlist, double timeStep,
 
         Csr_matrix A = matrixBuilder.createCsr();
 
-        // --- Solver Strategy Optimization ---
-        // LU is O(N^3) but robust for non-symmetric active circuits.
-        // PCG is O(N*sqrt(K)) but requires SPD (Resistor/Capacitor meshes).
         lastResult = solveLinear(A, rhsVector);
+        if (!lastResult.converged) break;  // singular: a failed attempt (the step halves)
 
         std::vector<double> v_new = lastResult.solution;
 
@@ -2115,10 +2102,7 @@ SolverStep CircuitSim::stepTransient(TensorNetlist &netlist, double timeStep,
             {lastResult.iterations, lastResult.finalResidual, false},
             netlist.globalBlock.topologyHash};
 
-  // Gap 4: Record converged transient solution for neural seeder
-  prevVoltages_ = finalVoltages;
-  neuralSeeder_.recordSolution(finalVoltages, lastResult.finalResidual,
-                               lastResult.iterations);
+  prevVoltages_ = finalVoltages;  // the dV/dt seed of the next step
   lastSolution_ = finalVoltages;                    // full x seeds the next step
   std::vector<double> branches(finalVoltages.begin() + std::min<size_t>(netlist.numGlobalNodes, finalVoltages.size()),
                                finalVoltages.begin() + std::min<size_t>(netlist.numGlobalNodes + branchCount(netlist), finalVoltages.size()));
