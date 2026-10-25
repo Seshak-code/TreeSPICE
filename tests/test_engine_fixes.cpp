@@ -17,6 +17,7 @@
 
 #include <array>
 #include <cmath>
+#include <map>
 #include <chrono>
 #include <complex>
 #include <cstdio>
@@ -1216,6 +1217,60 @@ int main() {
             check(near(zout(""), 1e3, 1e-6) && near(zout("G1 2 0 2 0 -2m\n"), -1e3, 1e-6),
                   ".tf i(Vm) output impedance: 1k (passive), -1k (negative-resistance load)");
         }
+    }
+
+    {   // .tran tmax caps the step (it was read and dropped): a 10 us run of a held source takes ~50 steps by
+        // default (min(tstep, tstop/50) = 0.2u, ngspice's), at least 200 with tmax = 50n
+        auto steps = [](const std::string& tran) {
+            auto engine = ISimulationEngine::create();
+            SimulationRequestDTO req;
+            req.source.payload = "* tmax\nV1 1 0 DC 1\nR1 1 0 1k\n" + tran + "\n.end\n";
+            req.transient.keepPoints = true;
+            const auto r = engine->createSession()->runTransient(req, {}, nullptr);
+            return r.converged ? (int)r.waveformPoints.size() : -1;
+        };
+        const int plain = steps(".tran 1u 10u"), capped = steps(".tran 1u 10u 0 50n");
+        check(plain > 0 && plain < 80 && capped >= 200, ".tran tmax caps the step (" + std::to_string(plain) + " steps, " +
+                                                        std::to_string(capped) + " with tmax = 50n)");
+        check(steps(".tran 1u 10u 0 0") < 0, ".tran tmax <= 0 is an error");
+    }
+    {   // Monte Carlo: ngspice's statistical functions (agauss, gauss, aunif), seeded by .options seed, drawn per instance
+        // inside a subcircuit (mismatch); a sigma of 0 is the nominal value
+        std::printf("\n== statistical functions ==\n");
+        auto deck = [](const std::string& seed) {
+            return "* mc\n.param x = agauss(1k, 100, 1)\n.param g = gauss(1k, 0.1, 1)\n.param u = aunif(1k, 100)\n"
+                   ".param off = agauss(1k, 100, 0)\nR1 a 0 {x}\nI1 0 a 1m\nR2 e 0 {g}\nI2 0 e 1m\nR3 f 0 {u}\nI3 0 f 1m\n"
+                   "R4 d 0 {off}\nI4 0 d 1m\n.subckt rr p n\nR1 p n {agauss(1k, 100, 1)}\n.ends\nX1 b 0 rr\nX2 c 0 rr\nI5 0 b 1m\nI6 0 c 1m\n"
+                   ".options seed=" + seed + "\n.op\n";
+        };
+        auto volts = [&](const std::string& seed) {
+            const auto r = run(PrecisionMode::Native_F64, deck(seed));
+            std::map<std::string, double> v;
+            for (size_t k = 0; r.converged && k < r.nodeNames.size(); ++k) v[r.nodeNames[k]] = V(r, (int)k + 1);
+            return v;
+        };
+        const int n = 400;
+        std::map<std::string, double> sum, sum2;
+        bool distinct = true, nominal = true, bounded = true;
+        for (int k = 1; k <= n; ++k) {
+            auto v = volts(std::to_string(k));
+            for (const char* name : {"a", "b", "c", "e", "f"}) sum[name] += v[name], sum2[name] += v[name] * v[name];
+            distinct = distinct && v["b"] != v["c"];
+            nominal = nominal && v["d"] == 1.0;
+            bounded = bounded && v["f"] >= 0.9 && v["f"] <= 1.1;
+        }
+        auto mean = [&](const char* k) { return sum[k] / n; };
+        auto sd = [&](const char* k) { return std::sqrt(sum2[k] / n - mean(k) * mean(k)); };
+        bool normal = true;
+        for (const char* k : {"a", "b", "c", "e"})  // N(1 V, 0.1 V): mean within 3 sigma / sqrt(n), sigma within 15%
+            normal = normal && near(mean(k), 1.0, 0.015) && near(sd(k), 0.1, 0.015);
+        check(normal, "agauss and gauss over 400 seeds: mean 1 V and sigma 0.1 V (a " + std::to_string(mean("a")) + " ± " +
+                          std::to_string(sd("a")) + ", mismatch b " + std::to_string(sd("b")) + ")");
+        check(bounded && near(mean("f"), 1.0, 0.01) && near(sd("f"), 0.1 / std::sqrt(3.0), 0.01), "aunif: uniform in 1 V ± 0.1 V");
+        check(distinct, "two equal instances draw their own values (mismatch is per instance)");
+        check(nominal, "a sigma of 0 is the nominal value");
+        check(volts("7") == volts("7") && volts("7")["a"] != volts("8")["a"], "a seed repeats its draws; another seed changes them");
+        check(!run(PrecisionMode::Native_F64, deck("0")).converged, ".options seed=0 is an error");
     }
 
     std::printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASSED", g_fail, g_fail == 1 ? "" : "s");

@@ -51,11 +51,8 @@ const FnInfo kFns[] = {
     {"ACOSH", Expr::ACOSH, 1, 1}, {"ATANH", Expr::ATANH, 1, 1}, {"U", Expr::U, 1, 1}, {"URAMP", Expr::URAMP, 1, 1},
     {"POW", Expr::POW, 2, 2}, {"PWR", Expr::PWR, 2, 2}, {"ATAN2", Expr::ATAN2, 2, 2}, {"HYPOT", Expr::HYPOT, 2, 2},
     {"MIN", Expr::MIN, 2, 2}, {"MAX", Expr::MAX, 2, 2},
-    // Statistical functions return their nominal value: no Monte Carlo yet.
-    // ponytail: agauss/gauss/aunif/unif/limit(nom, var) are deterministic (nominal); a corner
-    // that switches them on (e.g. sky130 mismatch with mc_mm_switch=1) is not random.
-    {"AGAUSS", Expr::NOMINAL, 2, 3}, {"GAUSS", Expr::NOMINAL, 2, 3}, {"AUNIF", Expr::NOMINAL, 2, 3},
-    {"UNIF", Expr::NOMINAL, 2, 3},
+    // Statistical: random while a netlist expands (Random), else nominal
+    {"AGAUSS", Expr::AGAUSS, 2, 3}, {"GAUSS", Expr::GAUSS, 2, 3}, {"AUNIF", Expr::AUNIF, 2, 3}, {"UNIF", Expr::UNIF, 2, 3},
     {"LIMIT", Expr::LIMIT, 3, 3},  // clamp(x, lo, hi); the 2-argument limit(nom, var) is NOMINAL
     {"TABLE", Expr::TABLE, 5, 1000},  // table(x, x0,y0, x1,y1, ...): what `E.. TABLE {x} = (x0,y0) ...` becomes
 };
@@ -201,7 +198,7 @@ private:
             if (f != i.name) continue;
             Expr::F fn = i.f;
             size_t lo = i.lo;
-            if (fn == Expr::LIMIT && a.size() == 2) { fn = Expr::NOMINAL; lo = 2; }  // limit(nominal, variation)
+            if (fn == Expr::LIMIT && a.size() == 2) { fn = Expr::LIMIT2; lo = 2; }  // limit(nominal, variation)
             if (fn == Expr::PWR && c_.beh) fn = Expr::PWRS;
             if (a.size() < lo || a.size() > i.hi || (fn == Expr::TABLE && a.size() % 2 == 0))
                 fail(f + "(): wrong argument count");
@@ -628,6 +625,8 @@ private:
         return it == subckts_.end() ? nullptr : &it->second;
     }
     std::map<std::string, std::string> specialized_;  // key -> emitted subckt name
+    int serial_ = 0;                                  // the emitted specializations' numbers
+    std::set<std::string> drew_;                      // keys whose bodies drew random numbers: never the plain name again
     std::map<const Subckt *, Scope> bodyParams_;      // a definition's body .params (their names: X card checks)
     Scope global_;
     Lines defs_;  // specialized .subckt definitions and their hoisted .model cards
@@ -776,7 +775,8 @@ private:
         // Generated names use '|', which SPICE names never hold (sky130's hold "__"): the parser's
         // messages map them back to the user's names (SPICEParser::parse, fail). Only a key with no
         // parameters keeps the plain name: body-.param subckts (sky130) differ by `given` alone
-        auto [spec, isNew] = specialized_.emplace(key, key == s.name && !s.parent ? s.name : s.name + "|" + std::to_string(specialized_.size() + 1));
+        const bool plain = key == s.name && !s.parent && !drew_.count(key);
+        auto [spec, isNew] = specialized_.emplace(key, plain ? s.name : s.name + "|" + std::to_string(++serial_));
         sc.tag = spec->second;
         if (isNew) {
             for (const auto &[bn, bl] : s.body) collectParams(bl, sc);  // body .params (any order)
@@ -788,13 +788,24 @@ private:
                     if (const size_t dot = m.rfind('.'); dot != std::string::npos)  // binned family NAME.N:
                         models[m.substr(0, dot)] = spec->second + "|" + m.substr(0, dot);  // devices name NAME
                 }
-            std::string hdr = ".subckt " + spec->second;
-            for (const auto &p : s.ports) hdr += " " + p;
+            const uint64_t drawn = rng ? rng->draws : 0;
             Lines body = walk(s.body, sc, spec->second, &models, &s, mult);
             errLine_ = n;
+            // a body that drew random numbers (mismatch) is this instance's own: the next equal instance draws anew.
+            // ponytail: one specialization per such instance; fine to ~10^5 devices, a per-instance parameter table beyond
+            const std::string emitted = spec->second;
+            if (rng && rng->draws != drawn) {
+                drew_.insert(key);
+                specialized_.erase(spec);
+            }
+            std::string hdr = ".subckt " + emitted;
+            for (const auto &p : s.ports) hdr += " " + p;
             defs_.push_back({s.body.empty() ? n : s.body.front().first, hdr});
             defs_.insert(defs_.end(), body.begin(), body.end());
             defs_.push_back({s.body.empty() ? n : s.body.back().first, ".ends"});
+            std::string out;
+            for (size_t i = 0; i + 1 < hw.size(); ++i) out += hw[i] + " ";
+            return out + emitted;
         }
         std::string out;
         for (size_t i = 0; i + 1 < hw.size(); ++i) out += hw[i] + " ";
@@ -816,9 +827,26 @@ std::string text(const Expr &e) {
     return out;
 }
 
+thread_local Random *rng = nullptr;
+
+double Random::normal() {
+    ++draws;
+    // Box-Muller from two uniforms in (0, 1]: exact to the generator's 53 bits
+    const double u1 = (double)((gen() >> 11) + 1) * 0x1.0p-53, u2 = (double)(gen() >> 11) * 0x1.0p-53;
+    return std::sqrt(-2.0 * std::log(u1)) * std::cos(6.283185307179586 * u2);
+}
+
+double Random::uniform() {
+    ++draws;
+    return (double)(gen() >> 11) * 0x1.0p-52 - 1.0;
+}
+
 std::vector<std::pair<int, std::string>> expand(std::vector<std::pair<int, std::string>> lines, int &errLine, double tempC,
-                                                const std::map<std::string, double> &overrides) {
+                                                const std::map<std::string, double> &overrides, uint64_t seed) {
     temperC = tempC;
+    Random r{std::mt19937_64(seed)};
+    rng = &r;
+    struct Done { ~Done() { rng = nullptr; } } done;  // also when the expansion throws
     return Expander(errLine, overrides).run(lines);  // run moves the lines into the top level and the bodies
 }
 

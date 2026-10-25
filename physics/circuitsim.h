@@ -366,6 +366,7 @@ public:
   bool arbiterInitialized = false;
   std::unique_ptr<IIntegrationMethod> integrator;
   ExecutionMode execMode = ExecutionMode::TENSOR_SOA_SIMD;
+  double tranMaxStep = 0.0;  // .tran's tmax: the largest step (0: min(tstep, tstop/50), ngspice's default)
 
   // CSR pattern cache (Sparse Merge — Phase D5): rebuilt when a stamp falls
   // outside it (the topology hash ignores sources and node numbering)

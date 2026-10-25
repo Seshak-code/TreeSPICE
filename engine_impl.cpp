@@ -730,6 +730,7 @@ SimulationResponseDTO SessionImpl::dispatch_tran_internal(const SimulationReques
 
     CircuitSim sim;
     sim.execMode = selectExecMode(precision_);
+    sim.tranMaxStep = parsed.tranMax;
 
     SimulationResponseDTO result;
     uint64_t stepIdx = 0;
@@ -774,6 +775,7 @@ public:
         SimulationResponseDTO failure;
         if (!deserialiseRequest(req, parsed_, failure, false, false, true)) { err_ = failure.errorDetail; return; }
         sim_.execMode = selectExecMode(prec);
+        sim_.tranMaxStep = parsed_.tranMax;
         const double step = req.transient.stepSizeS != 0 ? req.transient.stepSizeS : parsed_.tranStep;
         err_ = sim_.beginTransient(parsed_.netlist, step, parsed_.tranUIC || req.transient.uic);
     }
