@@ -1,0 +1,12 @@
+* ASAP7 TT: the 6T SRAM cell's read inverter (pull-up, pull-down, the access device to a bit line held high), DC, BSIM-CMG (LEVEL 72 VERSION 107)
+.include pdk/asap7/asap7_pdk_r1p7/models/hspice/7nm_TT_160803.pm
+VDD vdd 0 0.7
+VWL wl 0 0.7
+VBL bl 0 0.7
+VIN in 0 0
+MPU q in vdd vdd pmos_sram nfin=1 l=20n
+MPD q in 0 0 nmos_sram nfin=1 l=20n
+MPG q wl bl 0 nmos_sram nfin=1 l=20n
+.dc VIN 0 0.7 0.01
+.print dc v(q)
+.end

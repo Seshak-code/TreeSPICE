@@ -88,10 +88,49 @@ def osdi_libs(text): return re.findall(r"^\s*\.osdi\s+(\S+)", text, re.I | re.M)
 def with_includes(text, base, depth=0):
     """The netlist and the .include / .lib files it pulls in (they may need OSDI models or a PDK too)."""
     out = [text]
-    for f in re.findall(r"^\s*\.(?:include|inc|lib)\s+[\"']?([^\s\"']+)", text, re.I | re.M):
+    for f in (q or b for q, b in re.findall(r"^\s*\.(?:include|inc|lib)\s+(?:[\"']([^\"']+)[\"']|(\S+))", text, re.I | re.M)):  # a quoted path may hold spaces
         p = os.path.normpath(os.path.join(base, f))
         if depth < 3 and os.path.isfile(p): out.append(with_includes(open(p, errors="ignore").read(), os.path.dirname(p), depth + 1))
     return "\n".join(out)
+
+# BSIM-CMG cards (LEVEL 72, the FinFET PDKs'): TreeSPICE runs VERSION 107 on bsimcmg107.osdi (module bsimcmg) and 111
+# on bsimcmg.osdi (bsimcmg_va). ngspice has no LEVEL 72; it gets each card as that OSDI module's .model, as TreeSPICE
+# builds it (DEVTYPE / TYPE from nmos/pmos; a non-positive LRSD, unused with RGEOMOD 0 and CGEOMOD != 2, dropped).
+CMG = re.compile(r"(?ims)^(\s*\.model\s+(\S+)\s+(nmos|pmos)\b[^\n]*?\blevel\s*=\s*72\b[^\n]*)((?:\n(?:\s*\+|\s*\*)[^\n]*)*)")
+def cmg_version(card):
+    v = re.search(r"(?i)\bversion\s*=\s*([\d.]+)", card)
+    return float(v.group(1)) if v else None
+def cmg_lib(card): return {107.0: "bsimcmg107.osdi", 111.0: "bsimcmg.osdi"}.get(cmg_version(card) and float(int(cmg_version(card))))
+def cmg_for_ngspice(text):
+    def card(m):
+        head, name, typ, rest = m.group(1), m.group(2), m.group(3).lower(), m.group(4)
+        v107 = cmg_version(head + rest) == 107.0
+        body = re.sub(r"(?i)\b(version|level)\s*=\s*[\d.]+", "", head.split(None, 3)[3] if len(head.split(None, 3)) > 3 else "") + rest
+        body = re.sub(r"(?i)\bversion\s*=\s*[\d.]+", "", body)
+        lrsd = re.search(r"(?i)\blrsd\s*=\s*(\S+)", body)
+        if lrsd and num(lrsd.group(1)) <= 0: body = body.replace(lrsd.group(0), "")
+        kind = f"bsimcmg devtype={1 if typ == 'nmos' else 0}" if v107 else f"bsimcmg_va type={1 if typ == 'nmos' else -1}"
+        return f".model {name} {kind} {body}"
+    return CMG.sub(card, text)
+def cmg_inline(text, base, depth=0):
+    """text with each .include / .lib file that holds a LEVEL 72 card put in place, those cards made OSDI models"""
+    def inc(m):
+        p = os.path.normpath(os.path.join(base, m.group(1) or m.group(2)))
+        if depth > 3 or not os.path.isfile(p) or not CMG.search(with_includes(open(p, errors="ignore").read(), os.path.dirname(p))): return m.group(0)
+        return cmg_inline(open(p, errors="ignore").read(), os.path.dirname(p), depth + 1)
+    def lib(m):  # .lib file section: that section's text, when it holds a LEVEL 72 card
+        p = os.path.normpath(os.path.join(base, m.group(1) or m.group(2)))
+        if depth > 3 or not os.path.isfile(p): return m.group(0)
+        sec = re.search(r"(?ims)^\s*\.lib\s+" + re.escape(m.group(3)) + r"\s*$(.*?)^\s*\.endl\b", open(p, errors="ignore").read())
+        if not sec or not CMG.search(with_includes(sec.group(1), os.path.dirname(p))): return m.group(0)
+        return cmg_inline(sec.group(1), os.path.dirname(p), depth + 1)
+    text = re.sub(r"(?im)^\s*\.lib\s+(?:[\"']([^\"']+)[\"']|(\S+))\s+(\S+)\s*$", lib, text)
+    out = cmg_for_ngspice(re.sub(r"(?im)^\s*\.(?:include|inc)\s+(?:[\"']([^\"']+)[\"']|(\S+))\s*$", inc, text))
+    if depth: return out
+    # ngspice names an OSDI device N...: each MOSFET on a converted card becomes one (M d g s b model ...)
+    models = {m.lower() for m in re.findall(r"(?im)^\s*\.model\s+(\S+)\s+bsimcmg(?:_va)?\b", out)}
+    return "\n".join("N" + l.lstrip()[1:] if re.match(r"(?i)\s*m", l) and len(l.split()) > 5 and l.split()[5].lower() in models else l
+                     for l in out.splitlines())
 
 def needed_osdi(text):
     """OSDI libraries a netlist needs: its .osdi cards, and the ones the native BSIM and HICUM cards run on."""
@@ -104,6 +143,7 @@ def needed_osdi(text):
         libs |= {"54": {"bsim4.osdi"}, "14": {"bsim4.osdi"}, "49": {"bsim3.osdi"}, "8": {"bsim3.osdi"},
                  "10": {"bsimsoi.osdi"}, "58": {"bsimsoi.osdi"}}.get(lvl, set())
     if re.search(r"^\s*\.model\s+\S+\s+vdmos", text, re.I | re.M): libs.add("vdmos.osdi")
+    for m in CMG.finditer(text): libs.add(cmg_lib(m.group(0)) or "bsimcmg (VERSION 107 or 111)")
     return sorted(libs)
 
 def node_map(text):
@@ -265,7 +305,10 @@ def run_ngspice(args, text, an, names, cur=(), dn=(), digits=False):
         ctl = [".control", "noise {1} {2} {3} {4} {5!r} {6!r}".format(*an), "setplot noise1",
                f"wrdata {out} onoise_spectrum inoise_spectrum", "setplot noise2",
                "print onoise_total inoise_total", "quit", ".endc", ".end"]
-    for lib in osdi_libs(text):  # ngspice loads OSDI with pre_osdi (copied: its paths cannot hold spaces)
+    full = with_includes(text, args.tmp)
+    if CMG.search(full):  # LEVEL 72: the cards as OSDI models, their libraries loaded
+        kept = cmg_inline("\n".join(kept), args.tmp).splitlines()
+    for lib in osdi_libs(text) + sorted({cmg_lib(m.group(0)) for m in CMG.finditer(full)} - {None}):  # ngspice loads OSDI with pre_osdi (copied: its paths cannot hold spaces)
         dst = os.path.join(args.tmp, os.path.basename(lib))
         shutil.copy(os.path.join(OSDI_DIR, lib) if not os.path.isabs(lib) else lib, dst)
         ctl.insert(1, f"pre_osdi {dst}")

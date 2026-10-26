@@ -1,0 +1,9 @@
+* ASAP5 SF: a nanowire inverter's DC transfer, BSIM-CMG (LEVEL 72 VERSION 107)
+.include pdk/asap5/asap5/asap5PDK_r0p4/models/hspice/asap5_sf.pm
+VDD vdd 0 0.7
+VIN in 0 0
+MP out in vdd vdd pmos_rvt nfin=2 
+MN out in 0 0 nmos_rvt nfin=2 
+.dc VIN 0 0.7 0.01
+.print dc v(out) i(VDD)
+.end
