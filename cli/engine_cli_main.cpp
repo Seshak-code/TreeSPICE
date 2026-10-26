@@ -73,7 +73,7 @@ std::vector<std::string> analysisCards(const std::string& text) {
         ls >> kw;
         for (auto& c : kw) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (kw == ".op" || kw == ".dc" || kw == ".ac" || kw == ".tran" || kw == ".noise" || kw == ".pz" || kw == ".sens" || kw == ".tf" ||
-            kw == ".stb")
+            kw == ".stb" || kw == ".pss")
             kinds.push_back(kw.substr(1));
     }
     return kinds;
@@ -181,6 +181,33 @@ OutputTable stbTable(const SimulationResponseDTO& r) {
     t.scale = r.extended.stb.frequencies;
     t.columns = {{"loopgain", "notype", r.extended.stb.loopGain, true}};
     return t;
+}
+
+// .pss: two plots, as Spectre's pss writes its time and frequency domains. "Periodic Steady State": every vector over
+// the period's ticks t0 .. t0 + T; "PSS Harmonics": each vector's harmonics 0 .. harms at k fund, the peak phasors of
+// v(t) = Re sum V_k exp(j k w (t - t0)) (V_0 the mean) from the ticks' DFT
+std::vector<OutputTable> pssTables(const SimulationResponseDTO& r) {
+    SimulationResponseDTO td = r;
+    td.analysisType = AnalysisTypeDTO::TRANSIENT;  // selectOutputs' every node and branch over time
+    OutputTable t = selectOutputs(td, {});
+    t.plotName = "Periodic Steady State";
+    OutputTable f;
+    f.plotName = "PSS Harmonics";
+    f.scaleName = "frequency";
+    f.complexData = true;
+    const auto& p = r.extended.pss;
+    const size_t n = t.scale.size() - 1;  // the last tick is the first one again
+    for (int k = 0; k <= p.harmonics; ++k) f.scale.push_back(k * p.fundamental);
+    for (const auto& c : t.columns) {
+        OutputTable::Column h{c.name, c.type, {}, true};
+        for (int k = 0; k <= p.harmonics; ++k) {
+            std::complex<double> s = 0;
+            for (size_t m = 0; m < n; ++m) s += c.values[m] * std::polar(1.0, -2 * M_PI * k * (double)m / (double)n);
+            h.values.push_back(s * ((k == 0 ? 1.0 : 2.0) / (double)n));
+        }
+        f.columns.push_back(std::move(h));
+    }
+    return {t, f};
 }
 
 // The margins, as Spectre's stb log states them: the phase margin at |T| = 1, the gain margin where the phase crosses
@@ -365,6 +392,7 @@ int main(int argc, char** argv) {
                                 : an.kind == "sens" ? session->runSens(an.req, cb)
                                 : an.kind == "tf"   ? session->runTF(an.req, cb)
                                 : an.kind == "stb"  ? session->runStb(an.req, cb)
+                                : an.kind == "pss"  ? session->runPss(an.req, cb)
                                 : an.kind == "pz"   ? session->runPoleZero(an.req, cb)
                                                     : session->runDC(an.req, cb);
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -402,6 +430,12 @@ int main(int argc, char** argv) {
             } else if (an.kind == "stb") {
                 out << stbMargins(r);
                 if (!rawPath.empty()) writeRaw(rawFile, stbTable(r), title(text), ascii);
+            } else if (an.kind == "pss") {
+                const auto& p = r.extended.pss;
+                out << "PSS converged in " << p.iterations << " Newton iterations (x(T) - x(0) at " << p.residual
+                    << " of its tolerance); fundamental = " << p.fundamental << " Hz, the period from t = " << p.t0 << " s\n";
+                if (!rawPath.empty())
+                    for (const auto& t : pssTables(r)) writeRaw(rawFile, t, title(text), ascii);
             } else if (an.kind == "tf") {
                 if (!rawPath.empty()) writeRaw(rawFile, tfTable(r), title(text), ascii);
                 printTF(out, r);

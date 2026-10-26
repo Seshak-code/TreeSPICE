@@ -1235,6 +1235,8 @@ public:
   // The netlist must outlive the run and not be restructured. advanceTo and
   // beginTransient return "" on success, else the error.
   std::string beginTransient(TensorNetlist &netlist, double step, bool uic, double stop = 0.0);
+  // beginTransient's start once x0 is known: the reactive histories seeded from x0, the step control reset, time t0
+  void startTransient(TensorNetlist &netlist, const std::vector<double> &x0, bool uic, double step, double stop, double t0);
   std::string advanceTo(TensorNetlist &netlist, double tEnd,
                         const std::function<bool(const SolverStep &)> &onPoint = {});
   bool setSource(TensorNetlist &netlist, const std::string &name, double volts, double rampS);
@@ -1259,6 +1261,24 @@ public:
     std::string error;
   };
   StbResult solveStb(TensorNetlist &netlist, const std::vector<double> &freqs, const std::string &probe);
+  // pss: the periodic steady state of a circuit its sources drive at period T, by shooting Newton. The shooting
+  // starts at the first period boundary at or after tstab (the transient runs there from the DC operating point);
+  // each iteration runs one period from x0 on `points` equal ticks, and Newton solves (I - M) dx = x(T) - x0, M the
+  // monodromy matrix by finite differences, each column a period run replaying the base run's accepted steps (an
+  // adaptive step sequence of its own would put the step control's noise into M). Converged when every unknown
+  // repeats to RELTOL and VNTOL / ABSTOL. period: the steady state at the ticks, t0 .. t0 + T.
+  // ponytail: n + 1 period runs per Newton iteration (dense M, dense LU); a matrix-free GMRES on the step
+  // sensitivities is the upgrade for circuits of more than a few hundred unknowns.
+  // osc > 0: an oscillator observed at node osc (1-based), its period an unknown from T as the guess; the shooting
+  // starts at a rising crossing of v(osc)'s mean after tstab and holds v(osc) there (the phase condition).
+  struct PssResult {
+    std::vector<SolverStep> period;
+    double t0 = 0.0, T = 0.0;
+    int iterations = 0;
+    double residual = 0.0;  // the last iteration's worst |x(T) - x0| over its tolerance
+    std::string error;
+  };
+  PssResult solvePss(TensorNetlist &netlist, double period, int points, double tstab, int maxIterations = 20, int osc = 0);
   std::vector<std::vector<std::complex<double>>> solveAC(TensorNetlist &netlist,
                                                          const std::vector<double> &freqs);
 
