@@ -93,6 +93,12 @@ struct SPICEParseResult {
     std::string   stbSweep, stbProbe;
     int           stbPoints = 0;
     double        stbStart = 0.0, stbStop = 0.0;
+    // .pac / .pnoise: their sweeps and sidebands (each needs the deck's .pss)
+    bool          hasPAC = false, hasPNOISE = false;
+    std::string   pacSweep, pnoiseSweep;
+    int           pacPoints = 0, pacSidebands = 0, pnoisePoints = 0, pnoiseSidebands = 0, pnoiseOut = 0, pnoiseRef = 0;
+    int           pnoiseRelharm = 0;  // the sweep is the offset from this harmonic of the PSS's fundamental
+    double        pacStart = 0.0, pacStop = 0.0, pnoiseStart = 0.0, pnoiseStop = 0.0;
     bool          hasPSS = false;    // .pss fund tstab oscnob points harms [sciter]: periodic steady state
     double        pssFund = 0.0, pssTstab = 0.0;
     int           pssOsc = 0;        // oscnob: 0 (ground) a driven circuit, else the oscillator's node (1-based)
@@ -222,6 +228,7 @@ private:
     std::string sensOut_, sensRef_;                // .sens v() node names, resolved likewise
     std::string tfOut_, tfRef_;                    // .tf v() node names, resolved likewise
     std::string pssOsc_;                           // .pss oscnob, resolved likewise
+    std::string pnoiseOut_, pnoiseRef_;            // .pnoise v() node names, resolved likewise
     std::map<std::string, std::vector<PendingIC>> subcktICs_;   // .ic / .nodeset in a body (local names), applied per instance
     std::string noiseOut_, noiseRef_;              // .noise node names, resolved likewise
     std::set<std::string> globals_;                // .global node names

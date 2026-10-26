@@ -989,7 +989,17 @@ SimulationResponseDTO SessionImpl::runStb(const SimulationRequestDTO& req, const
     return r;
 }
 
-// ── Periodic steady state: shooting Newton ────────────────────────────────
+// ── Periodic steady state: shooting Newton; small signal and noise about it ──
+// The netlist's .pss solved (its card validated); the error, else ""
+static std::string periodicSteadyState(SPICEParseResult& parsed, CircuitSim& sim, CircuitSim::PssResult& s) {
+    if (!parsed.hasPSS) return "needs .pss fund tstab oscnob points harms [sciter].";
+    if (!(parsed.pssFund > 0.0) || parsed.pssPoints < 2 || parsed.pssHarms < 1 || !(parsed.pssTstab >= 0.0) || parsed.pssIterations < 1)
+        return ".pss needs fund > 0, tstab >= 0, points >= 2, harms >= 1 and sciter >= 1.";
+    if (parsed.pssHarms > parsed.pssPoints / 2) return ".pss: harms is at most points/2 (the period's samples resolve no more).";
+    s = sim.solvePss(parsed.netlist, 1.0 / parsed.pssFund, parsed.pssPoints, parsed.pssTstab, parsed.pssIterations, parsed.pssOsc);
+    return s.error;
+}
+
 SimulationResponseDTO SessionImpl::runPss(const SimulationRequestDTO& req, const EngineCallbacks& /*cb*/) {
     status_.store(JobStatus::Running);
     SimulationResponseDTO r;
@@ -1000,16 +1010,11 @@ SimulationResponseDTO SessionImpl::runPss(const SimulationRequestDTO& req, const
         CircuitSim sim;
         sim.execMode = selectExecMode(precision_);
         sim.tranMaxStep = parsed.tranMax;
-        if (!parsed.hasPSS)
-            r.errorDetail = "PSS needs .pss fund tstab oscnob points harms [sciter].";
-        else if (!(parsed.pssFund > 0.0) || parsed.pssPoints < 2 || parsed.pssHarms < 1 || !(parsed.pssTstab >= 0.0) || parsed.pssIterations < 1)
-            r.errorDetail = ".pss needs fund > 0, tstab >= 0, points >= 2, harms >= 1 and sciter >= 1.";
-        else if (parsed.pssHarms > parsed.pssPoints / 2)
-            r.errorDetail = ".pss: harms is at most points/2 (the period's samples resolve no more).";
-        else {
-            const auto s = sim.solvePss(parsed.netlist, 1.0 / parsed.pssFund, parsed.pssPoints, parsed.pssTstab, parsed.pssIterations, parsed.pssOsc);
-            r.errorDetail = s.error;
-            r.converged = s.error.empty();
+        CircuitSim::PssResult s;
+        r.errorDetail = periodicSteadyState(parsed, sim, s);
+        if (r.errorDetail.rfind("needs", 0) == 0) r.errorDetail = "PSS " + r.errorDetail;
+        r.converged = r.errorDetail.empty();
+        if (r.converged) {
             for (const auto& p : s.period) {
                 WaveformDataPoint pt;
                 pt.timeS = p.time;
@@ -1017,11 +1022,83 @@ SimulationResponseDTO SessionImpl::runPss(const SimulationRequestDTO& req, const
                 pt.branchCurrents = p.branchCurrents;
                 r.waveformPoints.push_back(std::move(pt));
             }
-            r.extended.hasPss = r.converged;
-            r.extended.pss = {s.T > 0 ? 1.0 / s.T : parsed.pssFund, s.t0, parsed.pssHarms, s.iterations, s.residual};
+            r.extended.hasPss = true;
+            r.extended.pss = {1.0 / s.T, s.t0, parsed.pssHarms, s.iterations, s.residual};
             r.iterations = s.iterations;
             r.scaleName = "time";
             nameColumns(r, parsed, sim);
+        }
+        r.backend = backendOf(sim, precision_);
+    }
+    finish(r);
+    return r;
+}
+
+// .pac and .pnoise: the deck's .pss, then the periodic small signal or noise over the card's sweep
+SimulationResponseDTO SessionImpl::runPac(const SimulationRequestDTO& req, const EngineCallbacks& /*cb*/) {
+    status_.store(JobStatus::Running);
+    SimulationResponseDTO r;
+    r.jobId        = jobId_;
+    r.analysisType = AnalysisTypeDTO::PERIODIC_AC;
+    SPICEParseResult parsed;
+    if (deserialiseRequest(req, parsed, r)) {
+        CircuitSim sim;
+        sim.execMode = selectExecMode(precision_);
+        sim.tranMaxStep = parsed.tranMax;
+        const auto freqs = parsed.hasPAC ? CircuitSim::acFrequencies(parsed.pacSweep, parsed.pacPoints, parsed.pacStart, parsed.pacStop)
+                                         : std::vector<double>{};
+        CircuitSim::PssResult s;
+        if (!parsed.hasPAC) r.errorDetail = "PAC needs .pac dec|oct|lin n fstart fstop maxsideband.";
+        else if (freqs.empty() || parsed.pacSidebands < 1) r.errorDetail = ".pac needs a sweep (0 < fstart <= fstop) and maxsideband >= 1.";
+        else if (std::string e = periodicSteadyState(parsed, sim, s); !e.empty()) r.errorDetail = "PAC " + e;
+        else {
+            const auto p = sim.solvePac(parsed.netlist, s, freqs, parsed.pacSidebands);
+            r.errorDetail = p.error;
+            r.converged = p.error.empty();
+            if (r.converged) {
+                nameColumns(r, parsed, sim);
+                const size_t cols = r.nodeNames.size() + r.branchNames.size();
+                auto& pac = r.extended.pac;
+                pac = {1.0 / s.T, parsed.pacSidebands, freqs, {}};
+                pac.values.assign(2 * parsed.pacSidebands + 1, {});
+                for (const auto& atF : p.x)
+                    for (size_t m = 0; m < atF.size(); ++m) pac.values[m].emplace_back(atF[m].begin(), atF[m].begin() + std::min(cols, atF[m].size()));
+                r.extended.hasPac = true;
+                r.scaleName = "frequency";
+            }
+        }
+        r.backend = backendOf(sim, precision_);
+    }
+    finish(r);
+    return r;
+}
+
+SimulationResponseDTO SessionImpl::runPnoise(const SimulationRequestDTO& req, const EngineCallbacks& /*cb*/) {
+    status_.store(JobStatus::Running);
+    SimulationResponseDTO r;
+    r.jobId        = jobId_;
+    r.analysisType = AnalysisTypeDTO::PERIODIC_NOISE;
+    SPICEParseResult parsed;
+    if (deserialiseRequest(req, parsed, r)) {
+        CircuitSim sim;
+        sim.execMode = selectExecMode(precision_);
+        sim.tranMaxStep = parsed.tranMax;
+        const auto freqs = parsed.hasPNOISE ? CircuitSim::acFrequencies(parsed.pnoiseSweep, parsed.pnoisePoints, parsed.pnoiseStart, parsed.pnoiseStop)
+                                            : std::vector<double>{};
+        CircuitSim::PssResult s;
+        if (!parsed.hasPNOISE) r.errorDetail = "PNoise needs .pnoise v(out[,ref]) dec|oct|lin n fstart fstop maxsideband.";
+        else if (freqs.empty() || parsed.pnoiseSidebands < 1) r.errorDetail = ".pnoise needs a sweep (0 < fstart <= fstop) and maxsideband >= 1.";
+        else if (parsed.pnoiseRelharm < 0) r.errorDetail = ".pnoise: relharm is a harmonic number >= 0.";
+        else if (std::string e = periodicSteadyState(parsed, sim, s); !e.empty()) r.errorDetail = "PNoise " + e;
+        else {
+            std::vector<double> at = freqs;  // the output frequencies: relharm f0 + f
+            for (double& f : at) f += parsed.pnoiseRelharm / s.T;
+            const auto p = sim.solvePnoise(parsed.netlist, s, at, parsed.pnoiseSidebands, parsed.pnoiseOut, parsed.pnoiseRef);
+            r.errorDetail = p.error;
+            r.converged = p.error.empty();
+            r.extended.hasPnoise = r.converged;
+            r.extended.pnoise = {1.0 / s.T, parsed.pnoiseSidebands, parsed.pnoiseRelharm, freqs, p.onoise};
+            r.scaleName = "frequency";
         }
         r.backend = backendOf(sim, precision_);
     }

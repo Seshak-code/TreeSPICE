@@ -55,6 +55,8 @@ public:
                                    const EngineCallbacks&) override;
     SimulationResponseDTO runStb(const SimulationRequestDTO&, const EngineCallbacks& = {}) override;
     SimulationResponseDTO runPss(const SimulationRequestDTO&, const EngineCallbacks& = {}) override;
+    SimulationResponseDTO runPac(const SimulationRequestDTO&, const EngineCallbacks& = {}) override;
+    SimulationResponseDTO runPnoise(const SimulationRequestDTO&, const EngineCallbacks& = {}) override;
     SimulationResponseDTO runTF(const SimulationRequestDTO&,
                                  const EngineCallbacks&) override;
     std::unique_ptr<TransientHandle> beginTransient(const SimulationRequestDTO&) override;

@@ -42,7 +42,9 @@ enum class AnalysisTypeDTO : int {
     POLE_ZERO         = 7,
     FOURIER           = 8,
     STABILITY         = 9,
-    PERIODIC_STEADY_STATE = 10
+    PERIODIC_STEADY_STATE = 10,
+    PERIODIC_AC       = 11,
+    PERIODIC_NOISE    = 12
 };
 
 inline std::string analysisTypeToString(AnalysisTypeDTO t) {
@@ -58,6 +60,8 @@ inline std::string analysisTypeToString(AnalysisTypeDTO t) {
         case AnalysisTypeDTO::FOURIER:           return "FOURIER";
         case AnalysisTypeDTO::STABILITY:         return "STABILITY";
         case AnalysisTypeDTO::PERIODIC_STEADY_STATE: return "PERIODIC_STEADY_STATE";
+        case AnalysisTypeDTO::PERIODIC_AC:       return "PERIODIC_AC";
+        case AnalysisTypeDTO::PERIODIC_NOISE:    return "PERIODIC_NOISE";
     }
     return "UNKNOWN";
 }
@@ -232,6 +236,20 @@ struct PssResultDTO {
     double residual = 0.0;   // the last one's worst |x(T) - x(0)| over its tolerance (<= 1: converged)
 };
 
+// .pac: values[m + K][f] the nodes (nodeNames order) then branches (branchNames) at f + m fundamental, for the
+// small signal at f; .pnoise: the output noise density at f
+struct PacResultDTO {
+    double fundamental = 0.0;
+    int sidebands = 0;
+    std::vector<double> frequencies;
+    std::vector<std::vector<std::vector<std::complex<double>>>> values;
+};
+struct PnoiseResultDTO {
+    double fundamental = 0.0;
+    int sidebands = 0, relharm = 0;           // frequencies are offsets from relharm * fundamental
+    std::vector<double> frequencies, onoise;  // V/sqrt(Hz)
+};
+
 struct ExtendedAnalysisResultsDTO {
     bool hasTF = false;
     TFResultDTO tf;          // Bode plot and margins (the app's TRANSFER_FUNCTION handler)
@@ -249,6 +267,10 @@ struct ExtendedAnalysisResultsDTO {
     StbResultDTO stb;
     bool hasPss = false;
     PssResultDTO pss;
+    bool hasPac = false;
+    PacResultDTO pac;
+    bool hasPnoise = false;
+    PnoiseResultDTO pnoise;
 };
 
 struct WaveformDataPoint {

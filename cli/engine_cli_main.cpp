@@ -73,7 +73,7 @@ std::vector<std::string> analysisCards(const std::string& text) {
         ls >> kw;
         for (auto& c : kw) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (kw == ".op" || kw == ".dc" || kw == ".ac" || kw == ".tran" || kw == ".noise" || kw == ".pz" || kw == ".sens" || kw == ".tf" ||
-            kw == ".stb" || kw == ".pss")
+            kw == ".stb" || kw == ".pss" || kw == ".pac" || kw == ".pnoise")
             kinds.push_back(kw.substr(1));
     }
     return kinds;
@@ -208,6 +208,40 @@ std::vector<OutputTable> pssTables(const SimulationResponseDTO& r) {
         f.columns.push_back(std::move(h));
     }
     return {t, f};
+}
+
+// .pac: one plot per sideband m, "PAC Sideband m": every node and branch at f + m fund over the small signal's f.
+// .pnoise: "Periodic Noise", onoise_spectrum over f
+std::vector<OutputTable> periodicTables(const SimulationResponseDTO& r) {
+    std::vector<OutputTable> out;
+    if (r.analysisType == AnalysisTypeDTO::PERIODIC_NOISE) {
+        OutputTable t;
+        t.plotName = "Periodic Noise";
+        t.scaleName = "frequency";
+        t.scale = r.extended.pnoise.frequencies;
+        OutputTable::Column on{"onoise_spectrum", "voltage-density", {}};
+        for (double v : r.extended.pnoise.onoise) on.values.push_back(v);
+        t.columns = {on};
+        return {t};
+    }
+    const auto& p = r.extended.pac;
+    for (int m = -p.sidebands; m <= p.sidebands; ++m) {
+        OutputTable t;
+        t.plotName = "PAC Sideband " + std::to_string(m);
+        t.scaleName = "frequency";
+        t.complexData = true;
+        t.scale = p.frequencies;
+        const auto& v = p.values[m + p.sidebands];
+        auto column = [&](const std::string& name, const char* type, size_t c) {
+            OutputTable::Column col{name, type, {}, true};
+            for (const auto& atF : v) col.values.push_back(c < atF.size() ? atF[c] : 0.0);
+            t.columns.push_back(std::move(col));
+        };
+        for (size_t i = 0; i < r.nodeNames.size(); ++i) if (!r.nodeNames[i].empty()) column("v(" + r.nodeNames[i] + ")", "voltage", i);
+        for (size_t i = 0; i < r.branchNames.size(); ++i) column("i(" + r.branchNames[i] + ")", "current", r.nodeNames.size() + i);
+        out.push_back(std::move(t));
+    }
+    return out;
 }
 
 // The margins, as Spectre's stb log states them: the phase margin at |T| = 1, the gain margin where the phase crosses
@@ -393,6 +427,8 @@ int main(int argc, char** argv) {
                                 : an.kind == "tf"   ? session->runTF(an.req, cb)
                                 : an.kind == "stb"  ? session->runStb(an.req, cb)
                                 : an.kind == "pss"  ? session->runPss(an.req, cb)
+                                : an.kind == "pac"  ? session->runPac(an.req, cb)
+                                : an.kind == "pnoise" ? session->runPnoise(an.req, cb)
                                 : an.kind == "pz"   ? session->runPoleZero(an.req, cb)
                                                     : session->runDC(an.req, cb);
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -436,6 +472,11 @@ int main(int argc, char** argv) {
                     << " of its tolerance); fundamental = " << p.fundamental << " Hz, the period from t = " << p.t0 << " s\n";
                 if (!rawPath.empty())
                     for (const auto& t : pssTables(r)) writeRaw(rawFile, t, title(text), ascii);
+            } else if (an.kind == "pac" || an.kind == "pnoise") {
+                const double f0 = an.kind == "pac" ? r.extended.pac.fundamental : r.extended.pnoise.fundamental;
+                out << "." << an.kind << " about the PSS at fundamental = " << f0 << " Hz\n";
+                if (!rawPath.empty())
+                    for (const auto& t : periodicTables(r)) writeRaw(rawFile, t, title(text), ascii);
             } else if (an.kind == "tf") {
                 if (!rawPath.empty()) writeRaw(rawFile, tfTable(r), title(text), ascii);
                 printTF(out, r);

@@ -94,6 +94,14 @@ public:
         const compute::orchestration::SimulationRequestDTO&,
         const EngineCallbacks& = {}) = 0;
 
+    // .pac / .pnoise: small signal and noise about the netlist's .pss (extended.pac, extended.pnoise).
+    virtual compute::orchestration::SimulationResponseDTO runPac(
+        const compute::orchestration::SimulationRequestDTO&,
+        const EngineCallbacks& = {}) = 0;
+    virtual compute::orchestration::SimulationResponseDTO runPnoise(
+        const compute::orchestration::SimulationRequestDTO&,
+        const EngineCallbacks& = {}) = 0;
+
     // .tf: DC small-signal transfer function and impedances for the netlist's .tf card (extended.dcTf).
     virtual compute::orchestration::SimulationResponseDTO runTF(
         const compute::orchestration::SimulationRequestDTO&,
