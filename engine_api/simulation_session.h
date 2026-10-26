@@ -88,6 +88,12 @@ public:
         const compute::orchestration::SimulationRequestDTO&,
         const EngineCallbacks& = {}) = 0;
 
+    // .pss: the periodic steady state for the netlist's .pss card by shooting Newton (the period as waveformPoints,
+    // extended.pss the shooting's outcome).
+    virtual compute::orchestration::SimulationResponseDTO runPss(
+        const compute::orchestration::SimulationRequestDTO&,
+        const EngineCallbacks& = {}) = 0;
+
     // .tf: DC small-signal transfer function and impedances for the netlist's .tf card (extended.dcTf).
     virtual compute::orchestration::SimulationResponseDTO runTF(
         const compute::orchestration::SimulationRequestDTO&,

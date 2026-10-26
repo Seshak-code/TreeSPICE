@@ -464,6 +464,7 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     sensOut_.clear();
     sensRef_.clear();
     tfOut_.clear();
+    pssOsc_.clear();
     tfRef_.clear();
     noiseOut_.clear();
     noiseRef_.clear();
@@ -739,6 +740,18 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                     result_.stbStart = parseValue(tok[3]);
                     result_.stbStop = parseValue(tok[4]);
                 }
+                else if (keyword == ".PSS") {
+                    // .pss fund tstab oscnob points harms [sciter], ngspice's card: oscnob 0 (ground) is a circuit its
+                    // sources drive at fund (TreeSPICE's shooting), a node an oscillator observed there
+                    if (tok.size() != 6 && tok.size() != 7) throw std::runtime_error(".pss expects fund tstab oscnob points harms [sciter]");
+                    result_.hasPSS = true;
+                    result_.pssFund = parseValue(tok[1]);
+                    result_.pssTstab = parseValue(tok[2]);
+                    pssOsc_ = toUpper(tok[3]);
+                    result_.pssPoints = static_cast<int>(parseValue(tok[4]));
+                    result_.pssHarms = static_cast<int>(parseValue(tok[5]));
+                    if (tok.size() == 7) result_.pssIterations = static_cast<int>(parseValue(tok[6]));
+                }
                 else if (keyword == ".AC") {
                     // .ac dec|oct|lin n fstart fstop
                     const std::string sw = tok.size() == 5 ? toUpper(tok[1]) : "";
@@ -886,6 +899,11 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         result_.tfOut = node(tfOut_);
         result_.tfRef = node(tfRef_);
         if (result_.tfOut < 0 || result_.tfRef < 0) return fail(lines.back().first, ".tf names an unknown output node");
+    }
+    if (result_.hasPSS) {
+        auto it = nodeMap_.find(pssOsc_);
+        result_.pssOsc = pssOsc_ == "0" || pssOsc_ == "GND" ? 0 : it == nodeMap_.end() ? -1 : it->second;
+        if (result_.pssOsc < 0) return fail(lines.back().first, ".pss names an unknown oscnob node");
     }
     if (result_.hasPZ)
         for (int k = 0; k < 4; ++k) {

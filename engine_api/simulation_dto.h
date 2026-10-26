@@ -41,7 +41,8 @@ enum class AnalysisTypeDTO : int {
     TRANSFER_FUNCTION = 6,
     POLE_ZERO         = 7,
     FOURIER           = 8,
-    STABILITY         = 9
+    STABILITY         = 9,
+    PERIODIC_STEADY_STATE = 10
 };
 
 inline std::string analysisTypeToString(AnalysisTypeDTO t) {
@@ -56,6 +57,7 @@ inline std::string analysisTypeToString(AnalysisTypeDTO t) {
         case AnalysisTypeDTO::POLE_ZERO:         return "POLE_ZERO";
         case AnalysisTypeDTO::FOURIER:           return "FOURIER";
         case AnalysisTypeDTO::STABILITY:         return "STABILITY";
+        case AnalysisTypeDTO::PERIODIC_STEADY_STATE: return "PERIODIC_STEADY_STATE";
     }
     return "UNKNOWN";
 }
@@ -222,6 +224,14 @@ struct StbResultDTO {
     std::vector<std::complex<double>> loopGain, tv, ti;  // T, and the voltage and current injections' ratios
 };
 
+// .pss: the shooting's outcome; the steady period itself is the response's waveformPoints (t0 .. t0 + 1/fundamental)
+struct PssResultDTO {
+    double fundamental = 0.0, t0 = 0.0;
+    int harmonics = 0;       // the card's harms: how many the frequency-domain view shows
+    int iterations = 0;      // Newton iterations
+    double residual = 0.0;   // the last one's worst |x(T) - x(0)| over its tolerance (<= 1: converged)
+};
+
 struct ExtendedAnalysisResultsDTO {
     bool hasTF = false;
     TFResultDTO tf;          // Bode plot and margins (the app's TRANSFER_FUNCTION handler)
@@ -237,6 +247,8 @@ struct ExtendedAnalysisResultsDTO {
     FourierResultDTO fourier;
     bool hasStb = false;
     StbResultDTO stb;
+    bool hasPss = false;
+    PssResultDTO pss;
 };
 
 struct WaveformDataPoint {

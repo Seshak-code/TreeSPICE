@@ -889,6 +889,11 @@ std::string CircuitSim::beginTransient(TensorNetlist &netlist, double step, bool
       if (pass == 20) return "DC bias failed: the digital and analog parts do not agree after 20 alternations.";
     }
   }
+  startTransient(netlist, x0, uic, step, stop, 0.0);
+  return "";
+}
+
+void CircuitSim::startTransient(TensorNetlist &netlist, const std::vector<double> &x0, bool uic, double step, double stop, double t0) {
   arbiterInitialized = false;  // this run's cold start (the DC bias may itself have run a transient OP)
   lteHold_ = 0;
   seedReactiveHistory(netlist, x0, uic);
@@ -922,7 +927,7 @@ std::string CircuitSim::beginTransient(TensorNetlist &netlist, double step, bool
   capByDelay(netlist.globalBlock);
   for (const auto &[name, blk] : netlist.blockDefinitions) capByDelay(blk);
   tran_.h = std::min(tran_.h, tran_.hMax);
-  return "";
+  tran_.t = t0;
 }
 
 std::string CircuitSim::advanceTo(TensorNetlist &netlist, double stop,
@@ -932,8 +937,10 @@ std::string CircuitSim::advanceTo(TensorNetlist &netlist, double stop,
   // crossing and an event a delay after an earlier one landed 5e-19 s apart, a step below stepTransient's floor.
   const double minBreak = std::max(endTol, 5e-5 * hMax);
   while (stop - t > endTol) {
-    const bool endClip = stop - t < h;
-    double hTry = std::min(h, stop - t);
+    // A step that would leave less than minBreak before the stop takes the stop instead (ngspice's delmin): ticks
+    // h apart drift short by ulps until the remainder is a 1e-19 s sliver no step survives
+    const bool endClip = stop - t < h + minBreak;
+    double hTry = endClip ? stop - t : h;
     const double intended = hTry;  // before clipping to a corner (ngspice's CKTsaveDelta)
     std::vector<double> vAtT;  // the solution at t, before this step replaces it
     if (xsim_) vAtT.assign(lastSolution_.begin(), lastSolution_.begin() + std::min<size_t>(lastSolution_.size(), netlist.numGlobalNodes));
@@ -1313,6 +1320,196 @@ CircuitSim::solveAC(TensorNetlist &netlist, const std::vector<double> &freqs) {
     out.push_back(std::move(x));
   }
   return out;
+}
+
+CircuitSim::PssResult CircuitSim::solvePss(TensorNetlist &netlist, double T, int points, double tstab, int maxIterations, int osc) {
+  PssResult r;
+  if (!(T > 0.0) || points < 2 || !(tstab >= 0.0)) { r.error = "pss needs a period > 0, at least 2 points and tstab >= 0"; return r; }
+  if (osc > netlist.numGlobalNodes) { r.error = "pss: oscnob is no node of the circuit"; return r; }
+  if (osc > 0 && !(tstab > 0.0)) { r.error = "pss: an oscillator needs tstab > 0 to start up (its operating point does not oscillate)"; return r; }
+  // State the shooting vector x does not hold: refused, not shot through wrongly
+  std::string held = netlist.digital ? "the XSPICE digital devices" : "";
+  forEachBehav(netlist, [&](const Behavioural &b, const BranchSlot &, int) { if (b.cm) held = b.name + " (an XSPICE code model)"; });
+  forEachSwitch(netlist, [&](const SwitchRef &w, const std::array<int, 2> &) { if (w.s->vh != 0.0) held = w.s->name + " (a switch's hysteresis)"; });
+  forEachJunction(netlist, [&](const Junction &j) { if (j.q && j.q->card.td > 0.0) held = j.q->instanceName + " (a BJT's excess phase)"; });
+  // An oscillator's sources hold still while it is shot (the period is its own): the first time after tstab a source
+  // changes. PULSE and PWL are linear between corners, so one that has the same value at tstab and at its next corner
+  // holds still until then (a start-up kick with a long period)
+  double still = std::numeric_limits<double>::infinity();
+  std::string mover;
+  auto change = [&](const auto &v, double dc) {
+    double c = std::numeric_limits<double>::infinity();
+    if (v.type == "PULSE" || v.type == "PWL") {
+      c = nextBreakpoint(v, tstab);
+      if (std::isfinite(c) && waveformValue(v, dc, c) != waveformValue(v, dc, tstab)) c = tstab;
+    } else if ((v.type == "SINE" && v.sine_va != 0.0) || v.type == "EXP" || v.type == "SFFM" || v.type == "AM")
+      c = tstab;
+    if (c < still) still = c, mover = v.name;
+  };
+  auto scan = [&](const TensorBlock &b) {
+    if (!b.transmissionLines.empty() || !b.lossyLines.empty()) held = "a transmission line's history";
+    for (const auto &v : b.voltageSources) change(v, v.voltage_V);
+    for (const auto &i : b.currentSources) change(i, i.current_A);
+  };
+  scan(netlist.globalBlock);
+  for (const auto &[name, blk] : netlist.blockDefinitions) scan(blk);
+  if (!held.empty()) { r.error = "pss: " + held + " keeps a state the shooting does not carry yet"; return r; }
+
+  // Driven: the shooting starts on a period boundary (the sources' phase is theirs at t = 0). An oscillator: at the
+  // first step after tstab where v(oscnob) rises through its mean, which the phase condition then holds (its time
+  // is free, the period an unknown)
+  double ts = osc ? tstab : std::max(0.0, std::ceil(tstab / T - 1e-9) * T);
+  auto moves = [&] {  // an oscillator's shooting window, with room for its period to grow, crosses a source's change
+    if (!(osc > 0 && ts + 1.5 * T > still)) return false;
+    std::ostringstream m;
+    m << "pss: an oscillator's sources hold still while it is shot; " << mover << " changes at t = " << still << " s, inside "
+      << ts << " .. " << ts + 1.5 * T << " s";
+    r.error = m.str();
+    return true;
+  };
+  if (moves()) return r;
+  std::vector<std::pair<double, double>> wave;  // an oscillator's v(oscnob) during the start-up
+  auto record = [&](const SolverStep &s) { wave.push_back({s.time, s.nodeVoltages[osc - 1]}); return true; };
+  if (std::string e = beginTransient(netlist, T / points, false, ts + T); !e.empty()) { r.error = e; return r; }
+  if (ts > 0.0)
+    if (std::string e = advanceTo(netlist, ts, osc ? record : std::function<bool(const SolverStep &)>{}); !e.empty()) {
+      r.error = "pss stabilisation: " + e;
+      return r;
+    }
+  if (osc) {
+    // The period from the last rising crossings of the mean of the last three guessed periods (else the guess)
+    double lo = 1e300, hi = -1e300, sum = 0, w = 0;
+    for (size_t k = 1; k < wave.size(); ++k)
+      if (wave[k].first > ts - 3 * T) {
+        const double dt = wave[k].first - wave[k - 1].first;
+        sum += 0.5 * (wave[k].second + wave[k - 1].second) * dt;
+        w += dt;
+        lo = std::min(lo, wave[k].second), hi = std::max(hi, wave[k].second);
+      }
+    const double mean = w > 0 ? sum / w : 0.0;
+    if (!(hi - lo > 10 * vntol_)) { r.error = "pss: v(oscnob) does not oscillate by tstab (it spans " + std::to_string(hi - lo) + " V)"; return r; }
+    std::vector<double> rises;
+    for (size_t k = 1; k < wave.size(); ++k)
+      if (wave[k - 1].second < mean && wave[k].second >= mean)
+        rises.push_back(wave[k - 1].first + (mean - wave[k - 1].second) / (wave[k].second - wave[k - 1].second) * (wave[k].first - wave[k - 1].first));
+    if (rises.size() >= 2) T = rises.back() - rises[rises.size() - 2];
+    bool below = lastSolution_[osc - 1] < mean, crossed = false;
+    const std::string e = advanceTo(netlist, ts + 2 * T, [&](const SolverStep &s) {
+      const double v = s.nodeVoltages[osc - 1];
+      crossed = below && v >= mean;
+      below = v < mean;
+      return !crossed;
+    });
+    if (!crossed) { r.error = "pss: v(oscnob) does not rise through its mean after tstab" + (e.empty() ? "" : ": " + e); return r; }
+    ts = tran_.t;
+    if (moves()) return r;
+  }
+  std::vector<double> x = lastSolution_;
+  const int n = (int)x.size(), nn = std::min(netlist.numGlobalNodes, n);
+  const int nb = std::min(nn + branchCount(netlist), n);
+  auto at = [&](double t, const std::vector<double> &v) {
+    return SolverStep{t, {v.begin(), v.begin() + nn}, {0, 0.0, true}, netlist.globalBlock.topologyHash, {v.begin() + nn, v.begin() + nb}};
+  };
+  std::vector<double> times;  // the base run's accepted times
+  // One period from x0. The base run lands on every tick and records its steps; a replay takes exactly those
+  // steps (h forced up to hMax, so each clipped call is one step)
+  auto shoot = [&](const std::vector<double> &x0, bool replay, std::vector<SolverStep> *ticks) -> std::string {
+    startTransient(netlist, x0, false, T / points, T, ts);
+    if (replay) {
+      for (double t : times) {
+        tran_.h = tran_.hMax;
+        if (std::string e = advanceTo(netlist, t, {}); !e.empty()) return e;
+      }
+      return "";
+    }
+    times.clear();
+    if (ticks) ticks->assign(1, at(ts, x0));
+    for (int k = 1; k <= points; ++k)
+      if (std::string e = advanceTo(netlist, ts + (k == points ? T : k * T / points), [&](const SolverStep &s) { times.push_back(s.time); return true; });
+          !e.empty())
+        return e;
+      else if (ticks) ticks->push_back(at(tran_.t, lastSolution_));
+    return "";
+  };
+  std::vector<SolverStep> ticks;
+  // A = I - M (an oscillator's oscnob column: -dx/dt at T, its unknown the period), LU-factored in place (partial
+  // pivoting, rows swapped as piv says); empty until the first Jacobian
+  std::vector<double> A, dx(n);
+  std::vector<int> piv(n);
+  auto solve = [&](std::vector<double> &v) {
+    for (int c = 0; c < n; ++c) {
+      std::swap(v[c], v[piv[c]]);
+      for (int i = c + 1; i < n; ++i) v[i] -= A[(size_t)i * n + c] * v[c];
+    }
+    for (int c = n - 1; c >= 0; --c) {
+      for (int k = c + 1; k < n; ++k) v[c] -= A[(size_t)c * n + k] * v[k];
+      v[c] /= A[(size_t)c * n + c];
+    }
+  };
+  auto tol = [&](int i, double a, double b) { return reltol_ * std::max(std::abs(a), std::abs(b)) + (i < nn ? vntol_ : abstol_); };
+  for (int it = 1;; ++it) {
+    if (moves()) return r;
+    if (std::string e = shoot(x, false, &ticks); !e.empty()) { r.error = "pss period run: " + e; return r; }
+    const std::vector<double> y = lastSolution_;
+    double worst = 0.0;
+    for (int i = 0; i < n; ++i) worst = std::max(worst, std::abs(y[i] - x[i]) / tol(i, x[i], y[i]));
+    r.iterations = it;
+    r.residual = worst;
+    // Converged when x repeats and Newton's estimate of its distance from the steady state, (I - M)^-1 (x(T) - x0),
+    // is within the tolerance too: a slow mode (an RC of many periods) repeats closely long before it settles
+    auto settled = [&] {
+      if (A.empty() || worst > 1.0) return false;
+      for (int i = 0; i < n; ++i) dx[i] = y[i] - x[i];
+      solve(dx);
+      for (int i = 0; i < n; ++i)  // an oscillator's period to RELTOL / 1000
+        if (std::abs(dx[i]) > (i == osc - 1 ? reltol_ * 1e-3 * T : tol(i, x[i], y[i]))) return false;
+      return true;
+    };
+    if (settled()) { r.period = std::move(ticks); r.t0 = ts; r.T = T; return r; }
+    if (it == maxIterations) {
+      std::ostringstream m;
+      m << "pss did not converge in " << it << " Newton iterations (x(T) - x(0) is " << worst << " times its tolerance)";
+      r.error = m.str();
+      return r;
+    }
+    std::vector<double> xdot;  // an oscillator's dx/dt at T: one short step on from the base run's end
+    if (osc) {
+      const double dT = 1e-3 * T / points;
+      if (std::string e = advanceTo(netlist, ts + T + dT, {}); !e.empty()) { r.error = "pss period derivative: " + e; return r; }
+      for (int i = 0; i < n; ++i) xdot.push_back((lastSolution_[i] - y[i]) / (tran_.t - ts - T));
+    }
+    // column j from a run of x + d e_j
+    A.assign((size_t)n * n, 0.0);
+    for (int j = 0; j < n; ++j) {
+      if (j == osc - 1) {
+        for (int i = 0; i < n; ++i) A[(size_t)i * n + j] = -xdot[i];
+        continue;
+      }
+      std::vector<double> xp = x;
+      const double d = 1e-3 * std::abs(x[j]) + (j < nn ? 1e-4 : 1e-9);
+      xp[j] += d;
+      if (std::string e = shoot(xp, true, nullptr); !e.empty()) { r.error = "pss sensitivity run: " + e; return r; }
+      for (int i = 0; i < n; ++i) A[(size_t)i * n + j] = (i == j) - (lastSolution_[i] - y[i]) / d;
+    }
+    for (int c = 0; c < n; ++c) {
+      int p = c;
+      for (int i = c + 1; i < n; ++i) if (std::abs(A[(size_t)i * n + c]) > std::abs(A[(size_t)p * n + c])) p = i;
+      if (!(std::abs(A[(size_t)p * n + c]) > 1e-300)) { r.error = "pss: I - M is singular (an undamped mode at the period?)"; return r; }
+      piv[c] = p;
+      if (p != c) for (int k = 0; k < n; ++k) std::swap(A[(size_t)p * n + k], A[(size_t)c * n + k]);
+      for (int i = c + 1; i < n; ++i) {
+        double &f = A[(size_t)i * n + c];
+        f /= A[(size_t)c * n + c];
+        if (f != 0.0) for (int k = c + 1; k < n; ++k) A[(size_t)i * n + k] -= f * A[(size_t)c * n + k];
+      }
+    }
+    for (int i = 0; i < n; ++i) dx[i] = y[i] - x[i];
+    solve(dx);
+    // ponytail: the only damping is a period step held to 20 % of T (a far guess); a line search on |x(T) - x0| is
+    // the upgrade if oscillators start too far from their orbit
+    const double scale = osc && std::abs(dx[osc - 1]) > 0.2 * T ? 0.2 * T / std::abs(dx[osc - 1]) : 1.0;
+    for (int i = 0; i < n; ++i) (i == osc - 1 ? T : x[i]) += scale * dx[i];
+  }
 }
 
 CircuitSim::StbResult CircuitSim::solveStb(TensorNetlist &netlist, const std::vector<double> &freqs, const std::string &probe) {

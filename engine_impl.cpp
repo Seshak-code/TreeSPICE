@@ -989,6 +989,46 @@ SimulationResponseDTO SessionImpl::runStb(const SimulationRequestDTO& req, const
     return r;
 }
 
+// ── Periodic steady state: shooting Newton ────────────────────────────────
+SimulationResponseDTO SessionImpl::runPss(const SimulationRequestDTO& req, const EngineCallbacks& /*cb*/) {
+    status_.store(JobStatus::Running);
+    SimulationResponseDTO r;
+    r.jobId        = jobId_;
+    r.analysisType = AnalysisTypeDTO::PERIODIC_STEADY_STATE;
+    SPICEParseResult parsed;
+    if (deserialiseRequest(req, parsed, r)) {
+        CircuitSim sim;
+        sim.execMode = selectExecMode(precision_);
+        sim.tranMaxStep = parsed.tranMax;
+        if (!parsed.hasPSS)
+            r.errorDetail = "PSS needs .pss fund tstab oscnob points harms [sciter].";
+        else if (!(parsed.pssFund > 0.0) || parsed.pssPoints < 2 || parsed.pssHarms < 1 || !(parsed.pssTstab >= 0.0) || parsed.pssIterations < 1)
+            r.errorDetail = ".pss needs fund > 0, tstab >= 0, points >= 2, harms >= 1 and sciter >= 1.";
+        else if (parsed.pssHarms > parsed.pssPoints / 2)
+            r.errorDetail = ".pss: harms is at most points/2 (the period's samples resolve no more).";
+        else {
+            const auto s = sim.solvePss(parsed.netlist, 1.0 / parsed.pssFund, parsed.pssPoints, parsed.pssTstab, parsed.pssIterations, parsed.pssOsc);
+            r.errorDetail = s.error;
+            r.converged = s.error.empty();
+            for (const auto& p : s.period) {
+                WaveformDataPoint pt;
+                pt.timeS = p.time;
+                pt.nodeVoltages = p.nodeVoltages;
+                pt.branchCurrents = p.branchCurrents;
+                r.waveformPoints.push_back(std::move(pt));
+            }
+            r.extended.hasPss = r.converged;
+            r.extended.pss = {s.T > 0 ? 1.0 / s.T : parsed.pssFund, s.t0, parsed.pssHarms, s.iterations, s.residual};
+            r.iterations = s.iterations;
+            r.scaleName = "time";
+            nameColumns(r, parsed, sim);
+        }
+        r.backend = backendOf(sim, precision_);
+    }
+    finish(r);
+    return r;
+}
+
 // ── DC transfer function ──────────────────────────────────────────────────
 SimulationResponseDTO SessionImpl::runTF(const SimulationRequestDTO& req,
                                           const EngineCallbacks& /*cb*/) {

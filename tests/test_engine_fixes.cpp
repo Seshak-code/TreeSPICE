@@ -1262,6 +1262,82 @@ int main() {
         bad.source.payload = "* stb\nR1 a 0 1k\nV1 a 0 dc 1\n.stb dec 5 1k 1meg R1\n.end\n";
         check(!engine->createSession()->runStb(bad, {}).converged, ".stb refuses a probe that is not a voltage source");
     }
+    {   // .pss (shooting Newton) on driven circuits. A 1 MHz sine into RC = 1 us: the period is |H| sin(wt + arg H),
+        // H = 1/(1 + jwRC), from the first iteration on (a linear circuit's shooting is exact in one Newton step)
+        std::printf("\n== pss ==\n");
+        auto pss = [](const std::string& deck) {
+            auto engine = ISimulationEngine::create();
+            engine->setPrecisionMode(PrecisionMode::Native_F64);
+            SimulationRequestDTO req;
+            req.source.payload = deck;
+            return engine->createSession()->runPss(req, {});
+        };
+        auto col = [](const SimulationResponseDTO& r, const std::string& node) {
+            for (size_t k = 0; k < r.nodeNames.size(); ++k) if (r.nodeNames[k] == node) return (int)k;
+            return -1;
+        };
+        const auto rc = pss("* rc\nV1 in 0 SIN(0 1 1meg)\nR1 in out 1k\nC1 out 0 1n\n.pss 1meg 0 0 1000 10\n.end\n");
+        const std::complex<double> H = 1.0 / std::complex<double>(1, 2 * M_PI);
+        double worst = 0;
+        const int o = col(rc, "out");
+        for (const auto& p : rc.waveformPoints)
+            worst = std::max(worst, std::abs(p.nodeVoltages[o] - std::abs(H) * std::sin(2 * M_PI * 1e6 * p.timeS + std::arg(H))));
+        check(rc.converged && rc.waveformPoints.size() == 1001 && rc.extended.pss.iterations <= 2 && worst < 1e-5 * std::abs(H),
+              ".pss: a driven RC's period is |H| sin(wt + arg H) to " + std::to_string(worst / std::abs(H)) + " of its amplitude, " +
+                  std::to_string(rc.extended.pss.iterations) + " iterations");
+        // A half-wave rectifier (RC = 10 periods): the PSS period against a 200-period transient's last one, same step
+        const std::string rect = "* rect\nV1 in 0 SIN(0 5 1meg)\nD1 in out dmod\nC1 out 0 1n\nR1 out 0 10k\n.model dmod d is=1e-14 cjo=2p\n";
+        const auto ps = pss(rect + ".tran 1n 200u 0 1n\n.pss 1meg 2.5u 0 1000 10\n.end\n");
+        const auto tr = run(PrecisionMode::Native_F64, rect + ".tran 1n 200u 0 1n\n.end\n", 1e-9, 200e-6);
+        const int po = col(ps, "out"), to = col(tr, "out");
+        worst = 0;
+        size_t k = 1;
+        for (const auto& p : ps.waveformPoints) {
+            const double t = 199e-6 + (p.timeS - ps.extended.pss.t0);
+            while (k + 1 < tr.waveformPoints.size() && tr.waveformPoints[k].timeS < t) ++k;
+            const auto &a = tr.waveformPoints[k - 1], &b = tr.waveformPoints[k];
+            const double v = a.nodeVoltages[to] + (t - a.timeS) / (b.timeS - a.timeS) * (b.nodeVoltages[to] - a.nodeVoltages[to]);
+            worst = std::max(worst, std::abs(p.nodeVoltages[po] - v));
+        }
+        check(ps.converged && tr.converged && ps.extended.pss.t0 == 3e-6 && ps.extended.pss.iterations <= 5 && worst < 1e-4,
+              ".pss: a rectifier's period (from t0 = 3 us, tstab 2.5 us rounded up to a period) matches a 200-period transient's last to " +
+                  std::to_string(worst) + " V, " + std::to_string(ps.extended.pss.iterations) + " iterations");
+        const auto sw = pss("* sw\nV1 c 0 SIN(0 1 1meg)\nV2 a 0 1\nS1 a b c 0 smod\nR1 b 0 1k\n.model smod sw vt=0 vh=0.2\n.pss 1meg 0 0 100 5\n.end\n");
+        check(!sw.converged && sw.errorDetail.find("hysteresis") != std::string::npos, ".pss refuses state it does not shoot through: " + sw.errorDetail);
+        // An LC oscillator (a tanh negative conductance, kicked by a pulse): the period is an unknown. Against a
+        // 40 us transient at the same step: the frequency from its last 20 rising zero crossings, the amplitude
+        const std::string lc = "* lc\nL1 tank 0 1u\nC1 tank 0 1n\nR1 tank 0 1k\nB1 tank 0 I=-2m*tanh(10*v(tank))\n"
+                               "I1 0 tank PULSE(0 1m 0 1n 1n 10n)\n.tran 0.2n 40u 0 0.2n\n";
+        const auto os = pss(lc + ".pss 5meg 2u tank 1000 10\n.end\n");
+        const auto ot = run(PrecisionMode::Native_F64, lc + ".end\n", 0.2e-9, 40e-6);
+        const int oo = col(os, "tank"), ox = col(ot, "tank");
+        std::vector<double> rises;
+        double amp = 0, pamp = 0;
+        for (size_t k = 1; ot.converged && k < ot.waveformPoints.size(); ++k) {
+            const auto &a = ot.waveformPoints[k - 1], &b = ot.waveformPoints[k];
+            if (a.nodeVoltages[ox] < 0 && b.nodeVoltages[ox] >= 0)
+                rises.push_back(a.timeS + -a.nodeVoltages[ox] / (b.nodeVoltages[ox] - a.nodeVoltages[ox]) * (b.timeS - a.timeS));
+            if (b.timeS > 35e-6) amp = std::max(amp, b.nodeVoltages[ox]);
+        }
+        for (const auto& p : os.waveformPoints) pamp = std::max(pamp, p.nodeVoltages[oo]);
+        const double ft = rises.size() > 21 ? 20 / (rises.back() - rises[rises.size() - 21]) : 0, fp = os.extended.pss.fundamental;
+        check(os.converged && std::abs(fp - ft) < 1e-5 * ft && std::abs(pamp - amp) < 1e-3 * amp,
+              ".pss: an LC oscillator's frequency " + std::to_string(fp) + " Hz against the transient's " + std::to_string(ft) +
+                  ", amplitude " + std::to_string(pamp) + " against " + std::to_string(amp) + ", " + std::to_string(os.extended.pss.iterations) + " iterations");
+        check(!pss("* osc\nV1 in 0 SIN(0 1 1meg)\nR1 in out 1k\nC1 out 0 1n\n.pss 1meg 1u out 100 5\n.end\n").converged,
+              ".pss refuses an oscillator whose sources still change after tstab");
+        auto kicked = [&](const std::string& per) {  // the kick a pulse with a period: shot only while it holds still
+            std::string d = lc;
+            d.replace(d.find("PULSE(0 1m 0 1n 1n 10n)"), 23, "PULSE(0 1m 0 1n 1n 10n " + per + ")");
+            return pss(d + ".pss 5meg 2u tank 200 10\n.end\n");
+        };
+        const auto longKick = kicked("1"), nearKick = kicked("2.3u");
+        check(longKick.converged && std::abs(longKick.extended.pss.fundamental / fp - 1) < 1e-4 && !nearKick.converged &&
+                  nearKick.errorDetail.find("I1 changes at t = 2.3e-06") != std::string::npos,
+              ".pss shoots an oscillator whose kick repeats after the shooting window, and refuses one inside it: " + nearKick.errorDetail);
+        check(!pss(lc + ".pss 5meg 0 tank 100 10\n.end\n").converged, ".pss refuses an oscillator without a start-up (tstab 0)");
+        check(!pss("* h\nV1 in 0 SIN(0 1 1meg)\nR1 in 0 1k\n.pss 1meg 0 0 10 6\n.end\n").converged, ".pss refuses more harmonics than points/2");
+    }
     {   // Monte Carlo: ngspice's statistical functions (agauss, gauss, aunif), seeded by .options seed, drawn per instance
         // inside a subcircuit (mismatch); a sigma of 0 is the nominal value
         std::printf("\n== statistical functions ==\n");

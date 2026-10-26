@@ -93,6 +93,10 @@ struct SPICEParseResult {
     std::string   stbSweep, stbProbe;
     int           stbPoints = 0;
     double        stbStart = 0.0, stbStop = 0.0;
+    bool          hasPSS = false;    // .pss fund tstab oscnob points harms [sciter]: periodic steady state
+    double        pssFund = 0.0, pssTstab = 0.0;
+    int           pssOsc = 0;        // oscnob: 0 (ground) a driven circuit, else the oscillator's node (1-based)
+    int           pssPoints = 0, pssHarms = 0, pssIterations = 20;
     std::string   acSweep;           // .ac dec|oct|lin n fstart fstop
     int           acPoints = 0;
     double        acStart = 0.0, acStop = 0.0;
@@ -217,6 +221,7 @@ private:
     std::string pzNames_[4];                       // .pz node names, resolved likewise
     std::string sensOut_, sensRef_;                // .sens v() node names, resolved likewise
     std::string tfOut_, tfRef_;                    // .tf v() node names, resolved likewise
+    std::string pssOsc_;                           // .pss oscnob, resolved likewise
     std::map<std::string, std::vector<PendingIC>> subcktICs_;   // .ic / .nodeset in a body (local names), applied per instance
     std::string noiseOut_, noiseRef_;              // .noise node names, resolved likewise
     std::set<std::string> globals_;                // .global node names
