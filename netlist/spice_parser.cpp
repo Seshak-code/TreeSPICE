@@ -465,6 +465,8 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     sensRef_.clear();
     tfOut_.clear();
     pssOsc_.clear();
+    pnoiseOut_.clear();
+    pnoiseRef_.clear();
     tfRef_.clear();
     noiseOut_.clear();
     noiseRef_.clear();
@@ -740,6 +742,34 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                     result_.stbStart = parseValue(tok[3]);
                     result_.stbStop = parseValue(tok[4]);
                 }
+                else if (keyword == ".PAC") {
+                    // .pac dec|oct|lin n fstart fstop maxsideband: small signal about the deck's .pss, the sources' AC
+                    const std::string sw = tok.size() == 6 ? toUpper(tok[1]) : "";
+                    if (sw != "DEC" && sw != "OCT" && sw != "LIN") throw std::runtime_error(".pac expects dec|oct|lin n fstart fstop maxsideband");
+                    result_.hasPAC = true;
+                    result_.pacSweep = sw == "DEC" ? "dec" : sw == "OCT" ? "oct" : "lin";
+                    result_.pacPoints = static_cast<int>(parseValue(tok[2]));
+                    result_.pacStart = parseValue(tok[3]);
+                    result_.pacStop = parseValue(tok[4]);
+                    result_.pacSidebands = static_cast<int>(parseValue(tok[5]));
+                }
+                else if (keyword == ".PNOISE") {
+                    // .pnoise v(out[,ref]) dec|oct|lin n fstart fstop maxsideband [relharm]: noise about the deck's .pss, at
+                    // relharm f0 + f (relharm 1: an oscillator's noise at an offset from its carrier)
+                    const size_t sw = tok.size() > 4 && toUpper(tok[3]) != "DEC" && toUpper(tok[3]) != "OCT" && toUpper(tok[3]) != "LIN" ? 4 : 3;
+                    const std::string kind = sw < tok.size() ? toUpper(tok[sw]) : "";
+                    if (tok.size() < 3 || toUpper(tok[1]) != "V" || (kind != "DEC" && kind != "OCT" && kind != "LIN") || (tok.size() != sw + 5 && tok.size() != sw + 6))
+                        throw std::runtime_error(".pnoise expects v(out[,ref]) dec|oct|lin n fstart fstop maxsideband [relharm]");
+                    result_.pnoiseRelharm = tok.size() == sw + 6 ? static_cast<int>(parseValue(tok[sw + 5])) : 0;
+                    result_.hasPNOISE = true;
+                    pnoiseOut_ = toUpper(tok[2]);
+                    pnoiseRef_ = sw == 4 ? toUpper(tok[3]) : "0";
+                    result_.pnoiseSweep = kind == "DEC" ? "dec" : kind == "OCT" ? "oct" : "lin";
+                    result_.pnoisePoints = static_cast<int>(parseValue(tok[sw + 1]));
+                    result_.pnoiseStart = parseValue(tok[sw + 2]);
+                    result_.pnoiseStop = parseValue(tok[sw + 3]);
+                    result_.pnoiseSidebands = static_cast<int>(parseValue(tok[sw + 4]));
+                }
                 else if (keyword == ".PSS") {
                     // .pss fund tstab oscnob points harms [sciter], ngspice's card: oscnob 0 (ground) is a circuit its
                     // sources drive at fund (TreeSPICE's shooting), a node an oscillator observed there
@@ -904,6 +934,16 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         auto it = nodeMap_.find(pssOsc_);
         result_.pssOsc = pssOsc_ == "0" || pssOsc_ == "GND" ? 0 : it == nodeMap_.end() ? -1 : it->second;
         if (result_.pssOsc < 0) return fail(lines.back().first, ".pss names an unknown oscnob node");
+    }
+    if (result_.hasPNOISE) {
+        auto node = [&](const std::string& nm) {
+            if (nm == "0" || nm == "GND") return 0;
+            auto it = nodeMap_.find(nm);
+            return it == nodeMap_.end() ? -1 : it->second;
+        };
+        result_.pnoiseOut = node(pnoiseOut_);
+        result_.pnoiseRef = node(pnoiseRef_);
+        if (result_.pnoiseOut <= 0 || result_.pnoiseRef < 0) return fail(lines.back().first, ".pnoise names an unknown output node");
     }
     if (result_.hasPZ)
         for (int k = 0; k < 4; ++k) {

@@ -1285,6 +1285,14 @@ int main() {
         check(rc.converged && rc.waveformPoints.size() == 1001 && rc.extended.pss.iterations <= 2 && worst < 1e-5 * std::abs(H),
               ".pss: a driven RC's period is |H| sin(wt + arg H) to " + std::to_string(worst / std::abs(H)) + " of its amplitude, " +
                   std::to_string(rc.extended.pss.iterations) + " iterations");
+        // The same RC with its sine delayed 0.25 us, shot from t0 = 2 us: the first step's cold start stamps the sources
+        // at 2 us + its micro-steps, not at 0 (there the delayed sine is still 0)
+        const auto late = pss("* rc late\nV1 in 0 SIN(0 1 1meg 0.25u)\nR1 in out 1k\nC1 out 0 1n\n.pss 1meg 2u 0 1000 10\n.end\n");
+        double worstLate = late.converged ? 0 : 1;
+        for (const auto& p : late.waveformPoints)
+            worstLate = std::max(worstLate, std::abs(p.nodeVoltages[o] - std::abs(H) * std::sin(2 * M_PI * 1e6 * (p.timeS - 0.25e-6) + std::arg(H))));
+        check(late.extended.pss.t0 == 2e-6 && worstLate < 1e-5 * std::abs(H),
+              ".pss from a later period: a delayed sine's RC period to " + std::to_string(worstLate / std::abs(H)) + " of its amplitude");
         // A half-wave rectifier (RC = 10 periods): the PSS period against a 200-period transient's last one, same step
         const std::string rect = "* rect\nV1 in 0 SIN(0 5 1meg)\nD1 in out dmod\nC1 out 0 1n\nR1 out 0 10k\n.model dmod d is=1e-14 cjo=2p\n";
         const auto ps = pss(rect + ".tran 1n 200u 0 1n\n.pss 1meg 2.5u 0 1000 10\n.end\n");
@@ -1337,6 +1345,102 @@ int main() {
               ".pss shoots an oscillator whose kick repeats after the shooting window, and refuses one inside it: " + nearKick.errorDetail);
         check(!pss(lc + ".pss 5meg 0 tank 100 10\n.end\n").converged, ".pss refuses an oscillator without a start-up (tstab 0)");
         check(!pss("* h\nV1 in 0 SIN(0 1 1meg)\nR1 in 0 1k\n.pss 1meg 0 0 10 6\n.end\n").converged, ".pss refuses more harmonics than points/2");
+    }
+    {   // .pac and .pnoise about a PSS, by the conversion matrix
+        std::printf("\n== pac, pnoise ==\n");
+        auto session = [](const std::string& deck, bool noise) {
+            auto engine = ISimulationEngine::create();
+            engine->setPrecisionMode(PrecisionMode::Native_F64);
+            SimulationRequestDTO req;
+            req.source.payload = deck;
+            auto s = engine->createSession();
+            return noise ? s->runPnoise(req, {}) : s->runPac(req, {});
+        };
+        auto col = [](const SimulationResponseDTO& r, const std::string& node) {
+            for (size_t k = 0; k < r.nodeNames.size(); ++k) if (r.nodeNames[k] == node) return (int)k;
+            return -1;
+        };
+        // An ideal multiplier by a sine LO: exactly -j/2 and +j/2 at sidebands +1 and -1, nothing at 0 or +-2
+        const auto mix = session("* mix\nVLO lo 0 SIN(0 1 1meg)\nVRF rf 0 DC 0 AC 1\nB1 out 0 V=v(rf)*v(lo)\nR1 out 0 1k\n"
+                                 ".pss 1meg 0 0 64 5\n.pac lin 1 100k 100k 2\n.end\n", false);
+        bool exact = mix.converged && mix.extended.pac.values.size() == 5;
+        const std::complex<double> want[5] = {0.0, {0, 0.5}, 0.0, {0, -0.5}, 0.0};
+        for (int m = 0; exact && m < 5; ++m) exact = std::abs(mix.extended.pac.values[m][0][col(mix, "out")] - want[m]) < 1e-12;
+        check(exact, ".pac: an ideal multiplier by sin(w0 t) converts by -j/2 and +j/2 to f +- f0, nothing else");
+        // Nothing periodic: PAC's sideband 0 is .ac, PNoise is .noise
+        const std::string rc = "* rc\nV1 in 0 DC 0 AC 1\nR1 in out 1k\nC1 out 0 1n\n.pss 1meg 0 0 64 5\n";
+        const auto lpac = session(rc + ".pac dec 2 10k 1meg 3\n.end\n", false), lpn = session(rc + ".pnoise v(out) dec 2 10k 1meg 3\n.end\n", true);
+        auto engine = ISimulationEngine::create();
+        engine->setPrecisionMode(PrecisionMode::Native_F64);
+        SimulationRequestDTO areq;
+        areq.source.payload = rc + ".ac dec 2 10k 1meg\n.noise v(out) V1 dec 2 10k 1meg\n.end\n";
+        const auto ac = engine->createSession()->runAC(areq, {});
+        const auto nz = engine->createSession()->runNoise(areq, {});
+        double dac = lpac.converged && ac.converged ? 0 : 1, dnz = lpn.converged && nz.converged ? 0 : 1;
+        for (size_t k = 0; dac < 1 && k < ac.waveformPoints.size(); ++k) {
+            const auto& p = ac.waveformPoints[k];
+            const int o = col(ac, "out");
+            dac = std::max(dac, std::abs(lpac.extended.pac.values[3][k][col(lpac, "out")] - std::complex<double>(p.nodeVoltages[o], p.nodeVoltagesImag[o])));
+            dac = std::max(dac, std::abs(lpac.extended.pac.values[4][k][col(lpac, "out")]));
+        }
+        for (size_t k = 0; dnz < 1 && k < nz.extended.noise.onoise.size(); ++k)
+            dnz = std::max(dnz, std::abs(lpn.extended.pnoise.onoise[k] / nz.extended.noise.onoise[k] - 1));
+        check(dac < 1e-12 && dnz < 1e-9, ".pac and .pnoise with nothing periodic are .ac (" + std::to_string(dac) + ") and .noise (" + std::to_string(dnz) + ")");
+        // A diode mixer, LO 1 V at 1 MHz: PAC at 1.1 MHz against a 40 us transient with a 1 mV sine there (1 ns steps), the
+        // tone's output at 0.1, 1.1 and 2.1 MHz (sidebands -1, 0, +1) by a DFT of the last 10 us, the LO alone subtracted
+        const std::string dm = "* dm\nVLO lo 0 SIN(0 1 1meg)\nD1 rf out dmod\nR1 out 0 1k\nC1 out 0 100p\n.model dmod d is=1e-14 cjo=2p rs=10\n.options reltol=1e-5\n";
+        const auto dpac = session(dm + "VRF rf lo DC 0 AC 1\n.pss 1meg 0 0 200 10\n.pac lin 1 1.1meg 1.1meg 20\n.end\n", false);
+        const auto tone = run(PrecisionMode::Native_F64, dm + "VRF rf lo SIN(0 1m 1.1meg)\n.tran 1n 40u 0 1n\n.end\n", 1e-9, 40e-6);
+        const auto lo = run(PrecisionMode::Native_F64, dm + "VRF rf lo DC 0\n.tran 1n 40u 0 1n\n.end\n", 1e-9, 40e-6);
+        auto dft = [&](const SimulationResponseDTO& r, double f) {
+            const int o = col(r, "out");
+            const double t0 = r.waveformPoints.back().timeS - 10e-6;
+            std::complex<double> s = 0;
+            size_t k = 1;
+            for (int i = 0; i < 10000; ++i) {
+                const double t = t0 + i * 1e-9;
+                while (k + 1 < r.waveformPoints.size() && r.waveformPoints[k].timeS < t) ++k;
+                const auto &a = r.waveformPoints[k - 1], &b = r.waveformPoints[k];
+                s += (a.nodeVoltages[o] + (t - a.timeS) / (b.timeS - a.timeS) * (b.nodeVoltages[o] - a.nodeVoltages[o])) * std::polar(1.0, -2 * M_PI * f * t);
+            }
+            return s * (2.0 / 10000);
+        };
+        double worst = dpac.converged && tone.converged && lo.converged ? 0 : 1;
+        for (int m = -1; worst < 1 && m <= 1; ++m) {
+            const double f = 1.1e6 + m * 1e6;
+            const std::complex<double> tr = (dft(tone, f) - dft(lo, f)) / 1e-3, pac = dpac.extended.pac.values[m + 20][0][col(dpac, "out")] * std::complex<double>(0, -1);
+            worst = std::max(worst, std::abs(tr / pac - 1.0));  // the tone is a sine: -j times PAC's cosine phasor
+        }
+        check(worst < 1e-3, ".pac: a diode mixer's sidebands -1, 0, +1 match a transient with a 1 mV tone to " + std::to_string(worst));
+        // A switched RC (an ideal switch, 50 % duty, held between): its noise variance is kT/C at every instant, so the
+        // output density integrates to kT/C. The sidebands cut off a 1/K tail (hard switching); K = 32 and 64, Richardson
+        auto ktc = [&](int K) {
+            const auto r = session("* ktc\nVLO c 0 PULSE(0 1 0 1n 1n 0.5u 1u)\nV0 in 0 DC 0\nR1 in a 50k\nS1 a out c 0 smod\nC1 out 0 1p\n"
+                                   ".model smod sw vt=0.5 vh=0 ron=1 roff=1e15\n.pss 1meg 0 0 " + std::to_string(8 * K + 8) + " 5\n"
+                                   ".pnoise v(out) dec 40 1k 1g " + std::to_string(K) + "\n.end\n", true);
+            const auto &f = r.extended.pnoise.frequencies, &v = r.extended.pnoise.onoise;
+            double sum = 0;
+            for (size_t k = 1; r.converged && k < f.size(); ++k) sum += 0.5 * (v[k] * v[k] + v[k - 1] * v[k - 1]) * (f[k] - f[k - 1]);
+            return sum / (1.380649e-23 * 300.15 / 1e-12);
+        };
+        const double k32 = ktc(32), k64 = ktc(64), rich = 2 * k64 - k32;
+        check(k32 < k64 && k64 < 1 && std::abs(rich - 1) < 0.005,
+              ".pnoise: a switched RC's noise integrates to kT/C (K = 32: " + std::to_string(k32) + ", 64: " + std::to_string(k64) +
+                  ", extrapolated " + std::to_string(rich) + " of kT/C)");
+        // An LC oscillator's phase noise, its tank resistor the one noise source (the negative conductance is a noiseless
+        // B source): near the carrier, linear theory's S_v(f0 + df) = S_i / (8 C^2 (2 pi df)^2) (a sinusoidal orbit's
+        // ISF; amplitude noise decays). Offsets 1 .. 10 kHz from the 5.03 MHz carrier (relharm 1), 40 sidebands
+        const auto osc = session("* osc\nL1 tank 0 1u\nC1 tank 0 1n\nR1 tank 0 1k\nB1 tank 0 I=-2m*tanh(10*v(tank))\n"
+                                 "I1 0 tank PULSE(0 1m 0 1n 1n 10n 1)\n.pss 5meg 2u tank 400 10\n.pnoise v(tank) lin 4 1k 10k 40 1\n.end\n", true);
+        double worstPn = osc.converged && osc.extended.pnoise.onoise.size() == 4 ? 0 : 1;
+        for (size_t k = 0; worstPn < 1 && k < 4; ++k) {
+            const double df = osc.extended.pnoise.frequencies[k], Si = 4 * 1.380649e-23 * 300.15 / 1e3;
+            worstPn = std::max(worstPn, std::abs(osc.extended.pnoise.onoise[k] / std::sqrt(Si / (8e-18 * std::pow(2 * M_PI * df, 2))) - 1));
+        }
+        check(worstPn < 0.015, ".pnoise: an LC oscillator's phase noise 1 .. 10 kHz off its carrier is linear theory's to " + std::to_string(worstPn));
+        check(!session("* no pss\nV1 in 0 DC 0 AC 1\nR1 in 0 1k\n.pac lin 1 1k 1k 1\n.end\n", false).converged &&
+                  session(rc + ".pac lin 1 1k 1k 20\n.end\n", false).errorDetail.find("need at least 81") != std::string::npos,
+              ".pac refuses a deck without .pss, and more sidebands than the PSS's points resolve");
     }
     {   // Monte Carlo: ngspice's statistical functions (agauss, gauss, aunif), seeded by .options seed, drawn per instance
         // inside a subcircuit (mismatch); a sigma of 0 is the nominal value

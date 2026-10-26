@@ -646,6 +646,9 @@ public:
   bool swForce_ = false;
   // The first Newton iteration of a solve (or any stamp outside one): XSPICE code models' inputs are not limited
   bool cmFresh_ = true;
+  // pss's sensitivity runs: each step is the base run's, so neither LTE nor a switch's toggle nor the arbiter shortens
+  // it (only a Newton failure does)
+  bool replaySteps_ = false;
   bool swAcOff_ = false;  // small-signal matrix: ngspice's swacload stamps ROFF whatever the operating point
   // States as ngspice's: 0 off, 1 on, 2 off and 3 on inside the hysteresis band. A negative VH (VT + VH < VT - VH)
   // inverts the band: entering it from on turns the switch off and from off turns it on, until it leaves the band.
@@ -1273,6 +1276,7 @@ public:
   // starts at a rising crossing of v(osc)'s mean after tstab and holds v(osc) there (the phase condition).
   struct PssResult {
     std::vector<SolverStep> period;
+    std::vector<std::vector<double>> states;  // the whole x (internal device nodes too) at each of period's ticks
     double t0 = 0.0, T = 0.0;
     int iterations = 0;
     double residual = 0.0;  // the last iteration's worst |x(T) - x0| over its tolerance
@@ -1281,6 +1285,39 @@ public:
   PssResult solvePss(TensorNetlist &netlist, double period, int points, double tstab, int maxIterations = 20, int osc = 0);
   std::vector<std::vector<std::complex<double>>> solveAC(TensorNetlist &netlist,
                                                          const std::vector<double> &freqs);
+
+  // pac and pnoise: the PSS orbit linearised at its ticks (G(t), C(t) as acSystem stamps them, each switch at its
+  // state), as harmonics -2K..2K: the conversion matrix of sidebands -K..K, Y_ml = G_(m-l) + j (w + m w0) C_(m-l).
+  // Exact for the orbit as sampled; the sidebands beyond K are cut off.
+  // a noise generator: a current noise of psd [A^2/Hz] (psdAt(f) when coloured) between global nodes a and b
+  struct NoiseGen { int a, b; double psd; std::function<double(double)> psdAt = nullptr; };
+  struct Lptv {
+    int n = 0, K = 0;
+    double w0 = 0.0;
+    struct Entry { int r, c; std::vector<std::complex<double>> g, cap; };  // harmonics -2K..2K of G(t) and C(t) at (r, c)
+    std::vector<Entry> entries;
+    std::vector<std::vector<NoiseGen>> gens;  // pnoise: the noise generators at each tick
+  };
+  std::string lptv(TensorNetlist &netlist, const PssResult &pss, int K, bool noise, Lptv &out);
+  // Y(w) in real form: the unknown (sideband m, i) at (m + K) n + i, its imaginary part (2K + 1) n further on
+  static Csr_matrix lptvMatrix(const Lptv &L, double w, bool transpose);
+  // pac: the sources' AC magnitude and phase as a small signal at each f; x[f][m + K] the unknowns at f + m f0
+  struct PacResult {
+    std::vector<std::vector<std::vector<std::complex<double>>>> x;
+    std::string error;
+  };
+  PacResult solvePac(TensorNetlist &netlist, const PssResult &pss, const std::vector<double> &freqs, int K);
+  // pnoise: the output noise density [V/sqrt(Hz)] of v(out) - v(ref) at each f. Each generator is cyclostationary,
+  // sqrt(psd(t, f')) modulating a stationary source; the noise at f + l f0 (l = -K..K) folds to f through the
+  // sidebands, by one adjoint solve per f. ponytail: psd(t, f') taken as separable (a white or 1/f source's amplitude
+  // varying with t), exact for the models' white and flicker sources; flicker at f' = 0 is left out.
+  // Near an oscillator's carrier the cut-off sidebands move the carrier the conversion matrix sees: a hard-limited LC
+  // oscillator 1 kHz off its 5 MHz carrier reads 44 % low at K = 10, 3 % at 20, 0.5 % at 40 (more points do not help).
+  struct PnoiseResult {
+    std::vector<double> onoise;
+    std::string error;
+  };
+  PnoiseResult solvePnoise(TensorNetlist &netlist, const PssResult &pss, const std::vector<double> &freqs, int K, int outNode, int refNode);
 
   // Noise around the last solveDC() operating point (ngspice .noise semantics).
   // Generators: resistor thermal 4kT/R (incl. diode RS, BJT RB/RC/RE), diode shot 2q|Id|,
@@ -1417,10 +1454,11 @@ private:
    * @param totalTime  Full first timestep duration (the tstep value)
    * @param nSubsteps  Number of internal micro-steps (typically COLD_START_SUBSTEPS=100)
    * @param finalVoltages  Output: converged voltages after the last micro-step
+   * @param t0  The time the step starts at (a transient started later than 0: pss's shooting)
    * @return true if all micro-steps converged; false if any micro-step NR failed
    */
   bool coldStartSweep(TensorNetlist& netlist, double totalTime, int nSubsteps,
-                      std::vector<double>& finalVoltages);
+                      std::vector<double>& finalVoltages, double t0);
 
   /** Tensorize `netlist` into soaBlock and sync reactive-element history
    *  (global + instances) from the AoS state. */
@@ -1555,7 +1593,9 @@ public:
   struct ACSystem { Csr_matrix G; std::vector<int> cr, cc; std::vector<double> cv; std::vector<int> dr, dc; std::vector<double> dv, dtd;
                     std::vector<int> fr, fc; std::vector<std::function<std::complex<double>(double)>> fv;  // entries f(w)
                     int n = 0; };
-  bool acSystem(TensorNetlist &netlist, ACSystem &sys);
+  // switchesAsSolved: each switch at its state at lastSolution_ (a periodic analysis' tick), else at ROFF (ngspice's .ac)
+  bool acSystem(TensorNetlist &netlist, ACSystem &sys, bool switchesAsSolved = false);
+  std::string noiseGenerators(TensorNetlist &netlist, std::vector<NoiseGen> &gens, bool switchesAsSolved);
   // R(Y) = [[G, -wC], [wC, G]] for Y = G + jwC (transpose: R(Y)^T = R(Y^H)).
   static Csr_matrix acMatrix(const ACSystem &s, double w, bool transpose);
   // Excitation: the sources' AC mag/phase, or unit AC at source `unit` only
