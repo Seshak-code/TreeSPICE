@@ -1333,6 +1333,65 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         o.model = model;
         return o;
     };
+    // BSIM-CMG (LEVEL=72, the FinFET and GAA PDKs' HSPICE cards: ASAP7 fins, ASAP5 nanowires) through OSDI, in the
+    // card's VERSION: 107 on bsimcmg (107.0.0, bsimcmg107.osdi: the version the PDKs extracted with), 111 on bsimcmg_va
+    // (111.0.0, bsimcmg.osdi); another is an error (107 and 111 give different currents on one card). The card is one
+    // model; its geometry (L, NFIN, NRS, NRD, NF, ...) is per instance, as BSIM-CMG takes it. A card parameter the
+    // version does not know is an error, not a drop. A CDL W (ASAP7's w=81n nfin=3) is no BSIM-CMG parameter: it is
+    // taken only when it equals NFIN times the fin pitch.
+    auto cmgOsdi = [&](const Mosfet& m, const ModelCard& c) {
+        const double version = c.get("VERSION", NAN);
+        const bool v107 = version == 107.0, v111 = std::floor(version) == 111.0;
+        if (!v107 && !v111)
+            throw std::runtime_error("model " + c.name + ": BSIM-CMG VERSION " + (std::isnan(version) ? std::string("not given") : std::to_string(version)) +
+                                     " is not supported (107 and 111 are; give VERSION)");
+        const char* module = v107 ? "bsimcmg" : "bsimcmg_va";
+        if (!osdi::findModule(module)) osdi::loadLibrary(v107 ? "bsimcmg107.osdi" : "bsimcmg.osdi");
+        if (!std::isnan(m.inst.temp) || m.inst.dtemp != 0.0)
+            throw std::runtime_error(m.instanceName + ": TEMP/DTEMP on a BSIM-CMG device is not supported yet");
+        if (!m.soiNodes.empty()) throw std::runtime_error(m.instanceName + ": expected 4 nodes (d g s e) for a BSIM-CMG model");
+        auto& model = osdiModels_[toUpper(c.name) + " BSIMCMG"];
+        if (!model) {
+            std::map<std::string, double> p;
+            for (const auto& [k, v] : c.params) if (k != "LEVEL") p[k] = v;
+            // ASAP5's cards give LRSD = 0, outside BSIM-CMG's (0, inf). LRSD enters only RGEOMOD = 1's resistance and
+            // CGEOMOD = 2's fringe capacitance; with neither it has no effect and goes, with either it is an error
+            if (p.count("LRSD") && !(p["LRSD"] > 0.0)) {
+                if (c.get("RGEOMOD", 0.0) == 1.0 || c.get("CGEOMOD", 0.0) == 2.0)
+                    throw std::runtime_error("model " + c.name + ": LRSD must be > 0 with RGEOMOD = 1 or CGEOMOD = 2");
+                p.erase("LRSD");
+            }
+            if (v107) p["DEVTYPE"] = c.type == "PMOS" ? 0.0 : 1.0;  // 107: DEVTYPE 1 nMOS, 0 pMOS; 111: TYPE +-1
+            else p["TYPE"] = c.type == "PMOS" ? -1.0 : 1.0;
+            if (!p.count("TNOM")) p["TNOM"] = tnomC_;
+            model = std::make_shared<osdi::Model>(osdi::findModule(module), c.name, p);
+        }
+        OsdiDevice o;
+        o.instanceName = m.instanceName;
+        o.modelName = c.name;
+        o.nodes = {m.drain, m.gate, m.source, m.body};
+        auto given = m.given;
+        given.insert(m.osdiParams.begin(), m.osdiParams.end());
+        if (const auto f = given.find("NFIN"); f != given.end() && !(f->second >= 1.0 && f->second == std::floor(f->second))) {
+            std::ostringstream e;
+            e << m.instanceName << ": NFIN is a whole number of fins (or wires), at least 1, not " << f->second;
+            throw std::runtime_error(e.str());
+        }
+        if (const auto w = given.find("W"); w != given.end()) {
+            const double nfin = given.count("NFIN") ? given["NFIN"] : 1.0, fp = c.get("FPITCH", NAN);
+            if (!(std::abs(w->second - nfin * fp) <= 1e-6 * w->second)) {
+                std::ostringstream e;
+                e << m.instanceName << ": W is no BSIM-CMG parameter; W=" << w->second << " is taken only as NFIN (" << nfin
+                  << ") times the card's FPITCH (" << fp << ")";
+                throw std::runtime_error(e.str());
+            }
+            given.erase(w);
+        }
+        for (const auto& [k, v] : given) if (!(k == "NF" && v == 1.0)) o.params.push_back({k, v});
+        if (m.extra.mult != 1.0) o.params.push_back({"m", m.extra.mult});
+        o.model = model;
+        return o;
+    };
     auto resolveBlock = [&](TensorBlock& blk) {
         // BSIM4 (LEVEL=54 or 14) and BSIM3 (LEVEL=49 or 8) cards, ngspice's native models, run on the OSDI
         // bsim4va / bsim3_va (OpenVAF, loaded from TREESPICE_OSDI_PATH as bsim4.osdi / bsim3.osdi when needed).
@@ -1505,6 +1564,11 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                                                            level == 10.0 || level == 58.0) {
                 native(("LEVEL " + std::to_string((int)level)).c_str());
                 blk.osdiDevices.push_back(bsimOsdi(m, *c, level == 49.0 || level == 8.0 ? 3 : level == 10.0 || level == 58.0 ? 10 : 4));
+                continue;
+            }
+            if (c->get("LEVEL", 1.0) == 72.0) {
+                native("BSIM-CMG");
+                blk.osdiDevices.push_back(cmgOsdi(m, *c));
                 continue;
             }
             // LEVEL 9 is ngspice's mos9: mos3 with its effective L and W required above 1 um (mos9temp)

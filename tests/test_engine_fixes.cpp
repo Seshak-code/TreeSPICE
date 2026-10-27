@@ -1175,6 +1175,32 @@ int main() {
             check(r.converged && near(V(r, 2), V(r, 3), 1e-9) && !near(V(r, 2), V(r, 4), 1e-3),
                   "MESFET positional area is AREA (" + std::to_string(V(r, 2)) + " V)");
         }
+        {   // BSIM-CMG cards (LEVEL 72, the FinFET PDKs'): VERSION 107 runs on bsimcmg107.osdi, 111 on bsimcmg.osdi
+            // (another, or none, is an error); a CDL W only as NFIN times FPITCH; LRSD <= 0 only where nothing reads it
+            auto cmg = [](const std::string& card, const std::string& inst) {
+                return run(PrecisionMode::Native_F64, "* cmg\n" + card + "\nVD d 0 0.5\nVG g 0 0.5\nM1 d g 0 0 n1 " + inst + "\n.op\n");
+            };
+            auto id = [](const SimulationResponseDTO& r) -> double {
+                for (size_t k = 0; r.converged && k < r.branchNames.size(); ++k)
+                    if (r.branchNames[k] == "vd" || r.branchNames[k] == "VD") return -r.waveformPoints.back().branchCurrents[k];
+                return NAN;
+            };
+            const std::string c107 = ".model n1 nmos level=72 version=107 fpitch=27n", c111 = ".model n1 nmos level=72 version=111 fpitch=27n";
+            const double i107 = id(cmg(c107, "nfin=3 l=20n")), i111 = id(cmg(c111, "nfin=3 l=20n"));
+            check(i107 > 0 && i111 > 0 && std::abs(i107 / i111 - 1) > 1e-3,
+                  "BSIM-CMG LEVEL 72: VERSION 107 and 111 run their own models (" + std::to_string(i107) + " vs " + std::to_string(i111) + " A)");
+            const auto none = cmg(".model n1 nmos level=72", "nfin=1"), v110 = cmg(".model n1 nmos level=72 version=110", "nfin=1");
+            check(!none.converged && none.errorDetail.find("VERSION") != std::string::npos && !v110.converged,
+                  "BSIM-CMG LEVEL 72 without VERSION, or with one other than 107 and 111, is an error: " + none.errorDetail);
+            const auto badW = cmg(c107, "nfin=3 w=100n l=20n");
+            check(id(cmg(c107, "nfin=3 w=81n l=20n")) == i107 && !badW.converged && badW.errorDetail.find("FPITCH") != std::string::npos,
+                  "BSIM-CMG: a CDL W equal to NFIN x FPITCH is taken, another refused: " + badW.errorDetail);
+            check(cmg(c107, "nfin=2.5 l=20n").errorDetail.find("whole number") != std::string::npos && !cmg(c107, "nfin=0 l=20n").converged,
+                  "BSIM-CMG: NFIN is a whole number of at least 1");
+            const auto lrsd = cmg(c107 + " lrsd=0 rgeomod=1", "nfin=3 l=20n");
+            check(id(cmg(c107 + " lrsd=0", "nfin=3 l=20n")) == i107 && !lrsd.converged && lrsd.errorDetail.find("LRSD") != std::string::npos,
+                  "BSIM-CMG: LRSD = 0 (ASAP5's) goes where nothing reads it, and is refused with RGEOMOD = 1");
+        }
         {   // m= on a subcircuit multiplies its OSDI devices too: an m=3 cell keeps the m=1 cell's voltages
             // (ngspice 47 multiplies only the non-OSDI devices, so it cannot be the reference)
             const auto r = run(PrecisionMode::Native_F64, "m\n.osdi bsimcmg.osdi\n.subckt inv in out vdd\nN1 out in 0 0 nfin\n"

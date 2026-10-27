@@ -1,9 +1,9 @@
 #!/bin/sh
 # Compile the Verilog-A models the ngspice harness loads through OSDI into datasets/osdi/
 # (git-ignored, like the other datasets), plus IHP SG13G2's PSP103 when datasets/pdk/ihp
-# holds that PDK. Needs OpenVAF-reloaded and its source tree,
+# holds that PDK, and BSIM-CMG 107 when BSIMCMG107_DIR is set. Needs OpenVAF-reloaded and its source tree,
 # whose integration_tests/ hold the reference .va models:
-#   OPENVAF_DIR=/path/to/OpenVAF tests/build_osdi.sh
+#   OPENVAF_DIR=/path/to/OpenVAF [BSIMCMG107_DIR=/path/to/bsimcmg_107.0.0/code] tests/build_osdi.sh
 set -eu
 : "${OPENVAF_DIR:?set OPENVAF_DIR to an OpenVAF(-reloaded) checkout}"
 OPENVAF="${OPENVAF:-$OPENVAF_DIR/target/release/openvaf-r}"
@@ -24,6 +24,26 @@ perl -0pe 's/(if \(!BSIM4wk1Given\)\s*BSIM4wk1 = 0\.0;\s*)if \(!BSIM4wk1Given\)\
   "$OPENVAF_DIR/integration_tests/BSIM4/bsim4.va" > "$tmp/bsim4.va"
 "$OPENVAF" "$tmp/bsim4.va" -o "$out/bsim4.osdi"
 "$OPENVAF" "$OPENVAF_DIR/integration_tests/BSIMCMG/bsimcmg.va" -o "$out/bsimcmg.osdi"
+# BSIM-CMG 107.0.0 (module bsimcmg), the version the FinFET PDKs' cards are (ASAP7, ASAP5: LEVEL 72, VERSION 107),
+# when BSIMCMG107_DIR names its code/ directory. The source is Xyce's copy (github.com/Xyce/Xyce,
+# utils/ADMS/examples/bsimcmg_107.0.0/code): the BSIM team's equations, with type="instance" attributes. Xyce writes
+# each attribute after its declaration and space-separated, and puts its own on the module line; the copy puts them
+# in front, comma-separated (the standard's form) and drops the module's. EOTACC's lower bound 0.1n is
+# 0.1 * 1e-9 = 1.0000000000000001e-10 in double, above the 1e-10 the PDKs' cards give at that bound: it is written
+# 1e-10 (EOTACC only enters with CAPMOD != 0).
+if [ -n "${BSIMCMG107_DIR:-}" ]; then
+  mkdir "$tmp/cmg107"
+  cp "$BSIMCMG107_DIR"/*.va "$BSIMCMG107_DIR"/*.include "$tmp/cmg107/"
+  perl -pi -e 's/^(parameter real EOTACC\s*=\s*EOT from )\[0\.1n:inf\)/$1\[1e-10:inf)/ and $n++; END { $n or die "bsimcmg 107: EOTACC bound patch no longer applies\n" }' \
+    "$tmp/cmg107/bsimcmg_body.include"
+  perl -0pi -e 's/^module bsimcmg\(d, g, s, e\) `attr\([^\n]*\);$/module bsimcmg(d, g, s, e);/m or die "bsimcmg 107: module patch no longer applies\n"' \
+    "$tmp/cmg107/bsimcmg_main.va"
+  perl -pi -e 'if (/^(\s*)((?:parameter|localparam|real|integer|aliasparam)\b.*?)\s*`attr\((.*)\)\s*;(.*)$/) {
+                 my ($i, $d, $a, $t) = ($1, $2, $3, $4);
+                 if ((() = /`attr\(/g) == 1) { $a =~ s/"\s+(\w+\s*=)/", $1/g; $_ = "$i(* $a *) $d;$t\n" } }' \
+    "$tmp/cmg107"/*.include "$tmp/cmg107"/*.va
+  "$OPENVAF" "$tmp/cmg107/bsimcmg.va" -o "$out/bsimcmg107.osdi"
+fi
 # HICUM/L2 2.4.0, the version of ngspice's native HICUM (BJT LEVEL 8); unpatched, it matches native to 4e-5
 "$OPENVAF" "$OPENVAF_DIR/integration_tests/HICUML2/hicuml2.va" -o "$out/hicum2.osdi"
 # VBIC (BJT LEVEL 4, 9) as ngspice 47 runs it: generated from ngspice's own vbicload.c / vbictemp.c (tests/models/vbic_gen.py)

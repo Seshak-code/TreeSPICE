@@ -1,0 +1,17 @@
+* ASAP7 TT: a five-stage ring oscillator, BSIM-CMG (LEVEL 72 VERSION 107), started from alternating node voltages
+.include pdk/asap7/asap7_pdk_r1p7/models/hspice/7nm_TT_160803.pm
+VDD vdd 0 0.7
+.subckt inv in out vdd
+MP out in vdd vdd pmos_rvt nfin=2 l=20n
+MN out in 0 0 nmos_rvt nfin=2 l=20n
+.ends
+X1 n1 n2 vdd inv
+X2 n2 n3 vdd inv
+X3 n3 n4 vdd inv
+X4 n4 n5 vdd inv
+X5 n5 n1 vdd inv
+C1 n1 0 0.1f
+.ic v(n1)=0 v(n2)=0.7 v(n3)=0 v(n4)=0.7 v(n5)=0
+.tran 0.1p 60p uic
+.print tran v(n1) v(n3)
+.end

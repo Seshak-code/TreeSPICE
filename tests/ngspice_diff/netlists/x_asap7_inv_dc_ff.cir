@@ -1,0 +1,9 @@
+* ASAP7 FF: a fin inverter's DC transfer, BSIM-CMG (LEVEL 72 VERSION 107)
+.include pdk/asap7/asap7_pdk_r1p7/models/hspice/7nm_FF_160803.pm
+VDD vdd 0 0.7
+VIN in 0 0
+MP out in vdd vdd pmos_rvt nfin=2 l=20n
+MN out in 0 0 nmos_rvt nfin=2 l=20n
+.dc VIN 0 0.7 0.01
+.print dc v(out) i(VDD)
+.end
