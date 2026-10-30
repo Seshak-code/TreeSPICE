@@ -8,7 +8,7 @@
 /*
  * integration_method.h
  * Strategy Pattern for Numerical Integration Methods.
- * Supports Trapezoidal, Gear 1 (Backward Euler), and Gear 2 (BDF2) with predictors.
+ * Supports Trapezoidal, Gear 1 (Backward Euler), and Gear 2 (variable-step BDF2) with predictors.
  */
 
 
@@ -38,6 +38,31 @@ public:
     virtual double predict(const std::vector<double>& v_hist) = 0;
         
     virtual IntegrationType getType() const = 0;
+
+    // The last accepted step: variable-step Gear 2 weighs the older history by it (0: none yet, then Gear 2 is
+    // backward Euler, as ngspice's order 1 start).
+    double hPrev = 0.0;
+
+    // dq/dt at the new point from q there, its last two accepted values q1, q2 and the last dq/dt i1, over the
+    // step h: trapezoidal 2/h (q - q1) - i1; backward Euler (q - q1)/h; Gear 2 the slope at the new point of the
+    // parabola through the three points (ngspice NIcomCof, order 2, at variable step). Affine in q with slope
+    // coef(h), so a linear element's companion source is rate(0, ...).
+    template <class T> T rate(const T &q, double q1, double q2, double i1, double h) const {
+        switch (getType()) {
+        case IntegrationType::TRAPEZOIDAL: return (2.0 / h) * (q - q1) - i1;
+        case IntegrationType::GEAR_2:
+            if (hPrev > 0.0) return coef(h) * q - (h + hPrev) / (h * hPrev) * q1 + h / (hPrev * (h + hPrev)) * q2;
+            [[fallthrough]];
+        default: return (q - q1) / h;
+        }
+    }
+    double coef(double h) const {
+        switch (getType()) {
+        case IntegrationType::TRAPEZOIDAL: return 2.0 / h;
+        case IntegrationType::GEAR_2: return hPrev > 0.0 ? 1.0 / h + 1.0 / (h + hPrev) : 1.0 / h;
+        default: return 1.0 / h;
+        }
+    }
 };
 
 // ============================================================================
@@ -128,10 +153,8 @@ public:
              return;
         }
 
-        double v_n_m1 = v_hist[0];
-        double v_n_m2 = v_hist[1];
-        double G_eq = (1.5 * C) / timeStep;
-        double I_eq_source = C * ((2.0/timeStep)*v_n_m1 - (0.5/timeStep)*v_n_m2);
+        double G_eq = C * coef(timeStep);
+        double I_eq_source = -C * rate(0.0, v_hist[0], v_hist[1], 0.0, timeStep);
 
         auto add = [&](int r, int c, double val) { if (r != 0 && c != 0) mat.add(r-1, c-1, val); };
         add(nodeI, nodeI, G_eq); add(nodeJ, nodeJ, G_eq);

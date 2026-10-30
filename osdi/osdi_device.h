@@ -104,6 +104,12 @@ public:
     double *iPrev() { return &s_[numLocal()]; }
     double *vHist(int i) { return &s_[(2 + i) * numLocal()]; }
     const double *vHist(int i) const { return &s_[(2 + i) * numLocal()]; }
+    // q two accepted steps back, for a Gear run only: appended on first use, so other runs keep no copy (memory)
+    double *qPrev2() {
+        const size_t base = keep_ ? 8 * numLocal() + 2 * setup_->numSlots : 5 * numLocal();
+        if (s_.size() < base + numLocal()) s_.resize(base + numLocal(), 0.0);
+        return &s_[base];
+    }
     double gmin = 1e-12;  // $simparam gmin handed to the model (.options gmin, set per run by the solver)
 
 private:

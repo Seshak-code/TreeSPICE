@@ -1210,6 +1210,7 @@ struct BlockState {
     struct DeviceCharge {
         double v[3][5] = {};  // branch voltages, last three accepted steps (v[0] latest; LTE)
         double q[5] = {}, i[5] = {};
+        double q2[5] = {};    // q two accepted steps back (variable-step Gear 2)
         double half[3] = {};  // MOSFET Meyer half-capacitances gs, gd, gb (ngspice averages two)
         // Diode / BJT junction limiting (ngspice state0): the limited junction
         // voltages of the last Newton iteration (diode vd; BJT vbe, vbc).

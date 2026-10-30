@@ -1,0 +1,10 @@
+* BJT switch saturating with storage time (TR, TF) transient (method=gear)
+VCC 1 0 DC 5
+VIN 6 0 PULSE(0 5 5n 1n 1n 100n 300n)
+RB 6 2 1k
+Q1 3 2 0 QS
+RC 1 3 1k
+.model QS NPN(IS=1e-15 BF=100 BR=1 TF=0.3n TR=30n CJE=1p CJC=1p CJS=2p)
+.options method=gear
+.tran 0.5n 300n
+.end

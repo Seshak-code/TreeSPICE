@@ -249,10 +249,19 @@ then the two Roadmap sections it points to. Everything below was verified by run
   - **Devices:** diode, MOS1 (cut/lin/sat) and BJT currents and derivatives, from SymPy derivatives of SPICE's
     equations. `[info]` lines give the gap to the papers' laws (GMIN, the reverse cubic law, the substrate junction).
   - **Result:** 36 of 36 pass, 9 s. Bounds are condition-number based (row-equilibrated), not fixed tolerances.
-  - Also: `acutesim_engine_dump` prints 17 significant digits (it printed 9).
-  - **Findings, not fixed:** `.options method=gear` runs trapezoidal with only a warning (spice_parser.cpp:885);
-    GEAR_2 uses constant-step coefficients; the CLI does not report the transient-OP fallback; `subcircuit_validator.h`
-    and `extractSubCircuit` are dead; graph_canonical's "Weisfeiler-Lehman" comment describes BFS+FNV code.
+  - Also: `acutesim_engine_dump` prints 17 significant digits (it printed 9); run_diff's AC frequency and DC sweep
+    grid checks now allow ngspice's own 9-digit `wrdata` rounding (5e-9; at 1e-9 every AC deck failed).
+  - **Findings, not fixed:** the CLI does not report the transient-OP fallback; `subcircuit_validator.h` and
+    `extractSubCircuit` are dead; graph_canonical's "Weisfeiler-Lehman" comment describes BFS+FNV code.
+  - **Gear (same branch):** `.options method=gear` ran trapezoidal with a warning, and GEAR_2 had constant-step
+    coefficients. Now every charge (C, L, MOSFET Meyer, diode/BJT/JFET junctions, OSDI) integrates through
+    `IIntegrationMethod::rate`/`coef`: variable-step BDF2 (ngspice NIcomCof order 2), the history one charge deeper
+    (`DeviceCharge::q2`; OSDI `qPrev2`, allocated only in a Gear run), the last accepted step in `hPrev`.
+    - Checks: refcheck replays rc/rlc/cv_loop under Gear at 50 digits (err ~1e-14); the error falls 4x per step
+      halving (second order, as trap); 6 `gear_*` decks in run_diff (charge-storing D, Q, MOS1, BSIM3, OSDI) pass against ngspice's gear.
+    - An unknown method is now an error. Gear runs at order 2 at most (ponytail: ngspice raises to MAXORD).
+    - Note: tightening reltol does not refine TreeSPICE's steps when tstep caps them (max step = tstep; ngspice
+      uses tstop/50), so a convergence study must refine tstep.
 - **Status of the plan:** Roadmap Phase 1 (Foundations) is done. See `Roadmap.md` →
   "⚙️ ENGINE FEATURE LIST & VERIFIED SUPPORT STATUS" (what works, by device/analysis, with ✅/⚠️/❌/🚫/❓)
   and "🎯 END-TO-END GOAL & ENGINE SCALE PLAN" (phases and gates).

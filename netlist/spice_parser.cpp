@@ -611,8 +611,9 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                         const double v = kv ? parseValue(tok[i + 1]) : 0.0;
                         if (k == "METHOD" && i + 1 < tok.size()) {
                             const std::string m = toUpper(tok[++i]);
-                            if (m != "TRAP" && m != "TRAPEZOIDAL" && m != "GEAR") std::cerr << "Warning: .options method=" << m << " is ignored\n";
-                            else env.gear = m == "GEAR";
+                            if (m != "TRAP" && m != "TRAPEZOIDAL" && m != "GEAR")
+                                throw std::runtime_error(".options method=" + m + ": not an integration method (trap, gear)");
+                            env.gear = m == "GEAR";
                             continue;
                         }
                         if (k == "HIER") { flatten_ = kv ? v == 0.0 : false; if (kv) ++i; continue; }  // S3: the quotient circuit
@@ -882,10 +883,10 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
 
     if (inSubckt_)
         return fail(lines.back().first, ".subckt " + subcktName_ + " has no .ends");
-    // ponytail: the engine's Gear 2 has constant-step coefficients, wrong under LTE step changes, so method=gear
-    // with maxord > 1 runs the trapezoidal rule (same solution within LTE); maxord=1 is exact backward Euler.
-    if (result_.netlist.environment.gear && result_.netlist.environment.maxord > 1)
-        std::cerr << "Warning: .options method=gear (maxord > 1) runs as trapezoidal\n";
+    // ponytail: Gear runs at order 2 at most (variable-step BDF2); ngspice raises the order up to MAXORD (6) when
+    // the LTE allows, so with maxord > 2 its steps can be longer. Orders 3-6 need q histories that deep.
+    if (result_.netlist.environment.gear && result_.netlist.environment.maxord > 2)
+        std::cerr << "Warning: .options method=gear runs at order 2 at most (maxord " << result_.netlist.environment.maxord << ")\n";
     try { resolveControlledSources(result_.netlist.globalBlock); }
     catch (const std::exception& e) { return fail(lines.back().first, e.what()); }
 

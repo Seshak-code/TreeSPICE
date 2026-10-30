@@ -429,7 +429,8 @@ public:
     lteTolerance_ = 1e-4 * e.reltol / 1e-3;  // the engine's LTE bound scales with RELTOL (default unchanged)
     lteController_.setTolerance(lteTolerance_);
     // ngspice: order 1 is backward Euler for either method; trapezoidal is order 2 at most
-    tranMethod_ = e.maxord <= 1 ? IntegrationType::GEAR_1_EULER : IntegrationType::TRAPEZOIDAL;
+    tranMethod_ = e.maxord <= 1 ? IntegrationType::GEAR_1_EULER
+                : e.gear        ? IntegrationType::GEAR_2 : IntegrationType::TRAPEZOIDAL;
   }
   int nrLimit() const { return itl4_ > 0 ? itl4_ : PhysicsConstants::MAX_NR_ITER; }  // transient Newton iterations
 
@@ -447,6 +448,7 @@ public:
 
   void setIntegrationMethod(IntegrationType type) {
     if(!integrator || integrator->getType() != type) {
+        const double hPrev = integrator ? integrator->hPrev : 0.0;
         switch (type) {
         case IntegrationType::TRAPEZOIDAL:
           integrator = std::make_unique<TrapezoidalIntegration>();
@@ -458,6 +460,7 @@ public:
           integrator = std::make_unique<Gear2Integration>();
           break;
         }
+        integrator->hPrev = hPrev;
     }
   }
   
@@ -491,9 +494,8 @@ public:
 
   // Terminal currents (d, g, s, b) into a MOSFET at x: DC (mos1_currents) plus,
   // in transient, the currents of its charges integrated from the last accepted
-  // step `st` (TRAP, else BE: ngspice NIintegrate). One definition for the Newton
+  // step `st` (the integrator's rate: ngspice NIintegrate). One definition for the Newton
   // stamp (T = Dual), the KCL audit and the history update (next != null).
-  // ponytail: GEAR_2 (never chosen by runTransient) integrates the charges with BE.
   template <typename T>
   std::array<T, 4> mosCurrents(const std::array<T, 4> &x, const Mos1Params<double> &p,
                                const BlockState::DeviceCharge *st, double h,
@@ -507,13 +509,12 @@ public:
               std::copy(st->v[1], st->v[1] + 5, next->v[2]);
               std::copy(st->v[0], st->v[0] + 5, next->v[1]);
           }
-      const bool trap = integrator->getType() == IntegrationType::TRAPEZOIDAL;
       for (int k = 0; k < 5; ++k) {
-          const T i = trap ? (2.0 / h) * (c.q[k] - st->q[k]) - st->i[k] : (c.q[k] - st->q[k]) / h;
+          const T i = integrator->rate(c.q[k], st->q[k], st->q2[k], st->i[k], h);
           I[mosFrom[k]] += p.polarity * i;
           I[mosTo[k]] -= p.polarity * i;
           if constexpr (std::is_same_v<T, double>)
-              if (next) { next->v[0][k] = c.v[k]; next->q[k] = c.q[k]; next->i[k] = i; }
+              if (next) { next->v[0][k] = c.v[k]; next->q2[k] = st->q[k]; next->q[k] = c.q[k]; next->i[k] = i; }
       }
       if constexpr (std::is_same_v<T, double>)
           if (next) std::copy(c.half, c.half + 3, next->half);
@@ -856,12 +857,16 @@ public:
         if (J) std::fill(J, J + L * L, 0.0);
         return;
       }
-    const bool trap = tran && integrator->getType() == IntegrationType::TRAPEZOIDAL;
-    const double coef = !tran ? 0.0 : trap ? 2.0 / h : 1.0 / h;
+    const double coef = tran ? integrator->coef(h) : 0.0;
+    const bool gear = tranMethod_ == IntegrationType::GEAR_2;  // only a Gear run keeps q two steps back (memory)
+    const double *q2 = gear ? in.qPrev2() : nullptr;
     for (size_t k = 0; k < L; ++k) {
-      const double iq = tran ? coef * (q[k] - in.qPrev()[k]) - (trap ? in.iPrev()[k] : 0.0) : 0.0;
+      const double iq = tran ? integrator->rate(q[k], in.qPrev()[k], q2 ? q2[k] : 0.0, in.iPrev()[k], h) : 0.0;
       I[k] = f[k] + iq;
-      if (accept) { in.qPrev()[k] = q[k]; in.iPrev()[k] = iq; }
+      if (accept) {
+        if (gear) in.qPrev2()[k] = in.qPrev()[k];
+        in.qPrev()[k] = q[k]; in.iPrev()[k] = iq;
+      }
     }
     if (accept) {
       std::copy(in.vHist(1), in.vHist(1) + L, in.vHist(2));
@@ -1067,16 +1072,15 @@ public:
         std::copy(st->v[1], st->v[1] + 5, next->v[2]);
         std::copy(st->v[0], st->v[0] + 5, next->v[1]);
       }
-    const bool trap = integrator->getType() == IntegrationType::TRAPEZOIDAL;
     for (int k = 0; k < K; ++k) {
-      const T i = trap ? (2.0 / h) * (q[k] - st->q[k]) - st->i[k] : (q[k] - st->q[k]) / h;
+      const T i = integrator->rate(q[k], st->q[k], st->q2[k], st->i[k], h);
       const bool sub = j.q && k == 3;  // substrate branch: to Junction::sub, SUBS sign
       I[from[k]] += (sub ? j.subSign : 1.0) * type * i;
       I[sub ? j.sub : to[k]] -= (sub ? j.subSign : 1.0) * type * i;
       if (j.d && k == 1 && j.d->card.qp()) { const T g = (1.0 - j.d->card.vp) / j.d->card.tt * i; I[2] += g; I[1] -= g; }  // (1-VP)/TT ddt(Qp)
       if (j.d && j.d->heat && (k == 0 || k == 2)) I[5] -= v[k] * i;  // ngspice's Ith takes the junctions' charge currents too
       if constexpr (std::is_same_v<T, double>)
-        if (next) { next->v[0][k] = v[k]; next->q[k] = q[k]; next->i[k] = i; }
+        if (next) { next->v[0][k] = v[k]; next->q2[k] = st->q[k]; next->q[k] = q[k]; next->i[k] = i; }
     }
     return I;
   }
@@ -1681,9 +1685,8 @@ public:
     };
     const bool tran = h > 0.0 && integrator;
     const IntegrationType type = tran ? integrator->getType() : IntegrationType::GEAR_1_EULER;
-    // Inductor companion: v = coef * sum_j L_aj * i_j + history (per method)
-    const double coef = !tran ? 0.0 : type == IntegrationType::TRAPEZOIDAL ? 2.0 / h
-                       : type == IntegrationType::GEAR_2 ? 1.5 / h : 1.0 / h;
+    // Inductor companion: v = d/dt sum_j L_aj i_j = coef * sum_j L_aj i_j + history (the integrator's rate)
+    const double coef = tran ? integrator->coef(h) : 0.0;
     const double scale = nl.environment.global_voltage_scale;
     for (const auto &sl : branchList) {
       auto node = [&](int local) { return sl.map(local) - 1; };  // ground -> -1 (skipped)
@@ -1709,8 +1712,7 @@ public:
           const auto &hj = sl.st->inductorState[j];
           double i1 = hj.i.empty() ? 0.0 : hj.i[0];
           double i2 = hj.i.size() > 1 ? hj.i[1] : i1;
-          S.rhs[b] += (type == IntegrationType::GEAR_2) ? (Laj / h) * (-2.0 * i1 + 0.5 * i2)
-                                                        : -coef * Laj * i1;
+          S.rhs[b] += Laj * integrator->rate(0.0, i1, i2, 0.0, h);
         }
         if (type == IntegrationType::TRAPEZOIDAL) {
           const auto &ha = sl.st->inductorState[a];
@@ -2057,26 +2059,9 @@ public:
         const auto &hist = netlist.globalState.capacitorState[i];
           
         double v_curr = getV(c.nodePlate1) - getV(c.nodePlate2);
-        double i_c = 0.0;
-        IntegrationType type = integrator->getType();
-
         if (hist.v.empty())
           continue;
-
-        if (type == IntegrationType::TRAPEZOIDAL) {
-          double g_eq = (2.0 * c.capacitance_farads) / h;
-          i_c = g_eq * (v_curr - hist.v[0]) - hist.i[0];
-        } else if (type == IntegrationType::GEAR_1_EULER) {
-          i_c = (c.capacitance_farads / h) * (v_curr - hist.v[0]);
-        } else if (type == IntegrationType::GEAR_2) {
-          if (hist.v.size() >= 2) {
-            i_c = (c.capacitance_farads / h) *
-                  (1.5 * v_curr - 2.0 * hist.v[0] +
-                   0.5 * hist.v[1]);
-          } else {
-            i_c = (c.capacitance_farads / h) * (v_curr - hist.v[0]);
-          }
-        }
+        const double C = c.capacitance_farads, i_c = integrator->rate(C * v_curr, C * hist.v[0], C * hist.v[hist.v.size() > 1], hist.i[0], h);
         addRes(c.nodePlate1, -i_c);
         addRes(c.nodePlate2, i_c);
       }
@@ -2129,25 +2114,9 @@ public:
 
             double v_curr =
                 getV(mapNode(c.nodePlate1)) - getV(mapNode(c.nodePlate2));
-            double i_c = 0.0;
-            IntegrationType type = integrator->getType();
             if (hist.v.empty())
               continue;
-
-            if (type == IntegrationType::TRAPEZOIDAL) {
-              double g_eq = (2.0 * c.capacitance_farads) / h;
-              i_c = g_eq * (v_curr - hist.v[0]) - hist.i[0];
-            } else if (type == IntegrationType::GEAR_1_EULER) {
-              i_c = (c.capacitance_farads / h) * (v_curr - hist.v[0]);
-            } else if (type == IntegrationType::GEAR_2) {
-              if (hist.v.size() >= 2) {
-                i_c = (c.capacitance_farads / h) *
-                      (1.5 * v_curr - 2.0 * hist.v[0] +
-                       0.5 * hist.v[1]);
-              } else {
-                i_c = (c.capacitance_farads / h) * (v_curr - hist.v[0]);
-              }
-            }
+            const double C = c.capacitance_farads, i_c = integrator->rate(C * v_curr, C * hist.v[0], C * hist.v[hist.v.size() > 1], hist.i[0], h);
             addRes(mapNode(c.nodePlate1), -i_c);
             addRes(mapNode(c.nodePlate2), i_c);
           }
@@ -2414,8 +2383,7 @@ public:
   /**
    * stampSoABlock: the linear elements (R, C, I) of the global block from its SoA tensors.
    */
-  void stampSoABlock(TensorizedBlock& block, const std::vector<double>& v_guess, double h = 0.0,
-                     IntegrationType intType = IntegrationType::TRAPEZOIDAL) {
+  void stampSoABlock(TensorizedBlock& block, const std::vector<double>& v_guess, double h = 0.0) {
     // 0. Linear Components
     
     // Resistors
@@ -2464,22 +2432,12 @@ public:
             int n1 = block.capacitors.plates1[i];
             int n2 = block.capacitors.plates2[i];
             double g_eq, i_hist;
-            // GEAR_1_EULER (Backward Euler): g=C/h, no i_prev term.
-            // GEAR_2 (BDF2): g=1.5C/h, I=C(2v1-0.5v2)/h — must match the KCL
-            //   audit and history update; the old BE fallback here made every
-            //   transient that switched to Gear2 fail NR at all step sizes.
-            // TRAPEZOIDAL (default): g=2C/h, companion current uses i_prev.
-            if (intType == IntegrationType::GEAR_1_EULER) {
-                g_eq   = block.capacitors.C[i] / h;
-                i_hist = g_eq * block.capacitors.v_prev[i];
-            } else if (intType == IntegrationType::GEAR_2) {
-                g_eq   = 1.5 * block.capacitors.C[i] / h;
-                i_hist = block.capacitors.C[i] / h *
-                         (2.0 * block.capacitors.v_prev[i] - 0.5 * block.capacitors.v_prev2[i]);
-            } else {
-                g_eq   = (2.0 * block.capacitors.C[i]) / h;
-                i_hist = g_eq * block.capacitors.v_prev[i] + block.capacitors.i_prev[i];
-            }
+            // i = C rate(v) = g_eq v - i_hist: the integrator's formula, as the KCL audit and the
+            // history update use it
+            g_eq   = block.capacitors.C[i] * integrator->coef(h);
+            const double C = block.capacitors.C[i];
+            i_hist = -integrator->rate(0.0, C * block.capacitors.v_prev[i], C * block.capacitors.v_prev2[i],
+                                       block.capacitors.i_prev[i], h);
 
             if (n1 != 0 && n2 != 0) {
                 rows.push_back(n1-1); cols.push_back(n1-1); vals.push_back(g_eq);
@@ -2525,7 +2483,7 @@ public:
                 if (it != netlist.blockDefinitions.end()) refresh(it->second);
             }
         }
-        stampSoABlock(soaBlock, v_guess, h, integrator ? integrator->getType() : IntegrationType::TRAPEZOIDAL);
+        stampSoABlock(soaBlock, v_guess, h);
 
         // Devices tensorizeNetlist() has no SoA tensors for (G, J) were
         // silently dropped here. Stamp them with the same helpers the AoS path

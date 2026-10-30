@@ -258,11 +258,13 @@ def dae_pz_exact():
 
 def replay(m, ts, method_of):
     """the engine's transient re-run in 50 digits on its own accepted time points: (G + aC/h) x1 = s1 + (aC/h) x0 + [d0],
-    d = C x' the reactive term carried between steps (a = 1 backward Euler, 2 trapezoidal with d0 added)"""
+    d = C x' the reactive term carried between steps (a = 1 backward Euler, 2 trapezoidal with d0 added); Gear 2 at
+    variable step: C x1' = C (a0 x1 + a1 x0 + a2 x-1), the slope of the parabola through the last three points"""
     G, C = mpm(m.G), mpm(m.C)
     x = mp.lu_solve(G, m.s(mp.mpf(0)))                   # the DC operating point at t = 0
     d = mp.matrix(m.n, 1)
     xs = [x]
+    xm, hp = x, None                                     # the point before x and the step to x (Gear 2)
     for k in range(1, len(ts)):
         t0, t1 = mp.mpf(ts[k - 1]), mp.mpf(ts[k])
         meth = method_of(k)
@@ -270,15 +272,20 @@ def replay(m, ts, method_of):
             hs = (t1 - t0) / 100
             for j in range(1, 101):
                 xn = mp.lu_solve(G + C / hs, m.s(t0 + j * hs) + (C / hs) * x)
-                d, x = (C / hs) * (xn - x), xn
+                d, xm, x, hp = (C / hs) * (xn - x), x, xn, hs
         elif meth == "be":
             h = t1 - t0
             xn = mp.lu_solve(G + C / h, m.s(t1) + (C / h) * x)
-            d, x = (C / h) * (xn - x), xn
+            d, xm, x, hp = (C / h) * (xn - x), x, xn, h
+        elif meth == "gear":
+            h = t1 - t0
+            a0, a1, a2 = 1 / h + 1 / (h + hp), -(h + hp) / (h * hp), h / (hp * (h + hp))
+            xn = mp.lu_solve(G + a0 * C, m.s(t1) - C * (a1 * x + a2 * xm))
+            d, xm, x, hp = C * (a0 * xn + a1 * x + a2 * xm), x, xn, h
         else:
             h = t1 - t0
             xn = mp.lu_solve(G + 2 * C / h, m.s(t1) + (2 * C / h) * x + d)
-            d, x = (2 * C / h) * (xn - x) - d, xn
+            d, xm, x, hp = (2 * C / h) * (xn - x) - d, x, xn, h
         xs.append(x)
     return xs
 
@@ -287,17 +294,20 @@ def dae_tran_replay():
     """Transient against the integration formulas themselves: SPICE's companion models (backward Euler on the cold
     start, the run's second step and every step after a corner, trapezoidal otherwise) replayed at 50 digits on the
     engine's accepted points. Cases: the Chapter 1 RC, a series RLC (inductor companion), a capacitor across a
-    voltage source (a loop of capacitors and a source: index two, the source current is C dV/dt)"""
-    for name, deck in (("rc", "* RC\nV1 in 0 PULSE(0 1 0 1n 1n 10u 20u)\nR1 in out 1k\nC1 out 0 1n\n.tran 0.1u 5u\n.end\n"),
-                       ("rlc", "* RLC\nV1 in 0 PULSE(0 1 10n 2n 2n 400n 1u)\nR1 in a 20\nL1 a b 1u\nC1 b 0 1n\nR2 b 0 10k\n.tran 5n 2u\n.end\n"),
-                       ("cv_loop", "* C across V\nV1 in 0 PULSE(0 1 0 10n 10n 100n 300n)\nC1 in 0 1n\nR1 in 0 1k\n.tran 2n 600n\n.end\n")):
+    voltage source (a loop of capacitors and a source: index two, the source current is C dV/dt); each again with
+    .options method=gear (variable-step Gear 2 in place of trapezoidal)"""
+    decks = (("rc", "* RC\nV1 in 0 PULSE(0 1 0 1n 1n 10u 20u)\nR1 in out 1k\nC1 out 0 1n\n.tran 0.1u 5u\n.end\n"),
+             ("rlc", "* RLC\nV1 in 0 PULSE(0 1 10n 2n 2n 400n 1u)\nR1 in a 20\nL1 a b 1u\nC1 b 0 1n\nR2 b 0 10k\n.tran 5n 2u\n.end\n"),
+             ("cv_loop", "* C across V\nV1 in 0 PULSE(0 1 0 10n 10n 100n 300n)\nC1 in 0 1n\nR1 in 0 1k\n.tran 2n 600n\n.end\n"))
+    for name, deck in decks + tuple((n + "_gear", d.replace(".tran", ".options method=gear\n.tran")) for n, d in decks):
         m = Mna(deck)
         eng = treespice(deck)[0]["cols"]
         ts = eng["time"]
         corners = m.corners(ts[-1])
         hmax = max(b - a for a, b in zip(ts, ts[1:]))
         landed = lambda t: any(abs(t - c) <= 1e-9 * hmax for c in corners if c > 0)
-        method_of = lambda k: "cold" if k == 1 else "be" if k == 2 or landed(ts[k - 1]) else "trap"
+        second = "gear" if name.endswith("_gear") else "trap"
+        method_of = lambda k: "cold" if k == 1 else "be" if k == 2 or landed(ts[k - 1]) else second
         xs = replay(m, ts, method_of)
         names = [nm for nm in m.names() if nm in eng]
         err = max(abs(mp.mpf(eng[nm][k]) - xs[k][m.names().index(nm)]) for k in range(len(ts)) for nm in names)

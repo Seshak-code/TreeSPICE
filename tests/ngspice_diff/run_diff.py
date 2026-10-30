@@ -555,7 +555,7 @@ def compare(args, text, an, mode, nm, ref):
         if not r["conv"] or len(r["pts"]) != len(xs):
             return "FAIL", math.inf, math.inf, f"engine gave {len(r['pts'])} of {len(xs)} frequencies: {r['err']}"
         for k, row in enumerate(r["pts"]):
-            if abs(row[0] - xs[k]) > 1e-9 * xs[k]: bad.append(f"f={row[0]:g} vs ngspice {xs[k]:g}")
+            if abs(row[0] - xs[k]) > 5e-9 * xs[k]: bad.append(f"f={row[0]:g} vs ngspice {xs[k]:g}")  # wrdata: 9 digits
             for n in names:
                 c = ecol(r, n, True)
                 if c is None: bad.append(f"no engine column for {n}"); continue
@@ -573,7 +573,7 @@ def compare(args, text, an, mode, nm, ref):
             return "FAIL", math.inf, math.inf, f"engine gave {len(r['pts'])} points, ngspice {want}"
         for k, row in enumerate(r["pts"]):
             at = "" if an[0] == "op" and want == 1 else f"row {k} " + (f"{an[1]}={row[0]:g} " if an[0] == "dc" else "")
-            if an[0] == "dc" and abs(row[0] - xs[k]) > 1e-9 * max(1.0, abs(xs[k])): bad.append(f"{at}sweep value vs ngspice {xs[k]:g}")
+            if an[0] == "dc" and abs(row[0] - xs[k]) > 5e-9 * max(1.0, abs(xs[k])): bad.append(f"{at}sweep value vs ngspice {xs[k]:g}")
             for n in names:
                 c, exp = ecol(r, n), vals[n][k]
                 if c is None: bad.append(f"no engine column for {n}"); continue

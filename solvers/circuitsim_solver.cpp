@@ -538,7 +538,6 @@ void CircuitSim::loadSoAFromNetlist(const TensorNetlist &netlist) {
 // transient with an inductor failed to converge).
 void CircuitSim::updateReactiveHistory(TensorNetlist &netlist, const std::vector<double> &v,
                                         double h, double t) {
-  const IntegrationType type = integrator->getType();
   auto getV = [&](int n) { return (n > 0 && n <= (int)v.size()) ? v[n - 1] : 0.0; };
   int total = 0;
   const auto branchList = branchSlots(netlist, total);  // same block order as below
@@ -560,13 +559,8 @@ void CircuitSim::updateReactiveHistory(TensorNetlist &netlist, const std::vector
       auto &hist = st.capacitorState[i];
       if (hist.v.empty()) hist.resize(3);
       double v_curr = getV(mapNode(c.nodePlate1)) - getV(mapNode(c.nodePlate2));
-      double C = c.capacitance_farads, i_curr;
-      if (type == IntegrationType::TRAPEZOIDAL)
-        i_curr = (2.0 * C / h) * (v_curr - hist.v[0]) - hist.i[0];
-      else if (type == IntegrationType::GEAR_2 && hist.v.size() >= 2)
-        i_curr = (C / h) * (1.5 * v_curr - 2.0 * hist.v[0] + 0.5 * hist.v[1]);
-      else
-        i_curr = (C / h) * (v_curr - hist.v[0]);
+      const double C = c.capacitance_farads;
+      const double i_curr = integrator->rate(C * v_curr, C * hist.v[0], C * hist.v[hist.v.size() > 1], hist.i[0], h);
       integrator->updateHistory(hist.v, hist.i, v_curr, i_curr);
     }
     for (size_t k = 0; sl && k < blk.transmissionLines.size() && k < st.lineState.size(); ++k) {
@@ -617,6 +611,7 @@ void CircuitSim::updateReactiveHistory(TensorNetlist &netlist, const std::vector
       return (n <= 0 || n > (int)inst.nodeMapping.size()) ? 0 : inst.nodeMapping[n - 1];
     });
   }
+  integrator->hPrev = h;  // after every history above used this step's coefficients
 }
 
 void CircuitSim::pushLine(BlockState::LineHistory &h, double dt, double w1, double w2, double td) {
@@ -706,6 +701,7 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
     *s = {};
     for (auto &vh : s->v) std::copy(c.v, c.v + 5, vh);
     std::copy(c.q, c.q + 5, s->q);
+    std::copy(c.q, c.q + 5, s->q2);
     std::copy(c.half, c.half + 3, s->half);
   });
   // Diode / BJT charges at x, zero current. Under UIC a junction starts from its device IC= instead (ngspice
@@ -738,6 +734,7 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
     if (j.q && j.q->card.rco > 0.0) j.st->qsOn = (j.q->isNPN ? 1.0 : -1.0) * (xv[7] - xv[4]) > 0.0;
     for (auto &vh : j.st->v) std::copy(v, v + K, vh);
     std::copy(q, q + K, j.st->q);
+    std::copy(q, q + K, j.st->q2);
     if (fromIc) { j.st->jv[0] = v[0]; j.st->jv[1] = j.d ? 0.0 : v[1]; j.st->jvState = 1; }  // limiting from there
     if (j.q) {  // excess phase starts from the operating point's transfer current (ngspice MODEINITTRAN)
       const auto p = bjtModel(*j.q, gmin_);
@@ -749,10 +746,12 @@ void CircuitSim::seedReactiveHistory(TensorNetlist &netlist, const std::vector<d
   forEachOsdi(netlist, [&](const OsdiRef &r) {
     std::vector<double> I(r.n.size());
     osdiCurrents(r, x, 0.0, I.data(), nullptr, true);
+    if (tranMethod_ == IntegrationType::GEAR_2) std::copy(r.in->qPrev(), r.in->qPrev() + r.n.size(), r.in->qPrev2());
     std::copy(r.in->vHist(0), r.in->vHist(0) + r.n.size(), r.in->vHist(1));
     std::copy(r.in->vHist(0), r.in->vHist(0) + r.n.size(), r.in->vHist(2));
   });
   osdiAtValid_ = false;  // the charge history moved
+  integrator->hPrev = 0.0;  // no step yet: Gear 2 starts as backward Euler
   for (size_t k = 0; k < netlist.instances.size() && k < netlist.instanceStates.size(); ++k) {
     const auto &inst = netlist.instances[k];
     auto it = netlist.blockDefinitions.find(inst.blockName);

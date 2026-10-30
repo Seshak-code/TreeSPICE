@@ -1507,6 +1507,20 @@ int main() {
         check(!run(PrecisionMode::Native_F64, deck("0")).converged, ".options seed=0 is an error");
     }
 
+    {   // .options method=gear runs variable-step Gear 2 (it ran trapezoidal before); both are second order, so each
+        // lands within 1e-3 of the exponential, and they differ. tests/refcheck checks Gear's every point against a
+        // 50-digit BDF2 replay. An unknown method is refused.
+        const std::string rc = "rc\nV1 in 0 PULSE(0 1 0 1n 1n 10u 20u)\nR1 in out 1k\nC1 out 0 1n\n";
+        const auto trap = run(PrecisionMode::Native_F64, rc + ".tran 0.1u 5u\n.end\n", 0.1e-6, 5e-6);
+        const auto gear = run(PrecisionMode::Native_F64, rc + ".options method=gear\n.tran 0.1u 5u\n.end\n", 0.1e-6, 5e-6);
+        const double exact = 1.0 - std::exp(-(5e-6 - 0.5e-9) / 1e-6);
+        check(trap.converged && gear.converged && near(V(gear, 2), exact, 1e-3) && near(V(trap, 2), exact, 1e-3) &&
+                  std::abs(V(gear, 2) - V(trap, 2)) > 1e-9,
+              "method=gear runs Gear 2, not trapezoidal (" + std::to_string(V(gear, 2)) + " vs " + std::to_string(V(trap, 2)) + " V)");
+        const auto bad = run(PrecisionMode::Native_F64, rc + ".options method=euler\n.tran 0.1u 5u\n.end\n", 0.1e-6, 5e-6);
+        check(!bad.converged && bad.errorDetail.find("integration method") != std::string::npos,
+              ".options method=euler is refused: " + bad.errorDetail);
+    }
     std::printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASSED", g_fail, g_fail == 1 ? "" : "s");
     return g_fail ? 1 : 0;
 }
