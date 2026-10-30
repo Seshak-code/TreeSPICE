@@ -803,8 +803,9 @@ public:
   static std::mutex &osdiErrorMutex() { static std::mutex m; return m; }
   // Cout: the reactive Jacobian C (row-major) of this evaluation (AC).
   // I (L values) and J (L x L, or null): where the currents and Jacobian go.
+  // Qout: its charges q (L values; HB).
   void osdiCurrents(const OsdiRef &r, const std::vector<double> &v, double h, double *I, double *J = nullptr,
-                    bool accept = false, std::vector<double> *Cout = nullptr) const {
+                    bool accept = false, std::vector<double> *Cout = nullptr, std::vector<double> *Qout = nullptr) const {
     const size_t L = r.n.size();
     thread_local std::vector<double> x, f, q;  // devices evaluate in parallel
     x.resize(L);
@@ -877,6 +878,7 @@ public:
       for (size_t a = 0; a < L; ++a)
         for (size_t b = 0; b < L; ++b) J[a * L + b] = G(a, b) + coef * C(a, b);
     }
+    if (Qout) Qout->assign(q.begin(), q.end());
     if (Cout) {
       Cout->assign(L * L, 0.0);
       for (size_t a = 0; a < L; ++a)
@@ -1301,8 +1303,13 @@ public:
     struct Entry { int r, c; std::vector<std::complex<double>> g, cap; };  // harmonics -2K..2K of G(t) and C(t) at (r, c)
     std::vector<Entry> entries;
     std::vector<std::vector<NoiseGen>> gens;  // pnoise: the noise generators at each tick
+    std::vector<double> om;   // HB: sideband m's angular frequency at om[m + K] (several tones), in place of m w0
+    std::vector<char> keep;   // HB: sideband m is an unknown (else its row and column are the identity)
   };
-  std::string lptv(TensorNetlist &netlist, const PssResult &pss, int K, bool noise, Lptv &out);
+  // f, q (HB): each tick's static residual and charges (acSystem's), the sources off; the ticks then need not resolve
+  // 2K harmonics: G's harmonics alias as the residual's do, so the conversion matrix is the residual's exact Jacobian
+  std::string lptv(TensorNetlist &netlist, const PssResult &pss, int K, bool noise, Lptv &out,
+                   std::vector<std::vector<double>> *f = nullptr, std::vector<std::vector<double>> *q = nullptr);
   // Y(w) in real form: the unknown (sideband m, i) at (m + K) n + i, its imaginary part (2K + 1) n further on
   static Csr_matrix lptvMatrix(const Lptv &L, double w, bool transpose);
   // pac: the sources' AC magnitude and phase as a small signal at each f; x[f][m + K] the unknowns at f + m f0
@@ -1322,6 +1329,27 @@ public:
     std::string error;
   };
   PnoiseResult solvePnoise(TensorNetlist &netlist, const PssResult &pss, const std::vector<double> &freqs, int K, int outNode, int refNode);
+
+  // hb: harmonic balance. The steady state of a circuit its sources drive at the tones f_t (commensurate or not):
+  // each unknown a sum of phasors at the mixes sum_t k_t f_t, |k_t| <= harms_t (a box; intmodmax > 0 also caps
+  // sum_t |k_t|, Xyce's diamond). The tones fold into one artificial period by the frequency map (tone t's harmonic
+  // k_t is index k_t s_t, s_t = prod_{u<t} (2 harms_u + 1)), sampled at its N = prod_t (2 harms_t + 1) ticks: the
+  // devices are memoryless in x (currents f(x), charges q(x)), so a tick sees the mixes as one period's harmonics.
+  // Newton on F_m = f_m + j w_m q_m - E_m over the kept m, its Jacobian the conversion matrix about the ticks (lptv),
+  // from the DC operating point, the sources' AC part ramped in when a full step fails.
+  // ponytail: one tone samples each source over a period (any waveform repeating at 1/f_1); several tones take DC
+  // and undamped SIN sources only. Mixes beyond the box alias onto it, as the truncation's own error.
+  // ponytail: dense DFTs and a direct solve of the conversion matrix (dense blocks for nonlinear entries); FFTs and
+  // GMRES preconditioned by its block diagonal are the upgrade for many harmonics times many unknowns.
+  struct HbResult {
+    std::vector<double> freqs;  // the one-sided spectrum: 0, then each positive mix frequency, ascending
+    std::vector<std::vector<std::complex<double>>> X;  // X[h][i]: unknown i's peak phasor at freqs[h] (its mean at 0)
+    std::vector<std::vector<double>> ticks;  // one tone: x at t = j / (N f_1), j = 0 .. N (the last the first again)
+    int iterations = 0;
+    std::string error;
+  };
+  HbResult solveHb(TensorNetlist &netlist, const std::vector<double> &tones, const std::vector<int> &harms, int intmodmax,
+                   int maxIterations = 30);
 
   // Noise around the last solveDC() operating point (ngspice .noise semantics).
   // Generators: resistor thermal 4kT/R (incl. diode RS, BJT RB/RC/RE), diode shot 2q|Id|,
@@ -1598,7 +1626,10 @@ public:
                     std::vector<int> fr, fc; std::vector<std::function<std::complex<double>(double)>> fv;  // entries f(w)
                     int n = 0; };
   // switchesAsSolved: each switch at its state at lastSolution_ (a periodic analysis' tick), else at ROFF (ngspice's .ac)
-  bool acSystem(TensorNetlist &netlist, ACSystem &sys, bool switchesAsSolved = false);
+  // f, q (HB): the static residual with the independent sources off (G's stamp, before AC=) and the charges whose
+  // derivative C is, at lastSolution_ (the caller refuses what has no charge: Meyer MOS, diode VP and self-heating)
+  bool acSystem(TensorNetlist &netlist, ACSystem &sys, bool switchesAsSolved = false, std::vector<double> *f = nullptr,
+                std::vector<double> *q = nullptr);
   std::string noiseGenerators(TensorNetlist &netlist, std::vector<NoiseGen> &gens, bool switchesAsSolved);
   // R(Y) = [[G, -wC], [wC, G]] for Y = G + jwC (transpose: R(Y)^T = R(Y^H)).
   static Csr_matrix acMatrix(const ACSystem &s, double w, bool transpose);

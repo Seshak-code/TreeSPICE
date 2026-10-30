@@ -103,6 +103,10 @@ struct SPICEParseResult {
     double        pssFund = 0.0, pssTstab = 0.0;
     int           pssOsc = 0;        // oscnob: 0 (ground) a driven circuit, else the oscillator's node (1-based)
     int           pssPoints = 0, pssHarms = 0, pssIterations = 20;
+    bool          hasHB = false;     // .hb f1 [f2 ...]: harmonic balance (Xyce's card)
+    std::vector<double> hbTones;
+    std::vector<int> hbHarms;        // .options hbint numfreq=k1[,k2 ...] (10 each by default; one value serves every tone)
+    int           hbIntmodmax = 0;   // selectharms=diamond: the mixes' order cap (intmodmax, default the largest numfreq)
     std::string   acSweep;           // .ac dec|oct|lin n fstart fstop
     int           acPoints = 0;
     double        acStart = 0.0, acStop = 0.0;
@@ -228,6 +232,9 @@ private:
     std::string sensOut_, sensRef_;                // .sens v() node names, resolved likewise
     std::string tfOut_, tfRef_;                    // .tf v() node names, resolved likewise
     std::string pssOsc_;                           // .pss oscnob, resolved likewise
+    std::vector<int> hbHarms_{10};                 // .options hbint numfreq, intmodmax, selectharms (resolved at the end)
+    int hbIntmodmax_ = 0;
+    bool hbDiamond_ = false;
     std::string pnoiseOut_, pnoiseRef_;            // .pnoise v() node names, resolved likewise
     std::map<std::string, std::vector<PendingIC>> subcktICs_;   // .ic / .nodeset in a body (local names), applied per instance
     std::string noiseOut_, noiseRef_;              // .noise node names, resolved likewise

@@ -1069,7 +1069,7 @@ bool CircuitSim::setSource(TensorNetlist &netlist, const std::string &name, doub
   return true;
 }
 
-bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys, bool switchesAsSolved) {
+bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys, bool switchesAsSolved, std::vector<double> *f, std::vector<double> *q) {
   sys = {};
   sys.n = systemSize(netlist);
   if ((int)lastSolution_.size() != sys.n) return false;
@@ -1083,11 +1083,24 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys, bool switchesAs
   limitJunctions_ = false;  // the Jacobian at the operating point itself
   swAcOff_ = !switchesAsSolved;
   acLines_ = true;
+  if (f) srcFact_ = 0.0;
   stampAllElements(netlist, 0.0, lastSolution_, 0.0);
+  srcFact_ = 1.0;
   acLines_ = false;
   swAcOff_ = false;
   addDiagonalConditioning(netlist.numGlobalNodes, 0.0);  // rshunt only
   limitJunctions_ = true;
+  if (f) {  // the stamp is A x = rhs, linearised at x itself: its residual A x - rhs is the devices' currents
+    const Csr_matrix A = matrixBuilder.createCsr();
+    f->assign(sys.n, 0.0);
+    for (int r = 0; r < sys.n; ++r) {
+      double s = -rhsVector[r];
+      for (int p = A.row_pointer[r]; p < A.row_pointer[r + 1]; ++p) s += A.values[p] * lastSolution_[A.col_indices[p]];
+      (*f)[r] = s;
+    }
+  }
+  if (q) q->assign(sys.n, 0.0);
+  auto addQ = [&](int r, double v) { if (q && r >= 0) (*q)[r] += v; };
   int rtotal = 0;
   for (const auto &sl : branchSlots(netlist, rtotal))  // AC=: the resistance .ac sees instead of R
     for (const auto &r : sl.blk->resistors) {
@@ -1149,6 +1162,8 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys, bool switchesAs
       const int a = node(c.nodePlate1), b = node(c.nodePlate2);
       const double C = c.capacitance_farads;
       addC(a, a, C); addC(b, b, C); addC(a, b, -C); addC(b, a, -C);
+      const double Q = C * ((a >= 0 ? lastSolution_[a] : 0.0) - (b >= 0 ? lastSolution_[b] : 0.0));
+      addQ(a, Q); addQ(b, -Q);
     }
     for (size_t k = 0; k < sl.blk->transmissionLines.size(); ++k) {  // row b1: ... - e^(-jw TD) (v2 + Z0 i2), row b2 likewise
       const auto &t = sl.blk->transmissionLines[k];
@@ -1179,7 +1194,7 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys, bool switchesAs
     }
     const auto flux = fluxLinks(*sl.blk);  // inductor row: v1 - v2 - jw*sum L_aj i_j = 0
     for (size_t a = 0; a < flux.size(); ++a)
-      for (auto [j, Laj] : flux[a]) addC(sl.ind + (int)a, sl.ind + j, -Laj);
+      for (auto [j, Laj] : flux[a]) addC(sl.ind + (int)a, sl.ind + j, -Laj), addQ(sl.ind + (int)a, -Laj * lastSolution_[sl.ind + j]);
   }
   // MOSFETs: C_tu = dQ_t/dV_u of the terminal charges at the operating point
   // (Meyer 2*half + overlap, junction dq/dv: ngspice mos1acld), from Dual.
@@ -1208,6 +1223,17 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys, bool switchesAs
     auto V = [&](int k) { return j.n[k] > 0 ? lastSolution_[j.n[k] - 1] : 0.0; };
     const int *from = j.d ? diodeFrom : j.f ? jfetFrom : bjtFrom, *to = j.d ? diodeTo : j.f ? jfetTo : bjtTo;
     const double type = j.q ? (j.q->isNPN ? 1.0 : -1.0) : j.f ? jfetType(*j.f) : 1.0;
+    if (q) {  // the charges' values, placed as their derivatives are below
+      std::array<Dual<double>, kJT> x;
+      for (int k = 0; k < kJT; ++k) x[k] = Dual<double>(V(k), 0.0);
+      Dual<double> v[5], qj[5];
+      const int K = junctionCharges(j, x, v, qj, nullptr, false);
+      for (int k = 0; k < K; ++k) {
+        const double s = (j.q && k == 3 ? j.subSign : 1.0) * type;
+        addQ(j.n[from[k]] - 1, s * qj[k].val);
+        addQ(j.n[j.q && k == 3 ? j.sub : to[k]] - 1, -s * qj[k].val);
+      }
+    }
     for (int u = 0; u < j.terms; ++u) {
       if (j.n[u] <= 0) continue;
       bool seen = false;
@@ -1215,30 +1241,32 @@ bool CircuitSim::acSystem(TensorNetlist &netlist, ACSystem &sys, bool switchesAs
       if (seen) continue;
       std::array<Dual<double>, kJT> x;
       for (int k = 0; k < kJT; ++k) x[k] = Dual<double>(V(k), k < j.terms && j.n[k] == j.n[u] ? 1.0 : 0.0);
-      Dual<double> v[5], q[5];
-      const int K = junctionCharges(j, x, v, q, nullptr, false);
+      Dual<double> v[5], qj[5];
+      const int K = junctionCharges(j, x, v, qj, nullptr, false);
       double Q[kJT] = {};
       for (int k = 0; k < K; ++k) {
         const double s = (j.q && k == 3 ? j.subSign : 1.0) * type;  // substrate: to Junction::sub
-        Q[from[k]] += s * q[k].grad;
-        Q[j.q && k == 3 ? j.sub : to[k]] -= s * q[k].grad;
-        if (j.d && k == 1 && j.d->card.qp()) { const double g = (1.0 - j.d->card.vp) / j.d->card.tt * q[k].grad; Q[2] += g; Q[1] -= g; }  // soft recovery
-        if (j.d && j.d->heat && (k == 0 || k == 2)) Q[5] -= v[k].val * q[k].grad;  // the transient's Ith takes vd i_charge
+        Q[from[k]] += s * qj[k].grad;
+        Q[j.q && k == 3 ? j.sub : to[k]] -= s * qj[k].grad;
+        if (j.d && k == 1 && j.d->card.qp()) { const double g = (1.0 - j.d->card.vp) / j.d->card.tt * qj[k].grad; Q[2] += g; Q[1] -= g; }  // soft recovery
+        if (j.d && j.d->heat && (k == 0 || k == 2)) Q[5] -= v[k].val * qj[k].grad;  // the transient's Ith takes vd i_charge
       }
       for (int t = 0; t < j.terms; ++t) if (Q[t] != 0.0) addC(j.n[t] - 1, j.n[u] - 1, Q[t]);
     }
   });
   // OSDI devices: the reactive Jacobian dq/dx at the operating point
   forEachOsdi(netlist, [&](const OsdiRef &r) {
-    std::vector<double> I(r.n.size()), C;
-    osdiCurrents(r, lastSolution_, 0.0, I.data(), nullptr, false, &C);
+    std::vector<double> I(r.n.size()), C, Qd;
+    osdiCurrents(r, lastSolution_, 0.0, I.data(), nullptr, false, &C, q ? &Qd : nullptr);
     const size_t L = r.n.size();
+    for (size_t a = 0; a < Qd.size(); ++a) addQ(r.n[a] - 1, Qd[a]);
     for (size_t a = 0; a < L; ++a)
       for (size_t b = 0; b < L; ++b)
         if (const double c = C[a * L + b]; c != 0.0) addC(r.n[a] - 1, r.n[b] - 1, c);
   });
   if (!netlist.classSize.empty()) {  // S3 quotient: the reactive, delayed and f(w) rows to one net's KCL, as G's
     for (size_t t = 0; t < sys.cv.size(); ++t) sys.cv[t] *= netScale(netlist, sys.cr[t]);
+    if (q) for (int r = 0; r < sys.n; ++r) (*q)[r] *= netScale(netlist, r);
     for (size_t t = 0; t < sys.dv.size(); ++t) sys.dv[t] *= netScale(netlist, sys.dr[t]);
     for (size_t t = 0; t < sys.fv.size(); ++t)
       if (const double k = netScale(netlist, sys.fr[t]); k != 1.0) sys.fv[t] = [f = sys.fv[t], k](double w) { return k * f(w); };
@@ -1545,11 +1573,13 @@ CircuitSim::PssResult CircuitSim::solvePss(TensorNetlist &netlist, double T, int
   }
 }
 
-std::string CircuitSim::lptv(TensorNetlist &netlist, const PssResult &pss, int K, bool noise, Lptv &out) {
+std::string CircuitSim::lptv(TensorNetlist &netlist, const PssResult &pss, int K, bool noise, Lptv &out,
+                             std::vector<std::vector<double>> *f, std::vector<std::vector<double>> *q) {
   out = {};
   const int N = (int)pss.states.size() - 1;  // the last tick is the first again
   if (K < 1) return "the sidebands are at least 1";
-  if (N < 4 * K + 1) return "the PSS has " + std::to_string(N) + " points; " + std::to_string(K) + " sidebands need at least " + std::to_string(4 * K + 1);
+  if (f) f->resize(N), q->resize(N);
+  if (!f && N < 4 * K + 1) return "the PSS has " + std::to_string(N) + " points; " + std::to_string(K) + " sidebands need at least " + std::to_string(4 * K + 1);
   out.n = systemSize(netlist);
   out.K = K;
   out.w0 = 2.0 * M_PI / pss.T;
@@ -1557,7 +1587,10 @@ std::string CircuitSim::lptv(TensorNetlist &netlist, const PssResult &pss, int K
   ACSystem sys;
   for (int k = 0; k < N; ++k) {
     lastSolution_ = pss.states[k];
-    if (!acSystem(netlist, sys, true)) return "the small-signal system at a tick failed";
+    osdiFatal_.clear(), osdiNonFinite_.clear();
+    if (!acSystem(netlist, sys, true, f ? &(*f)[k] : nullptr, q ? &(*q)[k] : nullptr)) return "the small-signal system at a tick failed";
+    if (!osdiFatal_.empty()) return osdiFatal_;
+    if (!osdiNonFinite_.empty()) return osdiNonFinite_;
     if (!sys.dv.empty() || !sys.fv.empty()) return "excess phase and XSPICE small-signal gains have no periodic form";
     auto entry = [&](int r, int c) -> std::pair<std::vector<double>, std::vector<double>> & {
       auto &e = at[{r, c}];
@@ -1601,7 +1634,8 @@ Csr_matrix CircuitSim::lptvMatrix(const Lptv &L, double w, bool transpose) {
     for (int m = -K; m <= K; ++m)
       for (int l = -K; l <= K; ++l) {
         const int q = m - l + 2 * K;
-        const std::complex<double> a = e.g[q] + std::complex<double>(0.0, w + m * L.w0) * e.cap[q];
+        if (!L.keep.empty() && !(L.keep[m + K] && L.keep[l + K])) continue;
+        const std::complex<double> a = e.g[q] + std::complex<double>(0.0, w + (L.om.empty() ? m * L.w0 : L.om[m + K])) * e.cap[q];
         if (a == 0.0) continue;
         const int r = (m + K) * n + e.r, c = (l + K) * n + e.c;
         put(r, c, a.real());
@@ -1609,6 +1643,9 @@ Csr_matrix CircuitSim::lptvMatrix(const Lptv &L, double w, bool transpose) {
         put(r, c + Nt, -a.imag());
         put(r + Nt, c, a.imag());
       }
+  for (int m = -K; m <= K; ++m)
+    if (!L.keep.empty() && !L.keep[m + K])
+      for (int i = 0; i < n; ++i) put((m + K) * n + i, (m + K) * n + i, 1.0), put((m + K) * n + i + Nt, (m + K) * n + i + Nt, 1.0);
   return M.createCsr();
 }
 
@@ -1687,6 +1724,212 @@ CircuitSim::PnoiseResult CircuitSim::solvePnoise(TensorNetlist &netlist, const P
     }
     r.onoise.push_back(std::sqrt(S));
   }
+  return r;
+}
+
+CircuitSim::HbResult CircuitSim::solveHb(TensorNetlist &netlist, const std::vector<double> &tones, const std::vector<int> &harms, int intmodmax,
+                                         int maxIterations) {
+  HbResult r;
+  const int nt = (int)tones.size();
+  if (nt == 0 || (int)harms.size() != nt) { r.error = "hb needs one harmonic count per tone"; return r; }
+  for (int t = 0; t < nt; ++t)
+    if (!(tones[t] > 0.0) || harms[t] < 1) { r.error = "hb needs tones > 0 and at least 1 harmonic of each"; return r; }
+  // What has no charge of the voltages, or keeps a state of its own: refused, not balanced wrongly
+  std::string held = netlist.digital ? "the XSPICE digital devices" : "";
+  forEachBehav(netlist, [&](const Behavioural &b, const BranchSlot &, int) {
+    if (b.cm) held = b.name + " (an XSPICE code model)";
+    else if (b.expr)
+      for (const auto &e : b.expr->n) if (e.op == acutesim::numparam::Expr::Time) held = b.name + " (an expression of time)";
+  });
+  forEachSwitch(netlist, [&](const SwitchRef &w, const std::array<int, 2> &) { if (w.s->vh != 0.0) held = w.s->name + " (a switch's hysteresis)"; });
+  forEachJunction(netlist, [&](const Junction &j) {
+    if (j.q && j.q->card.td > 0.0) held = j.q->instanceName + " (a BJT's excess phase)";
+    if (j.d && j.d->card.qp()) held = j.d->instanceName + " (a diode's soft recovery, VP)";
+    if (j.d && j.d->heat) held = j.d->instanceName + " (a diode's self-heating)";
+  });
+  forEachMosfet(netlist, [&](const Mosfet &m, const std::array<int, 4> &, const BlockState::DeviceCharge *) {
+    if (mos1Params(m, gmin_).caps) held = m.instanceName + " (Meyer's capacitances of a MOS level 1-3, which have no charge; an OSDI model has)";
+  });
+  auto lines = [&](const TensorBlock &b) { if (!b.transmissionLines.empty() || !b.lossyLines.empty()) held = "a transmission line"; };
+  lines(netlist.globalBlock);
+  for (const auto &[name, blk] : netlist.blockDefinitions) lines(blk);
+  if (!held.empty()) { r.error = "hb: " + held + " has no harmonic-balance form yet"; return r; }
+
+  // The index set: m <-> the mix k by balanced mixed radix (digits -harms_t .. harms_t), its frequency and order
+  long long Nll = 1;
+  for (int t = 0; t < nt; ++t) Nll *= 2 * harms[t] + 1;
+  if (Nll > 4097) { r.error = "hb: " + std::to_string(Nll) + " harmonics in all (the product of 2 harms + 1 over the tones); at most 4097"; return r; }
+  const int N = (int)Nll, M = (N - 1) / 2;
+  std::vector<double> om(N);
+  std::vector<int> order(N);
+  std::vector<char> keep(N);
+  for (int m = -M; m <= M; ++m) {
+    int rr = m + M, o = 0;
+    double f = 0.0;
+    for (int t = 0; t < nt; ++t) {
+      const int d = rr % (2 * harms[t] + 1) - harms[t];
+      rr /= 2 * harms[t] + 1;
+      f += d * tones[t];
+      o += std::abs(d);
+    }
+    om[m + M] = 2 * M_PI * f;
+    order[m + M] = o;
+    keep[m + M] = intmodmax <= 0 || o <= intmodmax;
+  }
+  std::vector<std::complex<double>> W(N);  // W[j] = e^(2 pi i j / N)
+  for (int j = 0; j < N; ++j) W[j] = std::polar(1.0, 2 * M_PI * j / N);
+  auto tw = [&](long long m, int j) { return W[((m * j) % N + N) % N]; };
+
+  const SolverStep dc = solveDC(netlist);
+  if (!dc.stats.converged) { r.error = "hb needs a DC operating point to start from, and it did not converge"; return r; }
+  const int n = systemSize(netlist), nn = std::min(netlist.numGlobalNodes, n), Nt = N * n;
+  if ((int)lastSolution_.size() != n) { r.error = "hb: the operating point does not cover the circuit's unknowns"; return r; }
+
+  // E[m][row]: the sources' spectra, in the right-hand side's form (acExcitation's places)
+  std::vector<std::vector<std::complex<double>>> E(N, std::vector<std::complex<double>>(n));
+  const double T1 = 1.0 / tones[0];
+  std::string bad;
+  auto spectrum = [&](const auto &s, double dc, const std::function<void(int, std::complex<double>)> &place) {
+    if (s.type.empty() || s.type == "DC") return place(0, dc);
+    if (nt == 1) {  // one tone: the waveform over a period once its delays are past, sampled at the ticks
+      double late = 0.0;
+      if (s.type == "PULSE") late = s.pulse_td;
+      else if (s.type == "SINE") late = s.sine_td;
+      else if (s.type == "PWL" && !s.pwl_t.empty()) late = s.pwl_t.back();
+      else if (s.type == "EXP") late = std::max(s.wf[2], s.wf[4]);
+      else if (s.type == "SFFM" || s.type == "AM") late = s.wf[5];
+      const double t0 = std::ceil(late / T1 - 1e-9) * T1;
+      std::vector<double> v(N);
+      double big = 0.0, off = 0.0;
+      for (int j = 0; j < N; ++j) {
+        v[j] = waveformValue(s, dc, t0 + j * T1 / N);
+        big = std::max(big, std::abs(v[j]));
+        off = std::max(off, std::abs(waveformValue(s, dc, t0 + T1 + j * T1 / N) - v[j]));
+      }
+      if (off > 1e-9 * big + 1e-15) { bad = s.name + " does not repeat with the period 1/f1"; return; }
+      for (int m = -M; m <= M; ++m) {
+        std::complex<double> a = 0.0;
+        for (int j = 0; j < N; ++j) a += v[j] * tw(-m, j);
+        if (std::abs(a) > 1e-14 * N * big) place(m, a / (double)N);
+      }
+      return;
+    }
+    if (s.type != "SINE" || s.sine_theta != 0.0) { bad = s.name + " is " + s.type + "; several tones take DC and undamped SIN sources"; return; }
+    place(0, s.sine_vo);
+    int at = 0;
+    for (int m = 1; m <= M; ++m)
+      if (keep[m + M] && std::abs(om[m + M] - 2 * M_PI * s.sine_freq) <= 1e-9 * 2 * M_PI * s.sine_freq && (!at || order[m + M] < order[at + M])) at = m;
+    if (!at) { bad = s.name + "'s SIN at " + std::to_string(s.sine_freq) + " Hz is no kept mix of the tones"; return; }
+    // vo + va sin(w (t - td) + phase): va/2 e^(j (phase - w td - pi/2)) at +w
+    const auto p = std::polar(s.sine_va / 2, s.sine_phase * M_PI / 180.0 - 2 * M_PI * s.sine_freq * s.sine_td - M_PI / 2);
+    place(at, p);
+    place(-at, std::conj(p));
+  };
+  {
+    int total = 0;
+    for (const auto &sl : branchSlots(netlist, total)) {
+      for (size_t i = 0; i < sl.blk->voltageSources.size(); ++i) {
+        const auto &v = sl.blk->voltageSources[i];
+        spectrum(v, v.voltage_V, [&](int m, std::complex<double> p) { E[m + M][sl.vs + i] += p; });
+      }
+      for (const auto &cs : sl.blk->currentSources) {
+        const int a = sl.map(cs.nodePositive) - 1, b = sl.map(cs.nodeNegative) - 1;
+        spectrum(cs, cs.current_A, [&](int m, std::complex<double> p) {
+          if (a >= 0) E[m + M][a] -= cs.m * p * netScale(netlist, a);
+          if (b >= 0) E[m + M][b] += cs.m * p * netScale(netlist, b);
+        });
+      }
+    }
+  }
+  if (!bad.empty()) { r.error = "hb: " + bad; return r; }
+
+  // x at the ticks from the phasors (complex unknown (m, i) at (m + M) n + i)
+  auto ticks = [&](const std::vector<std::complex<double>> &Z) {
+    std::vector<std::vector<double>> x(N + 1, std::vector<double>(n, 0.0));
+    for (int j = 0; j < N; ++j)
+      for (int m = -M; m <= M; ++m) {
+        if (!keep[m + M]) continue;
+        const auto w = tw(m, j);
+        for (int i = 0; i < n; ++i) x[j][i] += (Z[(size_t)(m + M) * n + i] * w).real();
+      }
+    x[N] = x[0];
+    return x;
+  };
+  auto tol = [&](int i, double a) { return reltol_ * std::abs(a) + (i < nn ? vntol_ : abstol_); };
+  // Newton at the sources' AC part scaled by alpha, from X; true when it converged (X then the solution)
+  auto newton = [&](double alpha, std::vector<std::complex<double>> &X) -> std::string {
+    for (int it = 1; it <= maxIterations; ++it) {
+      ++r.iterations;
+      PssResult orbit;
+      orbit.T = T1;
+      orbit.states = ticks(X);
+      Lptv L;
+      std::vector<std::vector<double>> fs, qs;
+      if (std::string e = lptv(netlist, orbit, M, false, L, &fs, &qs); !e.empty()) return e;
+      L.om = om;
+      L.keep = keep;
+      std::vector<double> b(2 * (size_t)Nt, 0.0);
+      for (int m = -M; m <= M; ++m) {
+        if (!keep[m + M]) continue;
+        const std::complex<double> jw(0.0, om[m + M]);
+        for (int i = 0; i < n; ++i) {
+          std::complex<double> F = 0.0;
+          for (int j = 0; j < N; ++j) F += (fs[j][i] + jw * qs[j][i]) * tw(-m, j);
+          F = F / (double)N - (m == 0 ? 1.0 : alpha) * E[m + M][i];
+          if (!std::isfinite(F.real()) || !std::isfinite(F.imag())) return "a non-finite residual";
+          b[(size_t)(m + M) * n + i] = -F.real();
+          b[(size_t)(m + M) * n + i + Nt] = -F.imag();
+        }
+      }
+      const SolverResult s = solveLinear(lptvMatrix(L, 0.0, false), b);
+      if (!s.converged || (int)s.solution.size() != 2 * Nt) return "the conversion matrix is singular";
+      std::vector<std::complex<double>> dX(Nt);
+      for (int m = -M; m <= M; ++m)  // the update of a real signal: dX_-m = conj(dX_m), its rounding averaged out
+        for (int i = 0; i < n; ++i) {
+          const size_t a = (size_t)(m + M) * n + i, c = (size_t)(-m + M) * n + i;
+          dX[a] = 0.5 * (std::complex<double>(s.solution[a], s.solution[a + Nt]) + std::conj(std::complex<double>(s.solution[c], s.solution[c + Nt])));
+        }
+      // A step that moves a node more than 1 V at some tick is scaled to 1 V (the junctions' exponentials, as
+      // ngspice's limiting does for DC Newton); converged when a full step moves every unknown within tolerance
+      const auto x = ticks(X), dx = ticks(dX);
+      double big = 0.0;
+      bool small = true;
+      for (int j = 0; j < N; ++j)
+        for (int i = 0; i < n; ++i) {
+          if (i < nn) big = std::max(big, std::abs(dx[j][i]));
+          small = small && std::abs(dx[j][i]) <= tol(i, x[j][i]);
+        }
+      const double scale = big > 1.0 ? 1.0 / big : 1.0;
+      for (size_t a = 0; a < dX.size(); ++a) X[a] += scale * dX[a];
+      if (small && it > 1) return "";
+    }
+    return "no convergence in " + std::to_string(maxIterations) + " Newton iterations";
+  };
+  std::vector<std::complex<double>> X(Nt);
+  for (int i = 0; i < n; ++i) X[(size_t)M * n + i] = lastSolution_[i];
+  if (std::string e = newton(0.0, X); !e.empty()) { r.error = "hb at the sources' DC values: " + e; return r; }
+  // the AC part in full, else ramped: a failed step back to the last solution, a quarter as long
+  double done = 0.0, step = 1.0;
+  std::string last;
+  while (done < 1.0) {
+    const double a = std::min(1.0, done + step);
+    std::vector<std::complex<double>> Y = X;
+    if (std::string e = newton(a, Y); e.empty()) X = std::move(Y), done = a, step *= 2;
+    else if ((step /= 4) < 1e-4) { r.error = "hb: " + e + " (the sources' AC part ramped to " + std::to_string(done) + ")"; return r; }
+  }
+
+  // The one-sided spectrum: mixes at the same frequency (commensurate tones) summed, peak phasors
+  std::vector<std::pair<double, int>> fm;
+  for (int m = -M; m <= M; ++m)
+    if (keep[m + M] && om[m + M] >= -1e-9 * 2 * M_PI * tones[0]) fm.push_back({std::max(0.0, om[m + M] / (2 * M_PI)), m});
+  std::sort(fm.begin(), fm.end());
+  const double ftol = 1e-9 * *std::max_element(tones.begin(), tones.end());
+  for (const auto &[f, m] : fm) {
+    if (r.freqs.empty() || f - r.freqs.back() > ftol) r.freqs.push_back(f), r.X.emplace_back(n, 0.0);
+    const double k = f > ftol ? 2.0 : 1.0;
+    for (int i = 0; i < n; ++i) r.X.back()[i] += k * X[(size_t)(m + M) * n + i];
+  }
+  if (nt == 1) r.ticks = ticks(X);
   return r;
 }
 

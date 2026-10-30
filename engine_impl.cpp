@@ -1106,6 +1106,46 @@ SimulationResponseDTO SessionImpl::runPnoise(const SimulationRequestDTO& req, co
     return r;
 }
 
+// ── Harmonic balance ──────────────────────────────────────────────────────
+SimulationResponseDTO SessionImpl::runHb(const SimulationRequestDTO& req, const EngineCallbacks& /*cb*/) {
+    status_.store(JobStatus::Running);
+    SimulationResponseDTO r;
+    r.jobId        = jobId_;
+    r.analysisType = AnalysisTypeDTO::HARMONIC_BALANCE;
+    SPICEParseResult parsed;
+    if (deserialiseRequest(req, parsed, r)) {
+        CircuitSim sim;
+        sim.execMode = selectExecMode(precision_);
+        if (!parsed.hasHB) r.errorDetail = "HB needs .hb f1 [f2 ...].";
+        else {
+            const auto s = sim.solveHb(parsed.netlist, parsed.hbTones, parsed.hbHarms, parsed.hbIntmodmax);
+            r.errorDetail = s.error;
+            r.converged = s.error.empty();
+            if (r.converged) {
+                nameColumns(r, parsed, sim);
+                const size_t cols = r.nodeNames.size() + r.branchNames.size();
+                auto& hb = r.extended.hb;
+                hb = {parsed.hbTones, parsed.hbHarms, parsed.hbIntmodmax, s.iterations, s.freqs, {}};
+                for (const auto& x : s.X) hb.values.emplace_back(x.begin(), x.begin() + std::min(cols, x.size()));
+                const size_t nn = r.nodeNames.size();
+                for (size_t j = 0; j < s.ticks.size(); ++j) {
+                    WaveformDataPoint pt;
+                    pt.timeS = j / ((s.ticks.size() - 1) * parsed.hbTones[0]);
+                    pt.nodeVoltages.assign(s.ticks[j].begin(), s.ticks[j].begin() + std::min(nn, s.ticks[j].size()));
+                    pt.branchCurrents.assign(s.ticks[j].begin() + std::min(nn, s.ticks[j].size()), s.ticks[j].begin() + std::min(cols, s.ticks[j].size()));
+                    r.waveformPoints.push_back(std::move(pt));
+                }
+                r.extended.hasHb = true;
+                r.iterations = s.iterations;
+                r.scaleName = "frequency";
+            }
+        }
+        r.backend = backendOf(sim, precision_);
+    }
+    finish(r);
+    return r;
+}
+
 // ── DC transfer function ──────────────────────────────────────────────────
 SimulationResponseDTO SessionImpl::runTF(const SimulationRequestDTO& req,
                                           const EngineCallbacks& /*cb*/) {

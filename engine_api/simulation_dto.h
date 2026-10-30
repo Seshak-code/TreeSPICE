@@ -44,7 +44,8 @@ enum class AnalysisTypeDTO : int {
     STABILITY         = 9,
     PERIODIC_STEADY_STATE = 10,
     PERIODIC_AC       = 11,
-    PERIODIC_NOISE    = 12
+    PERIODIC_NOISE    = 12,
+    HARMONIC_BALANCE  = 13
 };
 
 inline std::string analysisTypeToString(AnalysisTypeDTO t) {
@@ -62,6 +63,7 @@ inline std::string analysisTypeToString(AnalysisTypeDTO t) {
         case AnalysisTypeDTO::PERIODIC_STEADY_STATE: return "PERIODIC_STEADY_STATE";
         case AnalysisTypeDTO::PERIODIC_AC:       return "PERIODIC_AC";
         case AnalysisTypeDTO::PERIODIC_NOISE:    return "PERIODIC_NOISE";
+        case AnalysisTypeDTO::HARMONIC_BALANCE:  return "HARMONIC_BALANCE";
     }
     return "UNKNOWN";
 }
@@ -250,6 +252,17 @@ struct PnoiseResultDTO {
     std::vector<double> frequencies, onoise;  // V/sqrt(Hz)
 };
 
+// .hb: the one-sided spectrum. values[h] the nodes (nodeNames order) then branches (branchNames), peak phasors at
+// frequencies[h] (the mean at 0); one tone: the period itself is the response's waveformPoints (t = 0 .. 1/tones[0])
+struct HbResultDTO {
+    std::vector<double> tones;
+    std::vector<int> harmonics;
+    int intmodmax = 0;       // 0: the box |k_t| <= harmonics[t]; else also sum |k_t| <= intmodmax
+    int iterations = 0;      // Newton iterations, over the sources' ramp
+    std::vector<double> frequencies;
+    std::vector<std::vector<std::complex<double>>> values;
+};
+
 struct ExtendedAnalysisResultsDTO {
     bool hasTF = false;
     TFResultDTO tf;          // Bode plot and margins (the app's TRANSFER_FUNCTION handler)
@@ -271,6 +284,8 @@ struct ExtendedAnalysisResultsDTO {
     PacResultDTO pac;
     bool hasPnoise = false;
     PnoiseResultDTO pnoise;
+    bool hasHb = false;
+    HbResultDTO hb;
 };
 
 struct WaveformDataPoint {
