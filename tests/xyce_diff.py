@@ -6,18 +6,21 @@
 For every Netlists/<dir>/<name>.cir with a gold OutputData/<dir>/<name>.cir.prn, run the engine for the
 netlist's .op/.dc/.tran (same runner and tolerances as tests/ngspice_diff/run_diff.py) and compare the
 single-node V(x) columns and the I(Vname)/I(Lname)/I(Ename)/I(Hname) branch currents of the .prn
-(.ac: Re/Im of each). .include/.lib run with their directory resolved
+(.ac: Re/Im of each). A .hb netlist with a gold <name>.cir.HB.FD.prn runs through treespice; each gold Re/Im column's
+two-sided phasors at f >= 0 against the raw file's "HB Spectrum" (peak phasors: half of them above 0 Hz), within
+--hb-rtol of the column's largest phasor. .include/.lib run with their directory resolved
 (TREESPICE_BASEDIR, see cli/engine_dump_main.cpp). Statuses: PASS, FAIL, ENGINE-UNSUPPORTED (engine rejects a card or
 model parameter), PARSE-ERROR (Xyce syntax the parser lacks), TIMEOUT (--timeout), XYCE-DIALECT (gold follows Xyce-only
 semantics, listed in DIALECT), SKIPPED (a feature this comparison cannot judge: .step, multi-run
 output, a gold with no V(node)/I(source) column (reason names the column kinds), HB/noise/...). Exit 1 on any FAIL.
 """
-import argparse, glob, os, re, sys, tempfile, types
+import argparse, glob, os, re, subprocess, sys, tempfile, types
 from concurrent.futures import ProcessPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "ngspice_diff"))
 import run_diff as rd  # noqa: E402
+from cli_check import read_raw  # noqa: E402
 
 XYCE = os.path.join(os.path.dirname(HERE), "datasets", "xyce")
 SKIP_CARDS = re.compile(r"^\s*\.(step|sens|hb|mpde|data|func|global_param|sampling|"
@@ -171,6 +174,50 @@ def case(path, opts):
     if st == "FAIL" and "TIMEOUT" in note: st = "TIMEOUT"  # run-time limit, not an accuracy verdict
     return rel, st, f"worst abs={wa:.3g} V rel={wr:.3g}  {note}"
 
+# Xyce's output and linear-solver cards: the raw file holds every vector, and the solver's own choice is the engine's
+XYCE_ONLY = re.compile(r"^\s*\.(print|fft|options\s+(linsol|timeint|nonlin|device|output))\b.*$", re.I | re.M)
+
+def hb_case(path, opts):
+    rel = os.path.relpath(path, os.path.join(XYCE, "Netlists"))
+    for key, why in DIALECT.items():
+        if rel.startswith(key): return rel, "XYCE-DIALECT", why
+    text = open(path, errors="ignore").read()
+    if re.search(r"^\s*\.step\b", text, re.I | re.M): return rel, "SKIPPED", SKIP_WHY["step"]
+    lines = [l.split() for l in open(os.path.join(XYCE, "OutputData", rel + ".HB.FD.prn"), errors="ignore") if l.strip()]
+    head, rows = lines[0], [[float(x) for x in t] for t in lines[1:] if re.match(r"^\d", t[0])]
+    with tempfile.TemporaryDirectory(prefix="xyce_hb_") as tmp:
+        cir, raw = os.path.join(tmp, "c.cir"), os.path.join(tmp, "c.raw")
+        open(cir, "w").write(XYCE_ONLY.sub("*", text))
+        try:
+            p = subprocess.run([os.path.join(os.path.dirname(os.path.abspath(opts.engine)), "treespice"), "--cpu", "-r", raw, cir],
+                               capture_output=True, text=True, timeout=opts.timeout, cwd=os.path.dirname(path))
+        except subprocess.TimeoutExpired: return rel, "TIMEOUT", f"over {opts.timeout} s"
+        err = (p.stdout + p.stderr).strip().splitlines()
+        if p.returncode or not os.path.exists(raw):
+            msg = next((l for l in err if "failed" in l), err[-1] if err else "no output")
+            st = "PARSE-ERROR" if "parse error" in msg.lower() else "ENGINE-UNSUPPORTED" if re.search(
+                r"no harmonic-balance form|not supported|several tones take", msg) else "FAIL"
+            return rel, st, msg
+        sp = next(q for q in read_raw(raw) if q["name"] == "HB Spectrum")
+    names = [v[0].lower() for v in sp["vars"]]
+    worst, notes = 0.0, []
+    for k, h in enumerate(head):
+        m = re.fullmatch(r"Re\(([VI])\((\w+)\)\)", h, re.I)
+        if not m or f"{m[1]}({m[2]})".lower() not in names: continue
+        c = names.index(f"{m[1]}({m[2]})".lower())
+        peak = max(abs(complex(r[k], r[k + 1])) for r in rows) or 1.0
+        e = 0.0
+        for r in rows:
+            f = r[1]
+            if f < -1e-9 * max(1.0, abs(f)): continue
+            ours = min(sp["rows"], key=lambda q: abs(q[0].real - f))
+            if abs(ours[0].real - f) > 1e-9 * max(1.0, f): return rel, "FAIL", f"no {f:g} Hz in the engine's spectrum"
+            e = max(e, abs(ours[c] / (2 if f > 0 else 1) - complex(r[k], r[k + 1])) / peak)
+        worst = max(worst, e)
+        notes.append(f"{m[1].lower()}({m[2].lower()}) {e:.2g}")
+    if not notes: return rel, "SKIPPED", "no gold V(node)/I(source) column the engine writes"
+    return rel, "PASS" if worst <= opts.hb_rtol else "FAIL", f"worst {worst:.3g} of the column's peak: " + ", ".join(notes)
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-k", default="")
@@ -179,14 +226,17 @@ def main():
     ap.add_argument("--engine", default=rd.ENGINE)
     ap.add_argument("--timeout", type=int, default=120)
     for k, v in rd.DEFAULTS.items(): ap.add_argument("--" + k.replace("_", "-"), type=float, default=v)
+    ap.add_argument("--hb-rtol", type=float, default=1e-3)
     opts = ap.parse_args()
     paths = [p for p in sorted(glob.glob(os.path.join(XYCE, "Netlists", "**", "*.cir"), recursive=True))
              if opts.k in p and os.path.exists(os.path.join(XYCE, "OutputData",
                                                             os.path.relpath(p, os.path.join(XYCE, "Netlists")) + ".prn"))]
-    if not paths: sys.exit("no gold cases under datasets/xyce (download: see ENGINE_HANDOFF.md)")
+    hb = [p for p in sorted(glob.glob(os.path.join(XYCE, "Netlists", "**", "*.cir"), recursive=True))
+          if opts.k in p and os.path.exists(os.path.join(XYCE, "OutputData", os.path.relpath(p, os.path.join(XYCE, "Netlists")) + ".HB.FD.prn"))]
+    if not paths and not hb: sys.exit("no gold cases under datasets/xyce (download: see ENGINE_HANDOFF.md)")
     counts = {}
     with ProcessPoolExecutor(opts.j) as ex:
-        for rel, st, note in ex.map(case, paths, [opts] * len(paths)):
+        for rel, st, note in [*ex.map(case, paths, [opts] * len(paths)), *ex.map(hb_case, hb, [opts] * len(hb))]:
             counts[st] = counts.get(st, 0) + 1
             if opts.v or st == "FAIL": print(f"{st:<19} {rel:<60} {note[:160]}", flush=True)
     print(" ".join(f"{k}={v}" for k, v in sorted(counts.items())))

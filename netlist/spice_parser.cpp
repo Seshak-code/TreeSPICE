@@ -465,6 +465,9 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
     sensRef_.clear();
     tfOut_.clear();
     pssOsc_.clear();
+    hbHarms_ = {10};
+    hbIntmodmax_ = 0;
+    hbDiamond_ = false;
     pnoiseOut_.clear();
     pnoiseRef_.clear();
     tfRef_.clear();
@@ -605,6 +608,31 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                         if (!(v > 0.0)) throw std::runtime_error(".options " + k + " must be > 0");
                         return v;
                     };
+                    if (tok.size() > 1 && toUpper(tok[1]) == "HBINT") {  // Xyce's harmonic-balance options
+                        for (size_t i = 2; i < tok.size(); ++i) {
+                            const std::string k = toUpper(tok[i]);
+                            std::vector<double> vs;
+                            while (i + 1 < tok.size() && isValue(tok[i + 1])) vs.push_back(parseValue(tok[++i]));
+                            auto whole = [&](double v) {
+                                if (!(v >= 1.0) || v != std::floor(v)) throw std::runtime_error(".options hbint " + k + " takes whole numbers >= 1");
+                                return (int)v;
+                            };
+                            if (k == "NUMFREQ" && !vs.empty()) { hbHarms_.clear(); for (double v : vs) hbHarms_.push_back(whole(v)); }
+                            else if (k == "INTMODMAX" && vs.size() == 1) hbIntmodmax_ = whole(vs[0]);
+                            else if (k == "SELECTHARMS" && i + 1 < tok.size()) {
+                                const std::string m = toUpper(tok[++i]);
+                                if (m != "BOX" && m != "DIAMOND") throw std::runtime_error(".options hbint selectharms=" + m + ": box or diamond");
+                                hbDiamond_ = m == "DIAMOND";
+                            }
+                            // the solver's own knobs (Xyce's start-up transient, linear solver, output files): the answer
+                            // does not depend on them
+                            else if (k == "TAHB" || k == "STARTUPPERIODS" || k == "SAVEICDATA" || k == "VOLTLIM" || k == "LOADTIMESOURCES" ||
+                                     k == "NUMTPTS" || k == "METHOD")
+                                std::cerr << "Warning: .options hbint " << k << " is ignored\n", i += vs.empty() && k == "METHOD";
+                            else throw std::runtime_error(".options hbint " + k + " is not supported");
+                        }
+                        continue;
+                    }
                     for (size_t i = 1; i < tok.size(); ++i) {
                         const std::string k = toUpper(tok[i]);
                         const bool kv = i + 1 < tok.size() && isValue(tok[i + 1]);
@@ -771,6 +799,13 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
                     result_.pnoiseStop = parseValue(tok[sw + 3]);
                     result_.pnoiseSidebands = static_cast<int>(parseValue(tok[sw + 4]));
                 }
+                else if (keyword == ".HB") {
+                    // .hb f1 [f2 ...]: the tones (Xyce's card; the harmonics are .options hbint numfreq)
+                    if (tok.size() < 2) throw std::runtime_error(".hb expects f1 [f2 ...]");
+                    result_.hasHB = true;
+                    result_.hbTones.clear();
+                    for (size_t i = 1; i < tok.size(); ++i) result_.hbTones.push_back(parseValue(tok[i]));
+                }
                 else if (keyword == ".PSS") {
                     // .pss fund tstab oscnob points harms [sciter], ngspice's card: oscnob 0 (ground) is a circuit its
                     // sources drive at fund (TreeSPICE's shooting), a node an oscillator observed there
@@ -930,6 +965,14 @@ SPICEParseResult SPICEParser::parse(const std::string& netlistText, const std::s
         result_.tfOut = node(tfOut_);
         result_.tfRef = node(tfRef_);
         if (result_.tfOut < 0 || result_.tfRef < 0) return fail(lines.back().first, ".tf names an unknown output node");
+    }
+    if (result_.hasHB) {
+        const size_t T = result_.hbTones.size();
+        if (hbHarms_.size() != 1 && hbHarms_.size() != T)
+            return fail(lines.back().first, ".options hbint numfreq gives one value, or one per .hb tone");
+        result_.hbHarms.assign(T, hbHarms_.front());
+        if (hbHarms_.size() == T) result_.hbHarms = hbHarms_;
+        result_.hbIntmodmax = hbDiamond_ ? (hbIntmodmax_ ? hbIntmodmax_ : *std::max_element(result_.hbHarms.begin(), result_.hbHarms.end())) : 0;
     }
     if (result_.hasPSS) {
         auto it = nodeMap_.find(pssOsc_);
@@ -2222,7 +2265,18 @@ void SPICEParser::parseVoltSrc(const std::vector<std::string>& tok, TensorBlock&
 // Shared V/I spec. If no DC value is given, the DC value is the waveform's
 // t=0 value (SPICE rule), so every DC code path can keep using voltage_V.
 template <class Src>
-void SPICEParser::parseSourceSpec(const std::vector<std::string>& tok, Src& s, double& dc) const {
+void SPICEParser::parseSourceSpec(const std::vector<std::string>& card, Src& s, double& dc) const {
+    // ngspice also takes DC / AC after a waveform ("SIN 0 1 1MEG AC 1"): they move before it, as the waveform below
+    // consumes the rest of the card
+    std::vector<std::string> tok = card;
+    for (size_t w = 3; w < tok.size(); ++w) {
+        const std::string k = toUpper(tok[w]);
+        if (k != "PULSE" && k != "SIN" && k != "PWL" && k != "EXP" && k != "SFFM" && k != "AM") continue;
+        size_t e = w + 1;
+        while (e < tok.size() && toUpper(tok[e]) != "AC" && toUpper(tok[e]) != "DC") ++e;
+        std::rotate(tok.begin() + w, tok.begin() + e, tok.end());
+        break;
+    }
     bool hasDC = false;
     for (size_t i = 3; i < tok.size();) {
         std::string kw = toUpper(tok[i]);

@@ -73,7 +73,7 @@ std::vector<std::string> analysisCards(const std::string& text) {
         ls >> kw;
         for (auto& c : kw) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (kw == ".op" || kw == ".dc" || kw == ".ac" || kw == ".tran" || kw == ".noise" || kw == ".pz" || kw == ".sens" || kw == ".tf" ||
-            kw == ".stb" || kw == ".pss" || kw == ".pac" || kw == ".pnoise")
+            kw == ".stb" || kw == ".pss" || kw == ".pac" || kw == ".pnoise" || kw == ".hb")
             kinds.push_back(kw.substr(1));
     }
     return kinds;
@@ -239,6 +239,33 @@ std::vector<OutputTable> periodicTables(const SimulationResponseDTO& r) {
         };
         for (size_t i = 0; i < r.nodeNames.size(); ++i) if (!r.nodeNames[i].empty()) column("v(" + r.nodeNames[i] + ")", "voltage", i);
         for (size_t i = 0; i < r.branchNames.size(); ++i) column("i(" + r.branchNames[i] + ")", "current", r.nodeNames.size() + i);
+        out.push_back(std::move(t));
+    }
+    return out;
+}
+
+// .hb: "HB Spectrum", every node and branch as its peak phasors over the one-sided spectrum (the mean at 0), and with
+// one tone "HB Time", the period they sum to at the 2 numfreq + 1 ticks (the last the first again)
+std::vector<OutputTable> hbTables(const SimulationResponseDTO& r) {
+    std::vector<OutputTable> out;
+    OutputTable f;
+    f.plotName = "HB Spectrum";
+    f.scaleName = "frequency";
+    f.complexData = true;
+    f.scale = r.extended.hb.frequencies;
+    auto column = [&](const std::string& name, const char* type, size_t c) {
+        OutputTable::Column col{name, type, {}, true};
+        for (const auto& x : r.extended.hb.values) col.values.push_back(c < x.size() ? x[c] : 0.0);
+        f.columns.push_back(std::move(col));
+    };
+    for (size_t i = 0; i < r.nodeNames.size(); ++i) if (!r.nodeNames[i].empty()) column("v(" + r.nodeNames[i] + ")", "voltage", i);
+    for (size_t i = 0; i < r.branchNames.size(); ++i) column("i(" + r.branchNames[i] + ")", "current", r.nodeNames.size() + i);
+    out.push_back(std::move(f));
+    if (!r.waveformPoints.empty()) {
+        SimulationResponseDTO td = r;
+        td.analysisType = AnalysisTypeDTO::TRANSIENT;
+        OutputTable t = selectOutputs(td, {});
+        t.plotName = "HB Time";
         out.push_back(std::move(t));
     }
     return out;
@@ -429,6 +456,7 @@ int main(int argc, char** argv) {
                                 : an.kind == "pss"  ? session->runPss(an.req, cb)
                                 : an.kind == "pac"  ? session->runPac(an.req, cb)
                                 : an.kind == "pnoise" ? session->runPnoise(an.req, cb)
+                                : an.kind == "hb"   ? session->runHb(an.req, cb)
                                 : an.kind == "pz"   ? session->runPoleZero(an.req, cb)
                                                     : session->runDC(an.req, cb);
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -472,6 +500,12 @@ int main(int argc, char** argv) {
                     << " of its tolerance); fundamental = " << p.fundamental << " Hz, the period from t = " << p.t0 << " s\n";
                 if (!rawPath.empty())
                     for (const auto& t : pssTables(r)) writeRaw(rawFile, t, title(text), ascii);
+            } else if (an.kind == "hb") {
+                const auto& h = r.extended.hb;
+                out << "HB converged in " << h.iterations << " Newton iterations; " << h.frequencies.size() << " frequencies from 0 to "
+                    << h.frequencies.back() << " Hz\n";
+                if (!rawPath.empty())
+                    for (const auto& t : hbTables(r)) writeRaw(rawFile, t, title(text), ascii);
             } else if (an.kind == "pac" || an.kind == "pnoise") {
                 const double f0 = an.kind == "pac" ? r.extended.pac.fundamental : r.extended.pnoise.fundamental;
                 out << "." << an.kind << " about the PSS at fundamental = " << f0 << " Hz\n";

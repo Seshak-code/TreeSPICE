@@ -262,6 +262,33 @@ then the two Roadmap sections it points to. Everything below was verified by run
     - An unknown method is now an error. Gear runs at order 2 at most (ponytail: ngspice raises to MAXORD).
     - Note: tightening reltol does not refine TreeSPICE's steps when tstep caps them (max step = tstep; ngspice
       uses tstop/50), so a convergence study must refine tstep.
+- **Update 2026-10-30 (Claude Code, branch `mac/hb`; PR #31 `mac/refcheck` merged by the owner): harmonic balance.**
+  `.hb f1 [f2 ...]` with Xyce's `.options hbint numfreq=k1[,k2 ...] [selectharms=box|diamond] [intmodmax=n]` (its
+  solver knobs tahb, startupperiods, saveicdata, numtpts, voltlim, loadtimesources, method warn as ignored).
+  - **Method (`CircuitSim::solveHb`):** Newton on the phasors at the kept mixes; the Jacobian is PAC's conversion
+    matrix (`lptv`, now with per-sideband frequencies `om` and a kept set), so HB and PAC share one linearisation.
+    Several tones fold into one artificial period (the frequency map: box or diamond). Each tick's residual comes
+    from `acSystem`'s stamp with the sources off (`f`) and its charges (`q`, new: capacitors, inductor flux,
+    junctions, OSDI's `Qout`). Sources' spectra: one tone samples any waveform that repeats at 1/f1; several take DC
+    and undamped SIN. A step is scaled to move no node more than 1 V; failing that, the sources' AC part ramps in.
+  - **Output:** the raw file's "HB Spectrum" (peak phasors, one-sided, equal-frequency mixes summed) and, for one
+    tone, "HB Time" over its 2K+1 ticks.
+  - **Checks:**
+    - `tests/xyce_diff.py` now runs every Xyce `.HB.FD.prn` gold: 12 PASS (BJT common emitter, a PULSE-driven
+      RTL inverter, diode circuits, the RC) to 2.3e-5 of each column's peak.
+    - The refused ones: invert_hb* (MOS level 2 Meyer charges), gilbert_cell_hb (BJT excess phase), Xyce's diode
+      LEVEL 2.
+    - `test_engine_fixes`: the RC exact; a rectifier's harmonics 0..5 against its PSS (1.2e-4 V at 40 harmonics,
+      4.5e-7 at 80); two tones 10k + 11k against one tone at their 1 kHz GCD (1.7e-7 V at 7 harmonics each,
+      1e-9 at 13).
+  - **Refused (explicit):** Meyer MOS (levels 1-3: no charge function), BJT excess phase, diode VP and
+    self-heating, transmission lines, XSPICE, time-dependent B sources, switch hysteresis.
+  - **ponytail:** dense DFTs and a direct solve (dense blocks per nonlinear entry). Two tones of 13 harmonics on
+    8 unknowns take 11 s; FFT plus GMRES preconditioned by the block diagonal is the upgrade. No oscillator HB.
+  - **Also:** ngspice's `V1 a 0 sin 0 1 1meg AC 1` (AC/DC after a parenthesis-less waveform) failed the parse; DC/AC
+    now move ahead of the waveform.
+  - **Matrix:** run_diff 1270 PASS / 0 FAIL / 8 ENGINE-UNSUPPORTED (cpu + "gpu"). This build has
+    `TREESPICE_GPU=OFF`, so "gpu" runs the CPU fallback: no Dawn exists on this machine.
 - **Status of the plan:** Roadmap Phase 1 (Foundations) is done. See `Roadmap.md` →
   "⚙️ ENGINE FEATURE LIST & VERIFIED SUPPORT STATUS" (what works, by device/analysis, with ✅/⚠️/❌/🚫/❓)
   and "🎯 END-TO-END GOAL & ENGINE SCALE PLAN" (phases and gates).

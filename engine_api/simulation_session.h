@@ -102,6 +102,12 @@ public:
         const compute::orchestration::SimulationRequestDTO&,
         const EngineCallbacks& = {}) = 0;
 
+    // .hb: harmonic balance for the netlist's .hb card and .options hbint (extended.hb; one tone: the period as
+    // waveformPoints).
+    virtual compute::orchestration::SimulationResponseDTO runHb(
+        const compute::orchestration::SimulationRequestDTO&,
+        const EngineCallbacks& = {}) = 0;
+
     // .tf: DC small-signal transfer function and impedances for the netlist's .tf card (extended.dcTf).
     virtual compute::orchestration::SimulationResponseDTO runTF(
         const compute::orchestration::SimulationRequestDTO&,

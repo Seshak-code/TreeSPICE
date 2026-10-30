@@ -1507,6 +1507,55 @@ int main() {
         check(!run(PrecisionMode::Native_F64, deck("0")).converged, ".options seed=0 is an error");
     }
 
+    {   // .hb: harmonic balance. A linear RC is exact at its harmonic; a rectifier converges to its PSS as the harmonics
+        // grow; two commensurate tones (10k, 11k) through the frequency map converge to one tone at their 1 kHz GCD
+        std::printf("\n== hb ==\n");
+        auto run1 = [](const std::string& deck, bool pssToo = false) {
+            auto engine = ISimulationEngine::create();
+            engine->setPrecisionMode(PrecisionMode::Native_F64);
+            SimulationRequestDTO req;
+            req.source.payload = deck;
+            return pssToo ? engine->createSession()->runPss(req, {}) : engine->createSession()->runHb(req, {});
+        };
+        auto at = [](const SimulationResponseDTO& r, const std::string& node, double f) {
+            int c = -1;
+            for (size_t k = 0; k < r.nodeNames.size(); ++k) if (r.nodeNames[k] == node) c = (int)k;
+            const auto& h = r.extended.hb;
+            for (size_t k = 0; k < h.frequencies.size(); ++k)
+                if (c >= 0 && std::abs(h.frequencies[k] - f) <= 1e-9 * std::max(1.0, f)) return h.values[k][c];
+            return std::complex<double>(NAN, NAN);
+        };
+        // (ngspice's SIN without parentheses, then AC: the AC used to fail the parse)
+        const auto rc = run1("* rc\nV1 in 0 sin 0 1 1meg AC 1\nR1 in out 1k\nC1 out 0 1n\n.hb 1meg\n.options hbint numfreq=3\n.end\n");
+        const std::complex<double> H = 1.0 / std::complex<double>(1, 2 * M_PI);  // sin(wt) = Re(-j e^(jwt))
+        const double erc = std::abs(at(rc, "out", 1e6) - std::complex<double>(0, -1) * H) + std::abs(at(rc, "out", 2e6));
+        check(rc.converged && erc < 1e-12, ".hb: a driven RC's fundamental is -j H and nothing else (" + std::to_string(erc) + ")");
+        const std::string rect = "* rect\nV1 in 0 SIN(0 5 1meg)\nD1 in out dmod\nC1 out 0 1n\nR1 out 0 10k\n.model dmod d is=1e-14 cjo=2p\n";
+        const auto hb = run1(rect + ".hb 1meg\n.options hbint numfreq=40\n.end\n");
+        const auto ps = run1(rect + ".pss 1meg 2.5u 0 4000 10\n.end\n", true);
+        double erect = hb.converged && ps.converged ? 0 : 1;
+        int o = -1;
+        for (size_t k = 0; k < ps.nodeNames.size(); ++k) if (ps.nodeNames[k] == "out") o = (int)k;
+        const size_t N = ps.waveformPoints.size() - 1;
+        for (int k = 0; k <= 5 && o >= 0; ++k) {  // the PSS's peak phasors from its ticks (t0 a whole number of periods)
+            std::complex<double> s = 0;
+            for (size_t m = 0; m < N; ++m) s += ps.waveformPoints[m].nodeVoltages[o] * std::polar(1.0, -2 * M_PI * k * (double)m / (double)N);
+            erect = std::max(erect, std::abs(at(hb, "out", k * 1e6) - s * ((k ? 2.0 : 1.0) / (double)N)));
+        }
+        check(erect < 5e-4, ".hb: a half-wave rectifier's harmonics 0..5 at 40 harmonics match its PSS to " + std::to_string(erect) + " V");
+        const std::string mix = "V1 a 0 SIN(0 0.3 10k)\nV2 b a SIN(0 0.2 11k)\nR1 b c 1k\nD1 c d dmod\nC1 d 0 10n\nR2 d 0 10k\n"
+                                ".model dmod d is=1e-14 cjo=2p tt=1n rs=10\n";
+        const auto two = run1("* two tones\n" + mix + ".hb 10k 11k\n.options hbint numfreq=7,7\n.end\n");
+        const auto one = run1("* one tone\n" + mix + ".hb 1k\n.options hbint numfreq=160\n.end\n");
+        double emix = two.converged && one.converged ? 0 : 1;
+        for (double f : {0.0, 1e3, 9e3, 1e4, 1.1e4, 2.1e4}) emix = std::max(emix, std::abs(at(two, "d", f) - at(one, "d", f)));
+        check(emix < 1e-6, ".hb: two tones 10k + 11k (7 harmonics each) match one tone at 1 kHz (160) at 0, 1k, 9k, 10k, 11k, 21k to " +
+                               std::to_string(emix) + " V");
+        const auto meyer = run1("* meyer\nV1 g 0 SIN(1 1 1meg)\nV2 d 0 2\nM1 d g 0 0 nm\n.model nm nmos level=1 tox=10n\n.hb 1meg\n.end\n");
+        check(!meyer.converged && meyer.errorDetail.find("harmonic-balance") != std::string::npos, ".hb refuses what has no charge: " + meyer.errorDetail);
+        const auto bad = run1("* bad\nV1 a 0 SIN(0 1 1k)\nR1 a 0 1k\n.hb 1k\n.options hbint numfreq=3,2\n.end\n");
+        check(!bad.converged, ".hb: numfreq gives one value or one per tone (" + bad.errorDetail + ")");
+    }
     {   // .options method=gear runs variable-step Gear 2 (it ran trapezoidal before); both are second order, so each
         // lands within 1e-3 of the exponential, and they differ. tests/refcheck checks Gear's every point against a
         // 50-digit BDF2 replay. An unknown method is refused.
