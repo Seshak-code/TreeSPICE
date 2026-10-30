@@ -240,6 +240,19 @@ then the two Roadmap sections it points to. Everything below was verified by run
   - **Next:** delete the engine headers only OpenVLSI tests use (`statistical_engine.h`, `sensitivity_analysis.h`,
     `fpu_control.h`, `emulated_f64.h`, `graph_utils.h`, `netlist_diff.h`) with those tests; benchmark
     `assembleFast` vs `createCsr`; then the bump of OpenVLSI to the merge commit.
+- **Update 2026-10-29 (Claude Code, branch `mac/refcheck`): exact-arithmetic reference checks.**
+  `tests/refcheck/refcheck.py` checks TreeSPICE against references built independently in SymPy and mpmath:
+  - **DAEs:** exact-rational MNA for DC, AC (with K) and PZ; noise against 4kTR/(1+(wRC)^2); transient
+    replayed at 50 digits on the engine's own time points (BE cold start and after corners, else trapezoidal).
+  - **Contraction solver:** `solve_triplets` against the exact LU; Oettli-Prager backward error <= 4u and the
+    forward error within Skeel's bound; a V-source loop must be refused.
+  - **Devices:** diode, MOS1 (cut/lin/sat) and BJT currents and derivatives, from SymPy derivatives of SPICE's
+    equations. `[info]` lines give the gap to the papers' laws (GMIN, the reverse cubic law, the substrate junction).
+  - **Result:** 36 of 36 pass, 9 s. Bounds are condition-number based (row-equilibrated), not fixed tolerances.
+  - Also: `acutesim_engine_dump` prints 17 significant digits (it printed 9).
+  - **Findings, not fixed:** `.options method=gear` runs trapezoidal with only a warning (spice_parser.cpp:885);
+    GEAR_2 uses constant-step coefficients; the CLI does not report the transient-OP fallback; `subcircuit_validator.h`
+    and `extractSubCircuit` are dead; graph_canonical's "Weisfeiler-Lehman" comment describes BFS+FNV code.
 - **Status of the plan:** Roadmap Phase 1 (Foundations) is done. See `Roadmap.md` →
   "⚙️ ENGINE FEATURE LIST & VERIFIED SUPPORT STATUS" (what works, by device/analysis, with ✅/⚠️/❌/🚫/❓)
   and "🎯 END-TO-END GOAL & ENGINE SCALE PLAN" (phases and gates).
@@ -332,6 +345,7 @@ python3 tests/ngspice_diff/run_diff.py   # ~2 min; needs ngspice (brew install n
 python3 tests/cli_check.py              # the treespice CLI
 python3 tests/xyce_diff.py              # 0 FAIL expected; needs datasets/xyce
 python3 tests/ibmpg_diff.py -k ibmpg2   # needs datasets/ibmpg
+~/eda/venv-refcheck/bin/python tests/refcheck/refcheck.py --build build   # SymPy/mpmath exact references; [dae solver device]
 ```
 Integration suites that need the app layers stay in OpenVLSI: run them there with the submodule at the
 new commit. They include test_regression (the CI gate, run from the CuteApp root),

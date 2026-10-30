@@ -223,6 +223,9 @@ if(TREESPICE_STANDALONE)
         target_link_libraries(${t} PRIVATE acutesim_engine)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
+    # One contraction-solver solve for tests/refcheck/refcheck.py (checked against mpmath's exact solution)
+    add_executable(solve_triplets tests/refcheck/solve_triplets.cpp)
+    target_link_libraries(solve_triplets PRIVATE acutesim_engine)
     # OSDI-backed models (HICUM) load from datasets/osdi, which tests/build_osdi.sh fills
     set_tests_properties(test_engine_fixes PROPERTIES ENVIRONMENT "TREESPICE_OSDI_PATH=${CMAKE_CURRENT_SOURCE_DIR}/datasets/osdi")
 
