@@ -72,20 +72,20 @@ int main(int argc, char** argv) {
     std::printf("CONVERGED %d\nERROR %s\nBACKEND %s\n", r.converged ? 1 : 0, r.errorDetail.c_str(), r.backend.c_str());
     const auto& nz = r.extended.noise;
     for (size_t k = 0; k < nz.frequencies.size(); ++k)
-        std::printf("%.9g %.9g %.9g\n", nz.frequencies[k], nz.onoise[k], nz.inoise[k]);
-    if (r.extended.hasNoise) std::printf("TOTAL %.9g %.9g\n", nz.onoiseTotal, nz.inoiseTotal);
+        std::printf("%.17g %.17g %.17g\n", nz.frequencies[k], nz.onoise[k], nz.inoise[k]);
+    if (r.extended.hasNoise) std::printf("TOTAL %.17g %.17g\n", nz.onoiseTotal, nz.inoiseTotal);
     const auto& pz = r.extended.pz;
-    for (size_t k = 0; k < pz.poleRe.size(); ++k) std::printf("POLE %.9g %.9g\n", pz.poleRe[k], pz.poleIm[k]);
-    for (size_t k = 0; k < pz.zeroRe.size(); ++k) std::printf("ZERO %.9g %.9g\n", pz.zeroRe[k], pz.zeroIm[k]);
+    for (size_t k = 0; k < pz.poleRe.size(); ++k) std::printf("POLE %.17g %.17g\n", pz.poleRe[k], pz.poleIm[k]);
+    for (size_t k = 0; k < pz.zeroRe.size(); ++k) std::printf("ZERO %.17g %.17g\n", pz.zeroRe[k], pz.zeroIm[k]);
     const auto& sn = r.extended.sens;
     const size_t nf = sn.frequencies.size();
-    for (size_t k = 0; nf == 0 && k < sn.names.size(); ++k) std::printf("SENS %s %.9g\n", sn.names[k].c_str(), sn.values[k]);
+    for (size_t k = 0; nf == 0 && k < sn.names.size(); ++k) std::printf("SENS %s %.17g\n", sn.names[k].c_str(), sn.values[k]);
     for (size_t k = 0; k < sn.names.size(); ++k)
         for (size_t f = 0; f < nf; ++f)
-            std::printf("SENSAC %s %.9g %.9g %.9g\n", sn.names[k].c_str(), sn.frequencies[f], sn.values[k * nf + f], sn.imag[k * nf + f]);
+            std::printf("SENSAC %s %.17g %.17g %.17g\n", sn.names[k].c_str(), sn.frequencies[f], sn.values[k * nf + f], sn.imag[k * nf + f]);
     for (const auto& u : sn.unsupported) std::printf("UNSUPPORTED %s\n", u.c_str());
     const auto& tf = r.extended.dcTf;
-    for (size_t k = 0; k < tf.names.size(); ++k) std::printf("TF %s %.9g\n", tf.names[k].c_str(), tf.values[k]);
+    for (size_t k = 0; k < tf.names.size(); ++k) std::printf("TF %s %.17g\n", tf.names[k].c_str(), tf.values[k]);
     std::printf("NODES");
     for (const auto& n : r.nodeNames) std::printf(" %s", n.empty() ? "-" : n.c_str());
     std::printf("\nBRANCHES");
@@ -102,18 +102,18 @@ int main(int argc, char** argv) {
         if (!p.outer.empty() && (!shown || *shown != p.outer)) {
             std::printf("SWEEP");
             for (size_t i = 0; i < p.outer.size() && i < r.outerNames.size(); ++i)
-                std::printf(" %s=%.9g", r.outerNames[i].c_str(), p.outer[i]);
+                std::printf(" %s=%.17g", r.outerNames[i].c_str(), p.outer[i]);
             std::printf("\n");
             shown = &p.outer;
         }
-        std::printf("%.9g", p.timeS);
+        std::printf("%.17g", p.timeS);
         for (size_t i = 0; i < p.nodeVoltages.size(); ++i) {
-            std::printf(" %.9g", p.nodeVoltages[i]);
-            if (i < p.nodeVoltagesImag.size()) std::printf(" %.9g", p.nodeVoltagesImag[i]);
+            std::printf(" %.17g", p.nodeVoltages[i]);
+            if (i < p.nodeVoltagesImag.size()) std::printf(" %.17g", p.nodeVoltagesImag[i]);
         }
         for (size_t i = 0; i < p.branchCurrents.size(); ++i) {
-            std::printf(" %.9g", p.branchCurrents[i]);
-            if (i < p.branchCurrentsImag.size()) std::printf(" %.9g", p.branchCurrentsImag[i]);
+            std::printf(" %.17g", p.branchCurrents[i]);
+            if (i < p.branchCurrentsImag.size()) std::printf(" %.17g", p.branchCurrentsImag[i]);
         }
         std::printf("\n");
     }

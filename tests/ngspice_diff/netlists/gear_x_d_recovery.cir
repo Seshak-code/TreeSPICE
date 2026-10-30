@@ -1,0 +1,8 @@
+* Diode charge: transit time TT (reverse recovery) + junction CJO/VJ/M/FC (method=gear)
+VIN 1 0 PULSE(5 -5 20n 1n 1n 100n 200n)
+R1 1 2 1k
+D1 2 0 DREC
+.model DREC D(IS=1e-14 N=1 TT=20n CJO=5p VJ=0.7 M=0.45 FC=0.5 RS=2)
+.options method=gear
+.tran 0.2n 300n
+.end

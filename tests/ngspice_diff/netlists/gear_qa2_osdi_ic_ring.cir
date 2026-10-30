@@ -1,0 +1,18 @@
+* 3-stage bsim4 ring oscillator started via .ic (method=gear)
+.osdi bsim4.osdi
+VDD 1 0 DC 1.2
+NP1 2 4 1 1 pch
+NN1 2 4 0 0 nch
+NP2 3 2 1 1 pch
+NN2 3 2 0 0 nch
+NP3 4 3 1 1 pch
+NN3 4 3 0 0 nch
+C2 2 0 2f
+C3 3 0 2f
+C4 4 0 2f
+.ic v(2)=1.2 v(3)=0 v(4)=0
+.model nch bsim4va type=1 w=1u l=100n
+.model pch bsim4va type=-1 w=2u l=100n
+.options method=gear
+.tran 2p 0.4n uic
+.end
