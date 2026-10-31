@@ -30,6 +30,9 @@ public:
         if (!busy) return false;
         {
             std::lock_guard<std::mutex> lk(m_);
+            // Chunks of indices per claim: one atomic per device made 10 threads contend on its cache
+            // line (2-3 ms an OSDI pass of 20k devices, about what the whole pass took)
+            chunk_ = std::max(1, n / (16 * ((int)threads_.size() + 1)));
             fn_ = &fn; n_ = n; next_ = 0; active_ = (int)threads_.size(); ++gen_;
         }
         wake_.notify_all();
@@ -56,7 +59,10 @@ private:
         wake_.notify_all();
         for (auto& t : threads_) t.join();
     }
-    void work() { for (int i; (i = next_.fetch_add(1)) < n_;) (*fn_)(i); }
+    void work() {
+        for (int b; (b = next_.fetch_add(chunk_)) < n_;)
+            for (int i = b, e = std::min(n_, b + chunk_); i < e; ++i) (*fn_)(i);
+    }
     void loop() {
         unsigned long seen = 0;
         for (;;) {
@@ -75,7 +81,7 @@ private:
     std::mutex job_, m_;
     std::condition_variable wake_, done_;
     const std::function<void(int)>* fn_ = nullptr;
-    int n_ = 0, active_ = 0;
+    int n_ = 0, active_ = 0, chunk_ = 1;
     std::atomic<int> next_{0};
     unsigned long gen_ = 0;
     bool stop_ = false;

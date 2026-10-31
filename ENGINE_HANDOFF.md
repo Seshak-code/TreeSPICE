@@ -289,6 +289,31 @@ then the two Roadmap sections it points to. Everything below was verified by run
     now move ahead of the waveform.
   - **Matrix:** run_diff 1270 PASS / 0 FAIL / 8 ENGINE-UNSUPPORTED (cpu + "gpu"). This build has
     `TREESPICE_GPU=OFF`, so "gpu" runs the CPU fallback: no Dawn exists on this machine.
+- **Update 2026-10-30 (Claude Code, branch `mac/parallel`, from `main` beside `mac/mos1-limit`): the flat
+  transient's serial passes.** The scale baseline (memory `scale-assessment-2026-10-30`) found 1 thread 15.0 s,
+  14 threads 13.2 s on a 10000-stage BSIM4 chain, the workers idle most of the time. Profiled line by line
+  (`-O3 -g`, `sample`): device bypass leaves the model ~3 % of the time; the rest was bookkeeping.
+  - **WorkerPool:** claims chunks of n / (16 threads) indices; one atomic per index made 10 threads contend on one
+    cache line, 2-3 ms an OSDI pass of 20k devices (12.0 -> 8.7 s alone).
+  - **OSDI:** `BlockState::osdiInternals` counted once by instantiateOsdi (branchSlots summed it every call, 9 %);
+    a bypassed device keeps its J (G + coef C) while its coef is the same (`osdiJCoef_`); `stampOsdi` stamps every
+    device as one `MatrixConstructor::addRun` (fixed rows, columns and osdiJ_ indices, a per-entry non-zero mask so
+    the pattern is the old one: the model's declared entries that stay 0 doubled the solve) and computes the right-hand
+    sides in parallel, added in device order. LTE reads `osdiRefs_` instead of rebuilding the list.
+  - **Contraction solver:** solveWithFactors' per-front rhs vectors and the solve's r, dx are per-thread buffers
+    (malloc/free was a tenth of the solves).
+  - **Results:** bit-identical to `main` (raw data) at 1 and 10 threads. 10000-stage BSIM4 chain (2e4 transistors),
+    1 / 4 / 10 threads: 12.3 / 7.95 / 7.0 s (main 14.5 / 13.1 / 12.3; CPU time 20 s vs 51 s at 10). 100000 stages
+    at 10 threads: 119 s (main 179 s), 5.4e5 transistor-steps/s, RSS unchanged (927 MiB).
+  - **Tried and dropped:** pointer-hoisted compact G/C reads (no change: the cost is the cache misses), a parallel
+    ordered gather in createCsr (no faster than the serial scatter).
+  - **Next:** at 10 threads the linear solve is ~36 % of the main thread, half of it the refinement step (a second
+    triangular solve and two residuals); then createCsr's serial scatter and the OSDI pass's cache misses (each
+    instance's state is its own heap block).
+  - **Checks:** `test_engine_fixes` "stamp runs": a run (one entry off, rows scaled) builds the same matrix as its
+    stamps added one by one through createCsr, its cached pattern and assembleFast (fails with the mask ignored);
+    parallelFor visits every index once. Matrix: run_diff 1270 PASS / 0 FAIL; Xyce 208 PASS / 0 FAIL (2 TIMEOUT,
+    the LTRA square-wave decks, as on main); refcheck 39/39; cli_check 29/29; ctest 4/4.
 - **Status of the plan:** Roadmap Phase 1 (Foundations) is done. See `Roadmap.md` →
   "⚙️ ENGINE FEATURE LIST & VERIFIED SUPPORT STATUS" (what works, by device/analysis, with ✅/⚠️/❌/🚫/❓)
   and "🎯 END-TO-END GOAL & ENGINE SCALE PLAN" (phases and gates).
