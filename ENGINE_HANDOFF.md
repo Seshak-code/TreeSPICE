@@ -289,6 +289,33 @@ then the two Roadmap sections it points to. Everything below was verified by run
     now move ahead of the waveform.
   - **Matrix:** run_diff 1270 PASS / 0 FAIL / 8 ENGINE-UNSUPPORTED (cpu + "gpu"). This build has
     `TREESPICE_GPU=OFF`, so "gpu" runs the CPU fallback: no Dawn exists on this machine.
+- **Update 2026-10-30 (Claude Code, branch `mac/mos1-limit`; PR #32 `mac/hb` merged by the owner): MOS limiting
+  and the gmin ladder's KCL.** A scale baseline (memory `scale-assessment-2026-10-30`) found every MOS1 inverter
+  chain of 9500 stages or more failing its `.op`; ngspice solves them.
+  - **MOS limiting (`CircuitSim::mosLimit`):** ngspice mos1load's, for levels 1, 2, 3 and 6. vgs (vgd when reversed)
+    by DEVfetlim about the last iteration's threshold, vds by DEVlimvds, the forward bulk junction by DEVpnjlim, each
+    against the last iteration's limited values (`DeviceCharge::jv`). A solve starts at vgs = VTO, vds = 0,
+    vbs = -1 (MODEINITJCT). The stamp is the companion at the limited point, as for diodes and BJTs. The limit state
+    follows the junctions' (sync, reset, OFF held at 0 V); `mos_von_vdsat` (from mos1_charges) gives the threshold.
+  - **KCL at every gmin step:** the audit now carries gmin stepping's node gmin (`stepGmin_`, device-internal nodes
+    too), so a step must meet KCL like the final one. Relaxed to 1 A, steps were accepted short of their solutions
+    and the ladder stalled at the chain's critical node gmin (~1.06 mS, where a period-2 pattern sets in down the
+    chain).
+  - **Checks:**
+    - `test_engine_fixes`: fetlim and limvds against ngspice's by hand, plus a 9500-stage chain's `.op`, which fails
+      without either change.
+    - Sweep of chain lengths (`.op`): 9000-9500 and 10500-20000 converge in 2-6 s (ngspice 3-35 s). 9800, 10000 and
+      50000 still fail at the critical gmin, where ngspice gets through (by its gmin ladder at <= 12000 stages,
+      by source stepping above). There a step's outcome hangs on roundoff-level differences in the accepted
+      points. ngspice's source stepping alone also stalls at 10000 (33.3357 %, ours at the same point).
+  - **Tried and dropped:** ngspice's gillespie retry (re-solve at the last factor, 1 % cap) did not change these
+    lengths. ITL2 for source steps (ngspice's) broke `qa2_ss_dc60` (our Newton needs more than 50 iterations there).
+    A transient-OP start for a final Newton: this repo's transient stops after 1000 steps below 1e-11 s, and a 10000-stage
+    chain's switching wave needs ps steps for ~20 ns.
+  - **Found, not changed:** ngspice 4.7's DEVpnjlim compresses forward steps as vold + vt (2 + log(arg - 2)) and limits
+    forward falls too; `pnjlim` here is SPICE3's vold + vt log(1 + arg). Changing it moves every diode/BJT deck.
+  - **Matrix:** run_diff 1270 PASS / 0 FAIL / 8 ENGINE-UNSUPPORTED; Xyce 208 PASS / 0 FAIL (2 TIMEOUT, LTRA square-wave
+    decks with 0.1 ps steps, no MOSFET); refcheck 39/39; cli_check 29/29; ctest 4/4.
 - **Status of the plan:** Roadmap Phase 1 (Foundations) is done. See `Roadmap.md` →
   "⚙️ ENGINE FEATURE LIST & VERIFIED SUPPORT STATUS" (what works, by device/analysis, with ✅/⚠️/❌/🚫/❓)
   and "🎯 END-TO-END GOAL & ENGINE SCALE PLAN" (phases and gates).

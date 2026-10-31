@@ -101,6 +101,10 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
     forEachJunction(netlist, [&](const Junction &j) {
       if (j.st && (j.d ? j.d->off : j.f ? j.f->off : j.q->off)) j.st->jv[0] = j.st->jv[1] = 0.0;
     });
+  if (offReleased)
+    forEachMosfet(netlist, [&](const Mosfet &m, const std::array<int, 4> &, const BlockState::DeviceCharge *st) {
+      if (auto *s = const_cast<BlockState::DeviceCharge *>(st); s && m.off) std::fill(s->jv, s->jv + 3, 0.0);
+    });
 
   bool converged = false;
   int total_iterations = 0;
@@ -166,6 +170,7 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
       rhsVector.assign(nTot, 0.0);
 
       swForce_ = cmFresh_ = iteration == 0;
+      stepGmin_ = gmin_factor;
       stampAllElements(netlist, 0.0, voltageEstimate, 0.0);
       swForce_ = false;
       cmFresh_ = true;
@@ -272,12 +277,11 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
 
       final_kcl_error = kcl_error; // Store for next iteration comparison
 
-      // During GMIN stepping, we relax the KCL check because GMIN itself adds
-      // residual. We only enforce strict KCL at the final (nominal GMIN) step.
-      double effective_kcl_tol = finalStep ? abstol_ : 1.0;
-
-      if (checkConvergence(v_new, voltageEstimate, kcl_error,
-                           effective_kcl_tol)) {
+      // KCL holds at every gmin step too (the audit carries the step's gmin): like ngspice's
+      // device convergence tests, a step is not converged on a small update alone. Relaxed
+      // (to 1 A), a 9500-stage MOS1 chain's steps were accepted short of their solutions and
+      // the ladder stalled at the chain's critical gmin.
+      if (checkConvergence(v_new, voltageEstimate, kcl_error, abstol_)) {
         voltageEstimate = v_new;
         gmin_converged = true;
         total_iterations += iteration + 1;
@@ -356,6 +360,7 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
     }
     finalStep = gmin_factor == 0.0;
   } // End GMIN stepping loop
+  stepGmin_ = 0.0;  // the audits below and the transient OP's carry no stepping gmin
 
   // A DC solution needs a sound final factorization. Newton may cross near-singular
   // iterates (a 100-stage RTL chain's source-stepping start has 1e-92 pivots and converges),
