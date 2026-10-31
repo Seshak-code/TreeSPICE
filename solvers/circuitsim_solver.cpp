@@ -2689,11 +2689,11 @@ SolverStep CircuitSim::stepTransient(TensorNetlist &netlist, double timeStep,
                 visit(v[k], {j.st->v[0][k], j.st->v[1][k], j.st->v[2][k]}, dv > 1e-9 ? std::abs(q[k] - j.st->q[k]) / dv : 0.0);
               }
             });
-            // OSDI devices: their local node voltages
-            forEachOsdi(netlist, [&](const OsdiRef &r) {
+            // OSDI devices: their local node voltages (the list this step's Newton stamped)
+            for (const OsdiRef &r : osdiRefs_) {
               const osdi::Instance &in = *r.in;
               for (size_t k = 0; k < r.n.size(); ++k) visit(getV(r.n[k]), {in.vHist(0)[k], in.vHist(1)[k], in.vHist(2)[k]}, -1.0);
-            });
+            }
           });
 
       if (!replaySteps_ && lteResult.requiresRejection && (lteHold_ == 0 || lteResult.deviceRejects)) {

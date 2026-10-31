@@ -79,6 +79,7 @@ public:
     uint32_t numLocal() const { return setup_->numLocal; }   // terminals + internal nodes
     uint32_t numInternal() const { return setup_->numLocal - setup_->connected; }
     bool isFlow(uint32_t k) const { return setup_->flow[k]; }  // local unknown k is a branch current
+    bool hasEntry(uint32_t r, uint32_t c) const { return setup_->slot[r * numLocal() + c] >= 0; }  // G, C may be non-zero
 
     // Evaluate at local node voltages v[0..numLocal) into out; f/q are the currents / charges out of each
     // local node into the device. False on a fatal model error (error() says why, on this thread).

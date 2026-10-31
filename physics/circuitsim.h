@@ -698,13 +698,8 @@ public:
   // OSDI devices (compiled Verilog-A: BSIM4, BSIM-CMG, ...). An instance's local
   // nodes are its terminals, then the internal nodes left after collapsing; the
   // internal nodes are unknowns after the junction internals (BranchSlot::dev).
-  static int osdiInternals(const BlockState &st) {
-    int k = 0;
-    for (const auto &in : st.osdiState) k += in ? (int)in->numInternal() : 0;
-    return k;
-  }
   static int deviceInternals(const TensorBlock &blk, const BlockState &st) {
-    return junctionInternals(blk) + osdiInternals(st);
+    return junctionInternals(blk) + st.osdiInternals;
   }
   struct OsdiRef {
     const OsdiDevice *dev;
@@ -729,6 +724,14 @@ public:
   mutable std::vector<int> osdiNodes_;           // the list's node spans
   mutable std::vector<size_t> osdiOff_, osdiJOff_;
   mutable std::vector<double> osdiI_, osdiJ_;
+  mutable std::vector<double> osdiJCoef_;  // per device: the coef its J holds a bypassed G + coef C for (NaN: none)
+  // stampOsdi's matrixBuilder run (row, column, osdiJ_ index of every entry a model can make non-zero) and its
+  // per-terminal right-hand sides
+  mutable std::vector<int> osdiRunRows_, osdiRunCols_, osdiRunAt_;
+  mutable std::vector<size_t> osdiRunOff_;  // device i's entries: [osdiRunOff_[i], osdiRunOff_[i + 1])
+  mutable std::vector<char> osdiRunOn_;     // entry stamped this time: its J is non-zero
+  mutable uint64_t osdiRunId_ = 0;
+  mutable std::vector<double> osdiIeq_;
   const double *osdiI(size_t i) const { return &osdiI_[osdiOff_[i]]; }
   const double *osdiJ(size_t i) const { return &osdiJ_[osdiJOff_[i]]; }
   mutable std::vector<double> osdiAtV_;
@@ -765,6 +768,22 @@ public:
       for (size_t i = 0; i < osdiRefs_.size(); ++i) osdiRefs_[i].n.p = osdiNodes_.data() + osdiOff_[i];
       osdiI_.assign(osdiNodes_.size(), 0.0);
       osdiJ_.assign(jn, 0.0);
+      osdiJCoef_.assign(osdiRefs_.size(), NAN);
+      osdiIeq_.assign(osdiNodes_.size(), 0.0);
+      osdiRunRows_.clear(); osdiRunCols_.clear(); osdiRunAt_.clear(); osdiRunOff_.assign(1, 0);
+      for (size_t i = 0; i < osdiRefs_.size(); ++i) {  // stampOsdi's order: device, row, column
+        const auto &r = osdiRefs_[i];
+        const size_t L = r.n.size();
+        for (size_t t = 0; t < L; ++t)
+          for (size_t u = 0; u < L; ++u)
+            if (r.n[t] > 0 && r.n[u] > 0 && (r.in->hasEntry(t, u) || (t == u && t >= r.in->terminals() && r.in->isFlow(t)))) {
+              osdiRunRows_.push_back(r.n[t] - 1); osdiRunCols_.push_back(r.n[u] - 1);
+              osdiRunAt_.push_back((int)(osdiJOff_[i] + t * L + u));
+            }
+        osdiRunOff_.push_back(osdiRunRows_.size());
+      }
+      osdiRunOn_.assign(osdiRunRows_.size(), 0);
+      ++osdiRunId_;
       osdiAtValid_ = false;
     }
     const int method = integrator ? (int)integrator->getType() : -1;
@@ -773,7 +792,7 @@ public:
     if (osdiAtValid_ && limitJunctions_ && !accept && h == osdiAtH_ && method == osdiAtMethod_ && v == osdiAtV_) return;
     const int n = (int)osdiRefs_.size();
     parallelFor(n, 2e4 * n,  // ~5 us an evaluation: a few devices are worth the pool
-                [&](int i) { osdiCurrents(osdiRefs_[i], v, h, &osdiI_[osdiOff_[i]], &osdiJ_[osdiJOff_[i]], accept); });
+                [&](int i) { osdiCurrents(osdiRefs_[i], v, h, &osdiI_[osdiOff_[i]], &osdiJ_[osdiJOff_[i]], accept, nullptr, nullptr, &osdiJCoef_[i]); });
     osdiAtValid_ = !accept;
     osdiAtV_ = v;
     osdiAtH_ = h;
@@ -804,8 +823,11 @@ public:
   // Cout: the reactive Jacobian C (row-major) of this evaluation (AC).
   // I (L values) and J (L x L, or null): where the currents and Jacobian go.
   // Qout: its charges q (L values; HB).
+  // jCoef: the coef that J holds a bypassed device's G + coef C for (NaN: none): J is not refilled while it holds
+  // (refilling unchanged J was ~9 % of a 20k-device BSIM4 transient)
   void osdiCurrents(const OsdiRef &r, const std::vector<double> &v, double h, double *I, double *J = nullptr,
-                    bool accept = false, std::vector<double> *Cout = nullptr, std::vector<double> *Qout = nullptr) const {
+                    bool accept = false, std::vector<double> *Cout = nullptr, std::vector<double> *Qout = nullptr,
+                    double *jCoef = nullptr) const {
     const size_t L = r.n.size();
     thread_local std::vector<double> x, f, q;  // devices evaluate in parallel
     x.resize(L);
@@ -824,6 +846,8 @@ public:
     bool bypass = limitJunctions_ && in.kept(flags);
     for (size_t k = 0; bypass && k < L; ++k)
       bypass = std::abs(x[k] - at[k]) <= 1e-3 * std::max(std::abs(x[k]), std::abs(at[k])) + 1e-6;
+    const double heldCoef = jCoef ? *jCoef : NAN;
+    if (jCoef) *jCoef = NAN;  // until J is filled from the kept G, C below
     in.gmin = gmin_;
     thread_local osdi::Eval ev;  // this evaluation (devices evaluate in parallel)
     if (!bypass && !in.evaluate(x.data(), flags, 0.0, ev)) {
@@ -874,10 +898,12 @@ public:
       std::copy(in.vHist(0), in.vHist(0) + L, in.vHist(1));
       std::copy(x.begin(), x.end(), in.vHist(0));
     }
-    if (J) {
+    const bool fillJ = J && !(bypass && heldCoef == coef);
+    if (fillJ) {
       for (size_t a = 0; a < L; ++a)
         for (size_t b = 0; b < L; ++b) J[a * L + b] = G(a, b) + coef * C(a, b);
     }
+    if (J && jCoef && bypass) *jCoef = coef;
     if (Qout) Qout->assign(q.begin(), q.end());
     if (Cout) {
       Cout->assign(L * L, 0.0);
@@ -892,26 +918,36 @@ public:
     for (size_t k = in.terminals(); k < L; ++k)
       if (in.isFlow(k)) {
         I[k] += 1e-6 * x[k];
-        if (J) J[k * L + k] += 1e-6;
+        if (fillJ) J[k * L + k] += 1e-6;
       }
   }
 
-  // Newton stamp of the currents I and Jacobian J of osdiCurrents() at v (a node
-  // shared by two terminals sums).
-  void stampOsdi(const OsdiRef &r, const double *I, const double *J, const std::vector<double> &v) {
-    const size_t L = r.n.size();
+  // Newton stamp of every OSDI device's currents I and Jacobian J from osdiAll() at v (a node shared by two
+  // terminals sums): J as one matrixBuilder run in device order, its zero entries left out (a model's declared
+  // entries that stay 0 made the matrix denser: twice the solve time on a BSIM4 chain), the right-hand sides
+  // I - J v computed in parallel and added in device order.
+  void stampOsdi(const std::vector<double> &v) {
     auto V = [&](int g) { return g > 0 && g <= (int)v.size() ? v[g - 1] : 0.0; };
-    for (size_t t = 0; t < L; ++t) {
-      if (r.n[t] <= 0) continue;
-      double ieq = I[t];
-      for (size_t u = 0; u < L; ++u) {
-        const double g = J[t * L + u];
-        if (g == 0.0) continue;
-        ieq -= g * V(r.n[u]);
-        if (r.n[u] > 0) matrixBuilder.add(r.n[t] - 1, r.n[u] - 1, g);
+    parallelFor((int)osdiRefs_.size(), 4.0 * osdiJ_.size(), [&](int i) {
+      const auto &r = osdiRefs_[i];
+      const size_t L = r.n.size();
+      const double *I = osdiI(i), *J = osdiJ(i);
+      for (size_t t = 0; t < L; ++t) {
+        if (r.n[t] <= 0) continue;
+        double ieq = I[t];
+        for (size_t u = 0; u < L; ++u) {
+          const double g = J[t * L + u];
+          if (g != 0.0) ieq -= g * V(r.n[u]);
+        }
+        osdiIeq_[osdiOff_[i] + t] = ieq;
       }
-      rhsVector[r.n[t] - 1] -= ieq;
-    }
+      for (size_t k = osdiRunOff_[i]; k < osdiRunOff_[i + 1]; ++k) osdiRunOn_[k] = osdiJ_[osdiRunAt_[k]] != 0.0;
+    });
+    for (size_t i = 0; i < osdiRefs_.size(); ++i)
+      for (size_t t = 0; t < osdiRefs_[i].n.size(); ++t)
+        if (osdiRefs_[i].n[t] > 0) rhsVector[osdiRefs_[i].n[t] - 1] -= osdiIeq_[osdiOff_[i] + t];
+    matrixBuilder.addRun(osdiRunRows_.data(), osdiRunCols_.data(), osdiRunAt_.data(), osdiRunOn_.data(), osdiJ_.data(),
+                         osdiRunRows_.size(), osdiRunId_);
   }
 
   // Charge branches (terminal pairs, q flows from -> to): diode A'->C; BJT
@@ -2546,7 +2582,7 @@ public:
       stampResistor(w.n[0], w.n[1], swIsOn(*w.on) ? w.s->ron : w.s->roff, matrixBuilder);
     });
     osdiAll(netlist, v_guess, h, true, false);  // stamped in device order: the same sequence every iteration
-    for (size_t i = 0; i < osdiRefs_.size(); ++i) stampOsdi(osdiRefs_[i], osdiI(i), osdiJ(i), v_guess);
+    stampOsdi(v_guess);
 
     // S3 quotient: a node's KCL row summed its class's nets; one net's (gmin and the pin below stay per net)
     if (!netlist.classSize.empty()) {

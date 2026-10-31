@@ -1507,6 +1507,41 @@ int main() {
         check(!run(PrecisionMode::Native_F64, deck("0")).converged, ".options seed=0 is an error");
     }
 
+    {   // MatrixConstructor::addRun: a run (one entry off, rows scaled) builds the matrix bit for bit as the same
+        // stamps add()ed one by one, through createCsr (its cached pattern too) and assembleFast; parallelFor's
+        // chunked claims visit every index once
+        std::printf("\n== stamp runs ==\n");
+        const int rr[] = {0, 1, 1, 2, 0}, rc[] = {1, 1, 2, 0, 0}, at[] = {3, 0, 4, 1, 2};
+        const char on[] = {1, 1, 0, 1, 1};
+        const double vals[] = {0.3, -1.7, 2.9, 1e-17, 5.0};
+        const std::vector<double> scale = {1.0, 0.5, 3.0};
+        auto stamp = [&](MatrixConstructor& m, bool asRun) {
+            m.clear();
+            m.setDimensions(3, 3);
+            m.add(1, 1, 0.1); m.add(0, 0, -2.0);
+            if (asRun) m.addRun(rr, rc, at, on, vals, 5, 7);
+            else for (int k = 0; k < 5; ++k) if (on[k]) m.add(rr[k], rc[k], vals[at[k]]);
+            m.add(1, 1, 1e-3); m.add(2, 2, 4.0);
+            m.scaleRows(scale);
+        };
+        MatrixConstructor a, b;
+        bool same = true;
+        for (int pass = 0; pass < 2; ++pass) {  // the second createCsr reuses its pattern
+            stamp(a, false); stamp(b, true);
+            const Csr_matrix x = a.createCsr(), y = b.createCsr();
+            same = same && x.values == y.values && x.col_indices == y.col_indices && x.row_pointer == y.row_pointer;
+        }
+        stamp(a, false); stamp(b, true);
+        const CachedCsrPattern pat = a.buildPattern();
+        stamp(a, false); stamp(b, true);
+        bool complete = false;
+        same = same && a.assembleFast(pat).values == b.assembleFast(pat, &complete).values && complete;
+        check(same, "a stamp run builds the same matrix as its stamps added one by one");
+        std::vector<int> seen(100003, 0);
+        parallelFor((int)seen.size(), 1e9, [&](int i) { ++seen[i]; });
+        check(std::all_of(seen.begin(), seen.end(), [](int c) { return c == 1; }), "parallelFor visits every index once");
+    }
+
     {   // .hb: harmonic balance. A linear RC is exact at its harmonic; a rectifier converges to its PSS as the harmonics
         // grow; two commensurate tones (10k, 11k) through the frequency map converge to one tone at their 1 kHz GCD
         std::printf("\n== hb ==\n");

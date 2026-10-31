@@ -110,6 +110,24 @@ class MatrixConstructor {
   // CSR value slot (-1: outside the matrix, dropped) and that CSR pattern
   std::vector<int> lastRows_, lastCols_, slot_;
   Csr_matrix pattern_{{}, {}, {}, -1, -1, 0};
+  // addRun's stamps: (rows[k], cols[k]) with value vals[at[k]] where on[k], after the first `pos` triplets;
+  // scale: scaleRows'
+  struct Run { const int *rows = nullptr, *cols = nullptr, *at = nullptr; const char *on = nullptr;
+               const double *vals = nullptr; size_t n = 0, pos = 0; uint64_t id = 0; std::vector<double> scale; };
+  Run run_;
+  size_t lastRunPos_ = 0, lastRunN_ = 0;
+  uint64_t lastRunId_ = 0;
+  std::vector<char> lastRunOn_;
+  bool onAt(size_t k) const { return k < run_.pos || k >= run_.pos + run_.n || run_.on[k - run_.pos]; }
+  // Stamp k of the assembly in order (the triplets around the run): its row, column and value
+  int rowAt(size_t k) const { return k < run_.pos ? rows_[k] : k < run_.pos + run_.n ? run_.rows[k - run_.pos] : rows_[k - run_.n]; }
+  int colAt(size_t k) const { return k < run_.pos ? cols_[k] : k < run_.pos + run_.n ? run_.cols[k - run_.pos] : cols_[k - run_.n]; }
+  double valAt(size_t k) const {
+    if (k < run_.pos || k >= run_.pos + run_.n) return vals_[k < run_.pos ? k : k - run_.n];
+    const size_t j = k - run_.pos;
+    const int r = run_.rows[j];
+    return r >= 0 && r < (int)run_.scale.size() ? run_.vals[run_.at[j]] * run_.scale[r] : run_.vals[run_.at[j]];
+  }
 
 public:
   // Resets the constructor for a new matrix assembly
@@ -117,6 +135,8 @@ public:
     rows_.clear();
     cols_.clear();
     vals_.clear();
+    run_.n = run_.pos = 0;
+    run_.scale.clear();
     numRows = 0;
     numCols = 0;
   }
@@ -138,10 +158,21 @@ public:
     vals_.push_back(value);
   }
 
-  // Multiply every stamp in row r < s.size() by s[r]
+  // Multiply every stamp in row r < s.size() by s[r] (a run's when it is read)
   void scaleRows(const std::vector<double>& s) {
     for (size_t k = 0; k < rows_.size(); ++k)
       if (rows_[k] >= 0 && rows_[k] < (int)s.size()) vals_[k] *= s[rows_[k]];
+    if (run_.n) run_.scale = s;
+  }
+
+  // Stamps the caller keeps instead of add()ing them one by one (an OSDI device's Jacobian: copying 720k of them
+  // per Newton iteration was a fifth of a 20k-device BSIM4 transient): entry k at (rows[k], cols[k]) with value
+  // vals[at[k]], when on[k] (as if added only then), in stamp order after the stamps added so far. rows, cols and
+  // at must stay as they are while `id` does (the cached pattern trusts it); on and vals until the matrix is
+  // built. One run per assembly.
+  void addRun(const int* rows, const int* cols, const int* at, const char* on, const double* vals, size_t n, uint64_t id) {
+    run_.rows = rows; run_.cols = cols; run_.at = at; run_.on = on; run_.vals = vals; run_.n = n; run_.pos = rows_.size();
+    run_.id = id;
   }
 
   void addBatch(const std::vector<int>& rows, const std::vector<int>& cols, const std::vector<double>& values) {
@@ -158,19 +189,22 @@ public:
    * the cached slots (the sort was ~11 % of a BSIM4 inverter-chain transient).
    */
   Csr_matrix createCsr() {
-    const size_t T = rows_.size();
-    if (pattern_.rows != numRows || pattern_.cols != numCols || rows_ != lastRows_ || cols_ != lastCols_) {
+    const size_t T = rows_.size() + run_.n;
+    if (pattern_.rows != numRows || pattern_.cols != numCols || rows_ != lastRows_ || cols_ != lastCols_ ||
+        run_.pos != lastRunPos_ || run_.n != lastRunN_ ||
+        (run_.n && (run_.id != lastRunId_ || std::memcmp(run_.on, lastRunOn_.data(), run_.n) != 0))) {
       std::vector<int> p(T);
       std::iota(p.begin(), p.end(), 0);
       std::stable_sort(p.begin(), p.end(), [&](int a, int b) {
-        return rows_[a] < rows_[b] || (rows_[a] == rows_[b] && cols_[a] < cols_[b]);
+        const int ra = rowAt(a), rb = rowAt(b);
+        return ra < rb || (ra == rb && colAt(a) < colAt(b));
       });
       pattern_ = Csr_matrix{{}, {}, std::vector<int>(numRows + 1, 0), numRows, numCols, 0};
       slot_.assign(T, -1);
       int last_r = -1, last_c = -1;
       for (int idx : p) {
-        const int r = rows_[idx], c = cols_[idx];
-        if (r >= numRows || c >= numCols) continue;
+        const int r = rowAt(idx), c = colAt(idx);
+        if (r >= numRows || c >= numCols || !onAt(idx)) continue;
         if (r != last_r || c != last_c) {
           pattern_.col_indices.push_back(c);
           pattern_.row_pointer[r + 1]++;
@@ -183,11 +217,13 @@ public:
       pattern_.nnz = (int)pattern_.col_indices.size();
       lastRows_ = rows_;
       lastCols_ = cols_;
+      lastRunPos_ = run_.pos; lastRunN_ = run_.n; lastRunId_ = run_.id;
+      lastRunOn_.assign(run_.on, run_.on + run_.n);
     }
     Csr_matrix matrix = pattern_;
     matrix.values.assign(pattern_.nnz, 0.0);
     for (size_t k = 0; k < T; ++k)
-      if (slot_[k] >= 0) matrix.values[slot_[k]] += vals_[k];
+      if (slot_[k] >= 0) matrix.values[slot_[k]] += valAt(k);
     return matrix;
   }
 
@@ -227,10 +263,11 @@ public:
       matrix.row_pointer = pattern.row_pointer;
       matrix.col_indices = pattern.col_indices;
       matrix.values.assign(static_cast<size_t>(pattern.nnz), 0.0);
-      for (size_t k = 0; k < rows_.size(); ++k) {
-          int idx = pattern.indexOf(rows_[k], cols_[k]);
+      for (size_t k = 0; k < rows_.size() + run_.n; ++k) {
+          if (!onAt(k)) continue;
+          int idx = pattern.indexOf(rowAt(k), colAt(k));
           if (idx >= 0) {
-              matrix.values[static_cast<size_t>(idx)] += vals_[k];
+              matrix.values[static_cast<size_t>(idx)] += valAt(k);
           } else if (complete) {
               *complete = false;
           }
