@@ -135,6 +135,29 @@ inline T compute_vcrit(T vt, T Is) {
     return vt * log(vt / (sqrt(T(2.0)) * Is));
 }
 
+// ngspice DEVfetlim (devsup.c): a gate drive step limited about the threshold vto, by at most
+// |2 (vold - vto)| + 2 while on, |vold - vto| + 1 turning off, and stopping at vto + 0.5 turning on.
+inline double fetlim(double vnew, double vold, double vto) {
+    const double vtsthi = std::fabs(2.0 * (vold - vto)) + 2.0, vtstlo = std::fabs(vold - vto) + 1.0;
+    const double vtox = vto + 3.5, delv = vnew - vold;
+    if (vold >= vto) {
+        if (vold >= vtox) {
+            if (delv <= 0.0) return vnew >= vtox ? (-delv > vtstlo ? vold - vtstlo : vnew) : std::max(vnew, vto + 2.0);
+            return delv >= vtsthi ? vold + vtsthi : vnew;
+        }
+        return delv <= 0.0 ? std::max(vnew, vto - 0.5) : std::min(vnew, vto + 4.0);
+    }
+    if (delv <= 0.0) return -delv > vtsthi ? vold - vtsthi : vnew;
+    const double vtemp = vto + 0.5;
+    return vnew <= vtemp ? (delv > vtstlo ? vold + vtstlo : vnew) : vtemp;
+}
+
+// ngspice DEVlimvds: a drain-source step capped at 3 vold + 2 above 3.5 V, else within [-0.5, 4] V.
+inline double limvds(double vnew, double vold) {
+    if (vold >= 3.5) return vnew > vold ? std::min(vnew, 3.0 * vold + 2.0) : vnew < 3.5 ? std::max(vnew, 2.0) : vnew;
+    return vnew > vold ? std::min(vnew, 4.0) : std::max(vnew, -0.5);
+}
+
 // NOTE: Manual derivative functions (conductance) removed.
 // Use Dual<double> with diode_current to get {I, G}.
 
@@ -447,6 +470,23 @@ inline T depletion_charge(T v, P cz, P m, P pb, P fc)
     return q0 + dv * (c0 + 0.5 * c1 * dv);
 }
 
+// Threshold and saturation voltage (type domain) in the device's orientation, the higher terminal as the
+// drain (ngspice MOSxvon / MOSxvdsat): the Meyer capacitances and the limiting (fetlim) use them.
+template <typename T>
+inline std::pair<T, T> mos_von_vdsat(T vgs, T vgd, T vbs, T vbd, const Mos1Params<double>& p)
+{
+    const bool normal = vgs >= vgd;  // vds >= 0
+    const T lg = normal ? vgs : vgd, lb = normal ? vbs : vbd;
+    if (p.level != 1) {
+        const T vdsm = normal ? vgs - vgd : vgd - vgs;
+        const auto ch = p.level == 2 ? mos2_channel(lg, lb, vdsm, p) : p.level == 3 ? mos3_channel(lg, lb, vdsm, p)
+                                                                     : mos6_channel(lg, lb, vdsm, p);
+        return {ch.von, ch.vdsat};
+    }
+    const T von = mos1_von(lb, p), vdsat = lg - von;
+    return {von, vdsat < 0.0 ? T(0.0) : vdsat};
+}
+
 // Charges of the five capacitive branches gs, gd, gb, bd, bs (type domain,
 // ngspice mos1load). The Meyer gate charges advance from the previous accepted
 // step (vPrev, qPrev, halfPrev) by C*dv, C = half-capacitance now + then +
@@ -471,15 +511,7 @@ inline Mos1Charges<T> mos1_charges(T vd, T vg, T vs, T vb, const Mos1Params<doub
     for (int k = 0; k < 5; ++k) c.v[k] = br[k];
     const T vgs = br[0], vgd = br[1], vbd = br[3], vbs = br[4];
     const bool normal = vgs >= vgd;  // vds >= 0
-    T von = mos1_von(normal ? vbs : vbd, p);
-    T vdsat = (normal ? vgs : vgd) - von;
-    if (vdsat < 0.0) vdsat = T(0.0);
-    if (p.level != 1) {
-        const T vdsm = normal ? vgs - vgd : vgd - vgs, lg = normal ? vgs : vgd, lb = normal ? vbs : vbd;
-        const auto ch = p.level == 2 ? mos2_channel(lg, lb, vdsm, p) : p.level == 3 ? mos3_channel(lg, lb, vdsm, p)
-                                                                     : mos6_channel(lg, lb, vdsm, p);
-        von = ch.von; vdsat = ch.vdsat;
-    }
+    const auto [von, vdsat] = mos_von_vdsat(vgs, vgd, vbs, vbd, p);
     const auto h = normal ? mos1_meyer(vgs, vgd, von, vdsat, p.phi, p.cox)
                           : mos1_meyer(vgd, vgs, von, vdsat, p.phi, p.cox);
     c.half[0] = normal ? h[0] : h[1];
