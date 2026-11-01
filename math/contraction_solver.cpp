@@ -609,19 +609,28 @@ void layoutFront(const ContractionPlan& plan, int id, std::vector<FrontFactor>& 
 void solveWithFactors(const Csr_matrix& A, const ContractionPlan& plan, const std::vector<FrontFactor>& F,
                       const std::vector<double>& b, std::vector<double>& x) {
     const int nf = (int)plan.fronts.size();
-    std::vector<std::vector<double>> w(nf);
+    // Each front's rhs in one buffer reused per thread (a vector per front per solve was a tenth of a
+    // 20k-device transient's solves, in malloc and free)
+    thread_local std::vector<size_t> off;
+    thread_local std::vector<double> wbuf;
+    off.resize(nf + 1);
+    off[0] = 0;
+    for (int id = 0; id < nf; ++id) off[id + 1] = off[id] + F[id].m;
+    wbuf.assign(off[nf], 0.0);
+    double* const w0 = wbuf.data();
+    const size_t* const o = off.data();
+    auto w = [&](int id) { return w0 + o[id]; };
     for (const auto& level : plan.levels) {
         parallelFor((int)level.size(), levelWork(plan, level, false), [&](int li) {
             const int id = level[li];
             const auto& fr = plan.fronts[id];
             const auto& ff = F[id];
-            auto& v = w[id];
-            v.assign(ff.m, 0.0);
+            double* v = w(id);
             for (size_t i = 0; i < fr.pivots.size(); ++i) v[i] = b[plan.rowOfVar[fr.pivots[i]]];
             for (size_t j = 0; j < fr.children.size(); ++j) {  // superpose children's rhs updates
                 const int c = fr.children[j];
                 const auto& cp = ff.childPos[j];
-                for (size_t a = 0; a < cp.size(); ++a) v[cp[a]] += w[c][F[c].e + a];
+                for (size_t a = 0; a < cp.size(); ++a) v[cp[a]] += w(c)[F[c].e + a];
             }
             // Factorization swapped WHOLE rows (earlier L columns too, LAPACK
             // getrf style), so apply every swap first, then substitute with L.
@@ -638,10 +647,11 @@ void solveWithFactors(const Csr_matrix& A, const ContractionPlan& plan, const st
         parallelFor((int)level.size(), levelWork(plan, level, false), [&](int t) {
             const int id = level[t];
             const auto& ff = F[id];
-            std::vector<double> xl(ff.m);
+            thread_local std::vector<double> xl;
+            xl.resize(ff.m);
             for (int q = ff.e; q < ff.m; ++q) xl[q] = x[ff.colLab[q]];  // solved by ancestors
             for (int k = ff.e - 1; k >= 0; --k) {
-                double s = w[id][k];
+                double s = w(id)[k];
                 for (int c = k + 1; c < ff.m; ++c) s -= ff.M[(size_t)k * ff.m + c] * xl[c];
                 xl[k] = s / ff.M[(size_t)k * ff.m + k];
                 x[ff.colLab[k]] = xl[k];
@@ -860,7 +870,9 @@ SolverResult solve(const Csr_matrix& A, const std::vector<double>& b, const Cont
         return res;  // no solution: a caller cannot mistake zeros for one
     }
 
-    std::vector<double> x, r(n), dx;
+    std::vector<double> x;
+    thread_local std::vector<double> r, dx;  // reused: n-sized buffers per solve were freed through the kernel
+    r.assign(n, 0.0);
     solveWithFactors(A, plan, F, b, x);
 
     // FP32 fronts need refinement whatever the caller asked; it converges linearly
