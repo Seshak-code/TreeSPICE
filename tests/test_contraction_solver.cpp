@@ -176,6 +176,24 @@ int main() {
         check(!r.converged || !std::isfinite(r.finalResidual) || r.finalResidual > 1e-3, "singular matrix not reported as solved", r.finalResidual);
     }
 
+    {   // A supply rail: 200000 nodes tied to node 0 by g alone, so each one's column holds two entries of equal
+        // size (its own row's and the rail's). The diagonal matching popped the rail's row first on the tie and
+        // searched the rail's whole column for every node: quadratic (a 1e5-stage BSIM4 chain's DC took 67 s).
+        const int n = 200001;
+        std::map<std::pair<int, int>, double> e;
+        conductance(e, 0, -1, 1.0);
+        for (int k = 1; k < n; ++k) conductance(e, k, 0, 2.0);
+        const auto A = toCsr(n, e);
+        std::vector<double> b(n, 0.0);
+        b[0] = 1.0;  // 1 A into the rail: every node at 1 V
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto r = solveContraction(A, b, planContraction(A));
+        const double t = secondsSince(t0);
+        double err = r.converged ? 0.0 : 1.0;
+        for (double v : r.solution) err = std::max(err, std::abs(v - 1.0));
+        check(err < 1e-12 && t < 2.0, "a 2e5-node rail's plan and solve under 2 s (s)", t);
+    }
+
     std::printf("== scale (plan / factor+solve, residual) ==\n");
     struct Case { const char* name; Csr_matrix A; };
     for (int w : {100, 316, 1000}) {

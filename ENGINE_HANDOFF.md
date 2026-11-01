@@ -316,6 +316,15 @@ then the two Roadmap sections it points to. Everything below was verified by run
     forward falls too; `pnjlim` here is SPICE3's vold + vt log(1 + arg). Changing it moves every diode/BJT deck.
   - **Matrix:** run_diff 1270 PASS / 0 FAIL / 8 ENGINE-UNSUPPORTED; Xyce 208 PASS / 0 FAIL (2 TIMEOUT, LTRA square-wave
     decks with 0.1 ps steps, no MOSFET); refcheck 39/39; cli_check 29/29; ctest 4/4.
+- **Update 2026-11-01 (Claude Code, branch `mac/match`; PR #33 merged by the owner, #34 `mac/parallel` open): the
+  diagonal matching on a supply rail.** A 1e5-stage BSIM4 chain spent 67 s of its DC in one `matchLargeDiagonal`
+  (the plan's static pivoting, a Dijkstra per column). Each internal node beside the rail had its largest entry twice,
+  in its own row and in the rail's, and on the tie the rail's row (index 0, matched) was popped first: the search then
+  relaxed the rail's column (one entry per device) for every such node. The queue now orders (distance, matched,
+  row): a free row first at equal distance. Any minimum-distance order keeps the matching maximum-product; on ties it
+  may pick another one of equal product than before.
+  - **Check:** `test_contraction_solver`: a 2e5-node rail (every node tied to node 0 by g alone) plans and solves in
+    0.37 s; with the old order 282 s.
 - **Update 2026-10-30 (Claude Code, branch `mac/parallel`; PR #33 `mac/mos1-limit` merged by the owner): the flat
   transient's serial passes.** The scale baseline (memory `scale-assessment-2026-10-30`) found 1 thread 15.0 s,
   14 threads 13.2 s on a 10000-stage BSIM4 chain, the workers idle most of the time. Profiled line by line
