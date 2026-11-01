@@ -350,6 +350,18 @@ then the two Roadmap sections it points to. Everything below was verified by run
     stamps added one by one through createCsr, its cached pattern and assembleFast (fails with the mask ignored);
     parallelFor visits every index once. Matrix: run_diff 1270 PASS / 0 FAIL; Xyce 208 PASS / 0 FAIL (2 TIMEOUT,
     the LTRA square-wave decks, as on main); refcheck 39/39; cli_check 29/29; ctest 4/4.
+- **Update 2026-11-01 (Claude Code, branch `mac/dc-assembly`; PRs #34 `mac/parallel` and #35 `mac/match` merged by
+  the owner): the DC's matrix assembly.** After #35 a 1e5-stage BSIM4 chain's DC (and one step) took 32 s, a quarter
+  of it in `assembleFast`: a binary search in the frozen pattern for every stamp, every Newton iteration.
+  - `assembleFast` keeps each stamp's slot while the stamp sequence and the pattern are the same (patterns carry an
+    id from `buildPattern`); a run's non-zero mask is read as it scatters (it flips as devices change region, and
+    keying the slots on it missed most of the time). Both scatters (createCsr, assembleFast) walk the stamps in order
+    as three plain loops (`forEachStamp`) instead of per-stamp branches.
+  - **Results:** bit-identical. The 1e5-stage DC and one step: 31.9 -> 24.3 s. The 1e4-stage transient: unchanged.
+  - **Check:** `test_engine_fixes` "stamp runs" now assembles through assembleFast's cached slots as the mask changes,
+    and with a stamp outside the pattern; it fails if the scatter ignores the mask.
+  - **Next in the DC:** the linear solve (~40 %: refinement, and a new plan whenever gmin stepping changes the
+    pattern) and the OSDI evaluations.
 - **Status of the plan:** Roadmap Phase 1 (Foundations) is done. See `Roadmap.md` →
   "⚙️ ENGINE FEATURE LIST & VERIFIED SUPPORT STATUS" (what works, by device/analysis, with ✅/⚠️/❌/🚫/❓)
   and "🎯 END-TO-END GOAL & ENGINE SCALE PLAN" (phases and gates).

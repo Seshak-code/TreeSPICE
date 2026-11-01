@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <cmath>
@@ -75,6 +76,7 @@ struct CachedCsrPattern {
     std::vector<int> row_pointer;
     std::vector<int> col_indices;
     int rows = 0, cols = 0, nnz = 0;
+    uint64_t id = 0;  // buildPattern's number for it (assembleFast's slot cache); 0: none
 
     // The CSR value index for (row, col), or -1 if not in the pattern: a binary search of the row (a hash map
     // here was 60 bytes per entry, a quarter of a BSIM4 SRAM array's solver memory)
@@ -118,16 +120,27 @@ class MatrixConstructor {
   size_t lastRunPos_ = 0, lastRunN_ = 0;
   uint64_t lastRunId_ = 0;
   std::vector<char> lastRunOn_;
+  // assembleFast's slot of each stamp, a run's off entries too, in the pattern numbered fastPat_ (-1: outside
+  // it), kept while the stamps are the same sequence (a run's mask is read as it scatters: it changes often)
+  uint64_t fastPat_ = 0;
+  std::vector<int> fastRows_, fastCols_, fastSlot_;
+  size_t fastRunPos_ = 0, fastRunN_ = 0;
+  uint64_t fastRunId_ = 0;
   bool onAt(size_t k) const { return k < run_.pos || k >= run_.pos + run_.n || run_.on[k - run_.pos]; }
-  // Stamp k of the assembly in order (the triplets around the run): its row, column and value
+  // f(k, value) for every stamp k that is on, in stamp order (a run's scaled by scaleRows): the scatters' loop
+  template <class F> void forEachStamp(F&& f) const {
+    for (size_t k = 0; k < run_.pos && k < rows_.size(); ++k) f(k, vals_[k]);
+    for (size_t j = 0; j < run_.n; ++j) {
+      if (!run_.on[j]) continue;
+      const int r = run_.rows[j];
+      const double v = run_.vals[run_.at[j]];
+      f(run_.pos + j, r >= 0 && r < (int)run_.scale.size() ? v * run_.scale[r] : v);
+    }
+    for (size_t k = run_.pos; k < rows_.size(); ++k) f(k + run_.n, vals_[k]);
+  }
+  // Stamp k of the assembly in order (the triplets around the run): its row and column
   int rowAt(size_t k) const { return k < run_.pos ? rows_[k] : k < run_.pos + run_.n ? run_.rows[k - run_.pos] : rows_[k - run_.n]; }
   int colAt(size_t k) const { return k < run_.pos ? cols_[k] : k < run_.pos + run_.n ? run_.cols[k - run_.pos] : cols_[k - run_.n]; }
-  double valAt(size_t k) const {
-    if (k < run_.pos || k >= run_.pos + run_.n) return vals_[k < run_.pos ? k : k - run_.n];
-    const size_t j = k - run_.pos;
-    const int r = run_.rows[j];
-    return r >= 0 && r < (int)run_.scale.size() ? run_.vals[run_.at[j]] * run_.scale[r] : run_.vals[run_.at[j]];
-  }
 
 public:
   // Resets the constructor for a new matrix assembly
@@ -222,8 +235,9 @@ public:
     }
     Csr_matrix matrix = pattern_;
     matrix.values.assign(pattern_.nnz, 0.0);
-    for (size_t k = 0; k < T; ++k)
-      if (slot_[k] >= 0) matrix.values[slot_[k]] += valAt(k);
+    double* const val = matrix.values.data();
+    const int* const slot = slot_.data();
+    forEachStamp([&](size_t k, double v) { if (slot[k] >= 0) val[slot[k]] += v; });
     return matrix;
   }
 
@@ -243,6 +257,8 @@ public:
       pat.nnz         = csr.nnz;
       pat.row_pointer = csr.row_pointer;
       pat.col_indices = csr.col_indices;
+      static std::atomic<uint64_t> patterns{0};  // ids unique across builders and threads
+      pat.id = ++patterns;
       return pat;
   }
 
@@ -263,15 +279,22 @@ public:
       matrix.row_pointer = pattern.row_pointer;
       matrix.col_indices = pattern.col_indices;
       matrix.values.assign(static_cast<size_t>(pattern.nnz), 0.0);
-      for (size_t k = 0; k < rows_.size() + run_.n; ++k) {
-          if (!onAt(k)) continue;
-          int idx = pattern.indexOf(rowAt(k), colAt(k));
-          if (idx >= 0) {
-              matrix.values[static_cast<size_t>(idx)] += valAt(k);
-          } else if (complete) {
-              *complete = false;
-          }
+      // Each stamp's slot is searched once per pattern and stamp sequence (a binary search per stamp per
+      // Newton iteration was a quarter of a 1e5-stage BSIM4 chain's DC)
+      const size_t T = rows_.size() + run_.n;
+      if (!pattern.id || pattern.id != fastPat_ || rows_ != fastRows_ || cols_ != fastCols_ || run_.pos != fastRunPos_ ||
+          run_.n != fastRunN_ || (run_.n && run_.id != fastRunId_)) {
+          fastSlot_.resize(T);
+          for (size_t k = 0; k < T; ++k) fastSlot_[k] = pattern.indexOf(rowAt(k), colAt(k));
+          fastPat_ = pattern.id;
+          fastRows_ = rows_; fastCols_ = cols_;
+          fastRunPos_ = run_.pos; fastRunN_ = run_.n; fastRunId_ = run_.id;
       }
+      double* const val = matrix.values.data();
+      const int* const slot = fastSlot_.data();
+      bool all = true;
+      forEachStamp([&](size_t k, double v) { if (slot[k] >= 0) val[slot[k]] += v; else all = false; });
+      if (complete) *complete = all;
       return matrix;
   }
 };
