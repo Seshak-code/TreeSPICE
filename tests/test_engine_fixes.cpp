@@ -1539,11 +1539,12 @@ int main() {
     }
 
     {   // MatrixConstructor::addRun: a run (one entry off, rows scaled) builds the matrix bit for bit as the same
-        // stamps add()ed one by one, through createCsr (its cached pattern too) and assembleFast; parallelFor's
+        // stamps add()ed one by one, through createCsr (its cached pattern too) and assembleFast (its cached
+        // slots too, as the mask changes); parallelFor's
         // chunked claims visit every index once
         std::printf("\n== stamp runs ==\n");
         const int rr[] = {0, 1, 1, 2, 0}, rc[] = {1, 1, 2, 0, 0}, at[] = {3, 0, 4, 1, 2};
-        const char on[] = {1, 1, 0, 1, 1};
+        char on[] = {1, 1, 0, 1, 1};
         const double vals[] = {0.3, -1.7, 2.9, 1e-17, 5.0};
         const std::vector<double> scale = {1.0, 0.5, 3.0};
         auto stamp = [&](MatrixConstructor& m, bool asRun) {
@@ -1567,6 +1568,15 @@ int main() {
         stamp(a, false); stamp(b, true);
         bool complete = false;
         same = same && a.assembleFast(pat).values == b.assembleFast(pat, &complete).values && complete;
+        stamp(a, false); stamp(b, true);  // again: b's slots come from its cache
+        same = same && a.assembleFast(pat).values == b.assembleFast(pat, &complete).values && complete;
+        on[0] = 0;  // a mask change keeps b's cached slots (read as it scatters)
+        stamp(a, false); stamp(b, true);
+        same = same && a.assembleFast(pat).values == b.assembleFast(pat, &complete).values && complete;
+        on[2] = 1;  // (1, 2) is outside the pattern: incomplete either way
+        stamp(a, false); stamp(b, true);
+        bool completeA = true;
+        same = same && a.assembleFast(pat, &completeA).values == b.assembleFast(pat, &complete).values && !completeA && !complete;
         check(same, "a stamp run builds the same matrix as its stamps added one by one");
         std::vector<int> seen(100003, 0);
         parallelFor((int)seen.size(), 1e9, [&](int i) { ++seen[i]; });
