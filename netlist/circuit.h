@@ -1233,6 +1233,7 @@ struct BlockState {
     std::vector<LineHistory> lineState;
     std::vector<ltra::History> ltraState;  // per LossyLine: its accepted history
     std::vector<std::shared_ptr<osdi::Instance>> osdiState;  // per OsdiDevice (TensorNetlist::instantiateOsdi)
+    int osdiInternals = 0;  // their internal nodes, counted by instantiateOsdi (summing them was 9 % of a 20k-device transient)
     // Future: BJT OP, etc.
 
     // Initialize state based on block definition

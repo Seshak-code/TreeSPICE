@@ -363,6 +363,8 @@ void TensorNetlist::instantiateOsdi(double tempK, bool keepEval) {
                                                               (uint32_t)dev.nodes.size(), tempK);
             st.osdiState[i] = std::make_shared<osdi::Instance>(su, prefix + dev.instanceName, keepEval);
         }
+        st.osdiInternals = 0;
+        for (const auto &in : st.osdiState) st.osdiInternals += in ? (int)in->numInternal() : 0;
     };
     make(globalBlock, globalState, "");
     for (size_t k = 0; k < instances.size() && k < instanceStates.size(); ++k) {
