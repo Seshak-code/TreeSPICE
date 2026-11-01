@@ -580,6 +580,37 @@ int main() {
                   std::to_string(s.stats.converged) + ", source stepping " + std::to_string(s.stats.sourceSteppingUsed) + ")");
     }
 
+    // MOS limiting, ngspice devsup.c by hand: DEVfetlim stops a turn-on at vto + 0.5 and a middle-region rise at
+    // vto + 4, a turn-off from far above at vto + 2; DEVlimvds caps a rise at 4 V (3 vold + 2 above 3.5 V), a fall at
+    // -0.5 V (2 V from above 3.5 V)
+    check(fetlim(2.0, 0.0, 0.4) == 0.9 && fetlim(0.6, 0.0, 0.4) == 0.6 && fetlim(5.0, 0.5, 0.4) == 0.4 + 4.0 &&
+              fetlim(-3.0, 5.0, 0.4) == 0.4 + 2.0 && fetlim(4.5, 5.0, 0.4) == 4.5 && limvds(10.0, 0.0) == 4.0 &&
+              limvds(20.0, 4.0) == 14.0 && limvds(1.0, 4.0) == 2.0 && limvds(-3.0, 1.0) == -0.5,
+          "MOS limiting: fetlim and limvds match ngspice's DEVfetlim / DEVlimvds");
+    // A 9500-stage MOS1 inverter chain (lambda 0: a stage's gain is gm over its junctions' gmin) by dynamic gmin
+    // stepping, as ngspice: it crosses the chain's critical node gmin (~1.06 mS) only with the MOS limiting and every
+    // step meeting KCL (without either it fails; at 10000 stages it still does, where ngspice's ladder gets through)
+    for (int n : {9500}) {
+        std::string net = "* chain\nVDD 1 0 DC 1.2\nVIN 2 0 DC 0\n";
+        for (int i = 0; i < n; ++i) {
+            const std::string in = i ? "o" + std::to_string(i - 1) : "2", out = "o" + std::to_string(i);
+            net += "MP" + std::to_string(i) + " " + out + " " + in + " 1 1 pch w=2u l=0.1u\nMN" + std::to_string(i) + " " +
+                   out + " " + in + " 0 0 nch w=1u l=0.1u\n";
+        }
+        net += ".model nch nmos level=1 vto=0.4 kp=200u\n.model pch pmos level=1 vto=-0.4 kp=100u\n.op\n.end\n";
+        auto p = SPICEParser().parse(net);
+        CircuitSim sim;
+        SolverStep s = sim.solveDC(p.netlist);
+        auto at = [&](const std::string& name) {
+            const auto it = p.nodeIndex.find(name);
+            return it == p.nodeIndex.end() ? (double)NAN : sim.nodeVoltage(it->second);
+        };
+        const double hi = at("O" + std::to_string(n - 2)), lo = at("O" + std::to_string(n - 1));
+        check(p.success && s.stats.converged && near(hi, 1.2, 1e-6) && near(lo, 0.0, 1e-6),
+              "a " + std::to_string(n) + "-stage MOS1 chain's .op alternates to its end (" + std::to_string(hi) + ", " +
+                  std::to_string(lo) + ")");
+    }
+
     // Phase 3 MOS1: SPICE card defaults (KP 2e-5, VTO 0, W = L = 100u) give
     // Id = 0.5*2e-5*1^2 = 10 uA at Vgs = 1 V (saturation); M=3 triples it
     for (PrecisionMode mode : {PrecisionMode::Native_F64, PrecisionMode::Mixed}) {

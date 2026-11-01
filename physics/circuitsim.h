@@ -548,13 +548,60 @@ public:
       return I;
   }
 
+  // ngspice MOS limiting (mos1load; mos2/3/6 alike), device-local like junctionLimit: vgs (vgd when reversed)
+  // by DEVfetlim about the last iteration's threshold, vds by DEVlimvds, then the forward bulk junction by
+  // DEVpnjlim, each against the last iteration's limited vgs, vds, vbs (st->jv, type domain). The first
+  // iteration of a solve starts at vgs = VTO, vds = 0, vbs = -1 (MODEINITJCT). Returns the terminal shifts
+  // (d, g, s, b) to the limited point; the source stays.
+  std::array<double, 4> mosLimit(const Mos1Params<double> &p, const std::array<double, 4> &x, BlockState::DeviceCharge *st) const {
+    const double t = p.polarity, raw[3] = {t * (x[1] - x[2]), t * (x[0] - x[2]), t * (x[3] - x[2])};
+    double vgs = t * p.vto, vds = 0.0, vbs = -1.0;
+    if (st->jvState) {
+      const double ogs = st->jv[0], ods = st->jv[1], obs = st->jv[2];
+      const double von = mos_von_vdsat(ogs, ogs - ods, obs, obs - ods, p).first;
+      vgs = raw[0];
+      vbs = raw[2];
+      double vgd = raw[0] - raw[1];
+      if (ods >= 0.0) {
+        vgs = fetlim(vgs, ogs, von);
+        vds = limvds(vgs - vgd, ods);
+      } else {
+        vgd = fetlim(vgd, ogs - ods, von);
+        vds = -limvds(vgd - vgs, -ods);
+        vgs = vgd + vds;
+      }
+      const double vcritD = compute_vcrit(p.vt, p.isat), vcritS = compute_vcrit(p.vt, p.isats < 0.0 ? p.isat : p.isats);
+      vbs = vds >= 0.0 ? pnjlim(vbs, obs, p.vt, vcritS) : pnjlim(vbs - vds, obs - ods, p.vt, vcritD) + vds;
+    }
+    st->jv[0] = vgs; st->jv[1] = vds; st->jv[2] = vbs;
+    st->jvState = 1;
+    return {t * (vds - raw[1]), t * (vgs - raw[0]), 0.0, t * (vbs - raw[2])};
+  }
+
   // Newton stamp of mosCurrents() at v (held: mosHeld). The Jacobian comes from Dual (one pass
   // per terminal), so it is the exact derivative of the currents the KCL audit
-  // checks: gm, gds, gmbs, the junctions and charges, either orientation.
+  // checks: gm, gds, gmbs, the junctions and charges, either orientation. Limited (mosLimit):
+  // ngspice's companion I(vl) + G (v - vl) at the limited terminal voltages vl, as stampJunction.
   void stampMos1(const std::array<int, 4>& n, const Mos1Params<double>& p,
                  const BlockState::DeviceCharge* st, double h, const std::vector<double>& v, bool held = false) {
-      if (held) stampByDual(n, 4, v, [&](const std::array<Dual<double>, 4> &x) { return mosHeld(x, p); });
-      else stampByDual(n, 4, v, [&](const std::array<Dual<double>, 4> &x) { return mosCurrents(x, p, st, h); });
+      auto *mst = const_cast<BlockState::DeviceCharge *>(st);
+      if (held) {
+        stampByDual(n, 4, v, [&](const std::array<Dual<double>, 4> &x) { return mosHeld(x, p); });
+        if (mst) { std::fill(mst->jv, mst->jv + 3, 0.0); mst->jvState = 1; }  // INITFIX: held at 0 V
+        return;
+      }
+      auto V = [&](int k) { return n[k] > 0 && n[k] <= (int)v.size() ? v[n[k] - 1] : 0.0; };
+      const std::array<double, 4> sh = limitJunctions_ && mst ? mosLimit(p, {V(0), V(1), V(2), V(3)}, mst) : std::array<double, 4>{};
+      stampByDual(n, 4, v, [&](std::array<Dual<double>, 4> x) {
+        for (int k = 0; k < 4; ++k) x[k] = x[k] + sh[k];
+        return mosCurrents(x, p, st, h);
+      });
+      if (sh[0] == 0.0 && sh[1] == 0.0 && sh[3] == 0.0) return;
+      std::array<Dual<double>, 4> x;  // the G (vl - v) correction: one pass seeded with the shifts
+      for (int k = 0; k < 4; ++k) x[k] = Dual<double>(V(k) + sh[k], sh[k]);
+      const auto cur = mosCurrents(x, p, st, h);
+      for (int t = 0; t < 4; ++t)
+        if (n[t] > 0) rhsVector[n[t] - 1] += cur[t].grad;
   }
 
   // Diodes and BJTs ("junction devices"): one evaluation of currents and charges
@@ -690,6 +737,7 @@ public:
   // it fails the analysis at once instead of retrying ever smaller steps.
   mutable std::string osdiFatal_;
   mutable std::string osdiNonFinite_;
+  double stepGmin_ = 0.0;   // dynamic gmin stepping's node gmin while solveDC runs it, device-internal nodes too
   double ptranGmin_ = 0.0;  // node-to-ground gmin while solveDC runs its transient OP  // the last non-finite OSDI evaluation: reported if the analysis fails
   template <class S> double sourceValue(const S &s, double dc, double h, double time) const {
     return srcFact_ * (h > 0.0 ? waveformValue(s, dc, time) : tranOpSources_ ? tranOpValue(s, dc) : dc);
@@ -1202,9 +1250,20 @@ public:
       j.st->jv[1] = j.d ? 0.0 : j.f ? t * (V(1) - V(0)) : t * (V(5) - V(4));
       j.st->jvState = 1;
     });
+    forEachMosfet(nl, [&](const Mosfet &m, const std::array<int, 4> &n, const BlockState::DeviceCharge *st) {
+      if (!st) return;
+      auto V = [&](int k) { return n[k] > 0 && n[k] <= (int)x.size() ? x[n[k] - 1] : 0.0; };
+      auto *s = const_cast<BlockState::DeviceCharge *>(st);
+      const double t = mos1Params(m).polarity;
+      s->jv[0] = t * (V(1) - V(2)); s->jv[1] = t * (V(0) - V(2)); s->jv[2] = t * (V(3) - V(2));
+      s->jvState = 1;
+    });
   }
   void resetJunctionLimits(const TensorNetlist &nl) const {
     forEachJunction(nl, [&](const Junction &j) { if (j.st) j.st->jvState = 0; });
+    forEachMosfet(nl, [&](const Mosfet &, const std::array<int, 4> &, const BlockState::DeviceCharge *st) {
+      if (st) const_cast<BlockState::DeviceCharge *>(st)->jvState = 0;
+    });
   }
   bool limitJunctions_ = true;  // off for the AC / sensitivity Jacobian at a converged point
   bool offHold_ = false;        // the first operating-point solve, with OFF devices held at 0 V (solveDC)
@@ -2017,8 +2076,14 @@ public:
     // 1.5 The transient OP's node gmin (addDiagonalConditioning(ptranGmin_)): the audit must
     // see the current the matrix holds, or a node at volts never passes KCL there (10 V at
     // 1e-12 S is 10 pA: a floating node behind a 1 ms RC failed every step at t = 0)
-    if (ptranGmin_ + gshunt_ > 0.0)
-      for (int i = 1; i <= n; ++i) addRes(i, -(ptranGmin_ + gshunt_) * getV(i));
+    if (ptranGmin_ + gshunt_ + stepGmin_ > 0.0)
+      for (int i = 1; i <= n; ++i) addRes(i, -(ptranGmin_ + gshunt_ + stepGmin_) * getV(i));
+    if (stepGmin_ > 0.0) {  // and gmin stepping's on the device-internal nodes
+      int total = 0;
+      for (const auto &sl : branchSlots(netlist, total))
+        for (int r = sl.dev, e = sl.dev + deviceInternals(*sl.blk, *sl.st); r < e && r < (int)v_candidate.size(); ++r)
+          node_residuals[r] -= stepGmin_ * v_candidate[r];
+    }
 
     // 2. V sources, inductors, E/F/H: branch-current elements, audited from
     //    the same triplets they are stamped with (see buildBranchSystem below)
