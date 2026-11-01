@@ -10,6 +10,7 @@
 #include <limits>
 #include <numeric>
 #include <queue>
+#include <tuple>
 #include <string>
 
 namespace {
@@ -58,7 +59,10 @@ std::vector<int> matchLargeDiagonal(const Csr_matrix& A) {
     std::vector<double> pr(n, 0.0), pc(n, 0.0), dist(n, INF);
     std::vector<char> done(n, 0);
     std::vector<std::pair<int, double>> colsReached;
-    using QE = std::pair<double, int>;
+    // (distance, row already matched, row): at equal distance a free row is popped first. By index alone a
+    // matched row could come first and send the search through its column; a supply node's column (one entry
+    // per device on the rail) then made the matching quadratic: 67 s for a 1e5-stage BSIM4 chain's DC.
+    using QE = std::tuple<double, bool, int>;
     for (int j0 = 0; j0 < n; ++j0) {
         std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
         touched.clear(); finalized.clear(); colsReached.assign(1, {j0, 0.0});
@@ -69,7 +73,7 @@ std::vector<int> matchLargeDiagonal(const Csr_matrix& A) {
                 double nd = dj + cost[t] + pc[j] - pr[i];  // reduced cost >= 0
                 if (nd < dist[i]) {
                     if (dist[i] == INF) touched.push_back(i);
-                    dist[i] = nd; pred[i] = j; pq.push({nd, i});
+                    dist[i] = nd; pred[i] = j; pq.push({nd, rowMatch[i] >= 0, i});
                 }
             }
         };
@@ -77,7 +81,7 @@ std::vector<int> matchLargeDiagonal(const Csr_matrix& A) {
         int freeRow = -1;
         double D = 0.0;
         while (!pq.empty()) {
-            auto [d, i] = pq.top(); pq.pop();
+            auto [d, matched, i] = pq.top(); pq.pop();
             if (done[i] || d > dist[i]) continue;
             done[i] = 1; finalized.push_back(i);
             if (rowMatch[i] < 0) { freeRow = i; D = d; break; }
