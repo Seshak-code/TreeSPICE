@@ -362,6 +362,23 @@ then the two Roadmap sections it points to. Everything below was verified by run
     and with a stamp outside the pattern; it fails if the scatter ignores the mask.
   - **Next in the DC:** the linear solve (~40 %: refinement, and a new plan whenever gmin stepping changes the
     pattern) and the OSDI evaluations.
+- **Update 2026-11-04 (Claude Code, branch `mac/refine`; PR #36 merged by the owner): refinement in Newton.**
+  A solve refined whenever its componentwise backward error was above 4 eps. That error grows with the circuit (first
+  solves ~1e-16 at 60 stages, 1e-14 to 1e-13 at 1e4), so nearly every solve paid a second substitution and residual.
+  It cost less than the earlier estimate: 0.93 s of a 15.5 s 1e4-stage transient on one thread.
+  - `solveContraction` takes `refineAbove` (default 4 eps, unchanged for direct solves, AC, sensitivity and refcheck's
+    2 eps bound). Plain Newton (transient, and the DC's first attempt) passes `kNewtonRefine` = KCL_RELTOL / 100 =
+    1e-12. A poor solve is still refined: random test circuits' first solves reach 8e-6.
+  - **Homotopy keeps full refinement:** once gmin or source stepping starts, solves refine to 4 eps. Relaxed there, the
+    9500-stage MOS1 chain failed again (the critical-gmin edge). So hard DCs, such as a 1e5-stage BSIM4 chain's, gain
+    nothing here.
+  - **Tried and dropped:** 64 eps (the FP32 bound) skipped only 12 % of the refinement steps at 1e4 stages.
+  - **Results (noisy machine; repeated, alternating):** 2e4 transistors, 1 thread 15.1-16.1 -> 14.4-14.8 s, 10 threads
+    7.9-8.1 -> 7.2-7.8 s; 2e5 transistors, 10 threads 88-101 -> 82-84 s. Waveforms move by at most 1.4e-12 V and
+    3e-9 A. The `.op` sweep over chain lengths passes and fails at the same lengths as main.
+  - **Check:** `test_contraction_solver`: at 1e-12 a first solve at 1e-14 is left alone, the default refines it, and one
+    at 1e-7 is still refined to within the bound (fails if refineAbove is ignored). Matrix: run_diff 1270 PASS / 0 FAIL;
+    Xyce 208 PASS / 0 FAIL (2 TIMEOUT, the LTRA decks, as on main); refcheck 39/39; cli_check 29/29; ctest 4/4.
 - **Status of the plan:** Roadmap Phase 1 (Foundations) is done. See `Roadmap.md` →
   "⚙️ ENGINE FEATURE LIST & VERIFIED SUPPORT STATUS" (what works, by device/analysis, with ✅/⚠️/❌/🚫/❓)
   and "🎯 END-TO-END GOAL & ENGINE SCALE PLAN" (phases and gates).

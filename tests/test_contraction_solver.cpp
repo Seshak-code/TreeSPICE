@@ -176,6 +176,21 @@ int main() {
         check(!r.converged || !std::isfinite(r.finalResidual) || r.finalResidual > 1e-3, "singular matrix not reported as solved", r.finalResidual);
     }
 
+    {   // refineAbove: at a Newton iteration's 1e-12 a first solve at 1e-14 is left as it is (the default's 4 eps
+        // refines it), and one at 1e-7 is still refined to within the bound
+        const double eps = std::numeric_limits<double>::epsilon();
+        auto run = [&](int n, unsigned seed, double above) {
+            const auto A = circuit(n, seed);
+            const auto b = rhsFor(A.rows, 5);
+            const auto r = solveContraction(A, b, planContraction(A), 2, nullptr, false, above);
+            return std::make_pair(r.iterations, backwardError(A, r.solution, b));
+        };
+        const auto noise = run(200, 3, 1e-12), polished = run(200, 3, 4.0 * eps), poor = run(1000, 1, 1e-12);
+        check(noise.first == 1 && noise.second <= 1e-12 && polished.first == 2 && polished.second <= 4.0 * eps &&
+                  poor.first > 1 && poor.second <= 1e-12,
+              "refineAbove: noise left alone, a poor solve still refined", poor.second);
+    }
+
     {   // A supply rail: 200000 nodes tied to node 0 by g alone, so each one's column holds two entries of equal
         // size (its own row's and the rail's). The diagonal matching popped the rail's row first on the tie and
         // searched the rail's whole column for every node: quadratic (a 1e5-stage BSIM4 chain's DC took 67 s).
