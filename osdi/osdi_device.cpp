@@ -239,6 +239,9 @@ void Setup::init(const std::string &name, const std::vector<std::pair<std::strin
         entryAt.push_back((uint32_t)(a * L1 + b));
         if (a > 0 && b > 0 && slot[(a - 1) * numLocal + b - 1] < 0) slot[(a - 1) * numLocal + b - 1] = (int)numSlots++;
     }
+    for (uint32_t r = 0; r < numLocal; ++r)
+        for (uint32_t c = 0; c < numLocal; ++c)
+            if (slot[r * numLocal + c] >= 0) entries.push_back({r, c, slot[r * numLocal + c]});
 }
 
 Setup::~Setup() { std::free(data_); }

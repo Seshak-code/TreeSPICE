@@ -379,6 +379,18 @@ then the two Roadmap sections it points to. Everything below was verified by run
   - **Check:** `test_contraction_solver`: at 1e-12 a first solve at 1e-14 is left alone, the default refines it, and one
     at 1e-7 is still refined to within the bound (fails if refineAbove is ignored). Matrix: run_diff 1270 PASS / 0 FAIL;
     Xyce 208 PASS / 0 FAIL (2 TIMEOUT, the LTRA decks, as on main); refcheck 39/39; cli_check 29/29; ctest 4/4.
+- **Update 2026-11-05 (Claude Code, branch `mac/osdi-layout`; PR #37 merged by the owner): a bypassed OSDI device's
+  arithmetic.** The owner asked for the OSDI pass's memory layout. Measured, layout is not its cost: the instances and
+  their states in one arena, in device order, gave identical results and ran 4 % slower on one thread, so the arena was
+  dropped (sequential allocation already leaves them nearly contiguous).
+  - **The cost:** the extrapolation f, q += G, C dv was a fifth of a one-thread BSIM4 transient, a dense L x L loop with
+    a slot lookup and a branch per entry. It now walks only the model's declared entries (`Setup::entries`, by row then
+    column), with dv computed once and each row's sums in registers (a variable `f[e.r] +=` was slower than the dense
+    loop: a load and a store per entry). The working buffers are on the stack (L <= 32; a thread_local access costs more
+    than a bypassed device's arithmetic), as are stampOsdi's terminal voltages.
+  - **Results:** raw data bit-identical to main. 10000-stage BSIM4 chain, 1 / 4 / 10 threads: 13.2 / 7.7 / 6.7 s (main
+    14.65 / 9.2 / 7.1). Matrix: run_diff 1270 PASS / 0 FAIL; Xyce 208 PASS / 0 FAIL (2 TIMEOUT, the LTRA decks, as on
+    main); refcheck 39/39; cli_check 29/29; ctest 4/4.
 - **Status of the plan:** Roadmap Phase 1 (Foundations) is done. See `Roadmap.md` →
   "⚙️ ENGINE FEATURE LIST & VERIFIED SUPPORT STATUS" (what works, by device/analysis, with ✅/⚠️/❌/🚫/❓)
   and "🎯 END-TO-END GOAL & ENGINE SCALE PLAN" (phases and gates).
