@@ -57,6 +57,8 @@ public:
     std::vector<uint32_t> entryAt;    // per Jacobian entry: its slot in the dense (numLocal+1)^2 buffers
     std::vector<int> slot;            // local (row * numLocal + col) -> compact Jacobian index, -1: none
     uint32_t numSlots = 0;            // distinct local Jacobian positions
+    struct Entry { uint32_t r, c; int k; };
+    std::vector<Entry> entries;       // those positions by row, then column, with their compact indices
     const void *block() const { return data_; }
 
 private:
@@ -96,6 +98,9 @@ public:
     const double *evalAt() const { return &s_[5 * numLocal()]; }
     double f(uint32_t k) const { return s_[6 * numLocal() + k]; }
     double q(uint32_t k) const { return s_[7 * numLocal() + k]; }
+    const std::vector<Setup::Entry> &entries() const { return setup_->entries; }
+    const double *keptG() const { return &s_[8 * numLocal()]; }
+    const double *keptC() const { return &s_[8 * numLocal() + setup_->numSlots]; }
     double G(uint32_t r, uint32_t c) const { return compact(r, c, 0); }
     double C(uint32_t r, uint32_t c) const { return compact(r, c, 1); }
 

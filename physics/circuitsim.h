@@ -881,8 +881,12 @@ public:
                     bool accept = false, std::vector<double> *Cout = nullptr, std::vector<double> *Qout = nullptr,
                     double *jCoef = nullptr) const {
     const size_t L = r.n.size();
-    thread_local std::vector<double> x, f, q;  // devices evaluate in parallel
-    x.resize(L);
+    // On the stack: thread_local vectors here cost more than a bypassed device's arithmetic (a TLS call per access)
+    constexpr size_t kStackL = 32;
+    double stackBuf[4 * kStackL];
+    std::vector<double> heapBuf;
+    if (L > kStackL) heapBuf.resize(4 * L);
+    double *const buf = L > kStackL ? heapBuf.data() : stackBuf, *const x = buf, *const f = buf + L, *const q = buf + 2 * L, *const d = buf + 3 * L;
     for (size_t k = 0; k < L; ++k) x[k] = r.n[k] > 0 && r.n[k] <= (int)v.size() ? v[r.n[k] - 1] : 0.0;
     const bool tran = h > 0.0 && integrator;
     osdi::Instance &in = *r.in;
@@ -902,7 +906,7 @@ public:
     if (jCoef) *jCoef = NAN;  // until J is filled from the kept G, C below
     in.gmin = gmin_;
     thread_local osdi::Eval ev;  // this evaluation (devices evaluate in parallel)
-    if (!bypass && !in.evaluate(x.data(), flags, 0.0, ev)) {
+    if (!bypass && !in.evaluate(x, flags, 0.0, ev)) {
       std::lock_guard<std::mutex> lock(osdiErrorMutex());
       osdiFatal_ = r.dev->instanceName + ": " + osdi::Instance::error();  // reported instead of a singular matrix
       std::fill(I, I + L, NAN);
@@ -911,17 +915,26 @@ public:
     }
     auto G = [&](size_t a, size_t b) { return bypass ? in.G(a, b) : ev.G[a * L + b]; };
     auto C = [&](size_t a, size_t b) { return bypass ? in.C(a, b) : ev.C[a * L + b]; };
-    f.resize(L);  // at x: as evaluated, or extrapolated when bypassed
-    q.resize(L);
+    // f, q at x: as evaluated, or extrapolated when bypassed
     for (size_t a = 0; a < L; ++a) {
       f[a] = bypass ? in.f(a) : ev.f[a];
       q[a] = bypass ? in.q(a) : ev.q[a];
-      if (bypass)
-        for (size_t b = 0; b < L; ++b) {
-          const double d = x[b] - at[b];
-          f[a] += G(a, b) * d;
-          q[a] += C(a, b) * d;
+    }
+    if (bypass) {  // the entries the model declares, not L x L (this extrapolation was a fifth of a BSIM4 transient)
+      for (size_t b = 0; b < L; ++b) d[b] = x[b] - at[b];
+      const double *kg = in.keptG(), *kc = in.keptC();
+      const auto &E = in.entries();
+      const size_t nE = E.size();
+      for (size_t a = 0, k = 0; a < L; ++a) {  // by row, in registers
+        double fa = f[a], qa = q[a];
+        for (; k < nE && E[k].r == a; ++k) {
+          const double dc = d[E[k].c];
+          fa += kg[E[k].k] * dc;
+          qa += kc[E[k].k] * dc;
         }
+        f[a] = fa;
+        q[a] = qa;
+      }
     }
     for (size_t k = 0; k < L; ++k)
       if (!std::isfinite(f[k]) || !std::isfinite(q[k])) {
@@ -948,7 +961,7 @@ public:
     if (accept) {
       std::copy(in.vHist(1), in.vHist(1) + L, in.vHist(2));
       std::copy(in.vHist(0), in.vHist(0) + L, in.vHist(1));
-      std::copy(x.begin(), x.end(), in.vHist(0));
+      std::copy(x, x + L, in.vHist(0));
     }
     const bool fillJ = J && !(bypass && heldCoef == coef);
     if (fillJ) {
@@ -956,7 +969,7 @@ public:
         for (size_t b = 0; b < L; ++b) J[a * L + b] = G(a, b) + coef * C(a, b);
     }
     if (J && jCoef && bypass) *jCoef = coef;
-    if (Qout) Qout->assign(q.begin(), q.end());
+    if (Qout) Qout->assign(q, q + L);
     if (Cout) {
       Cout->assign(L * L, 0.0);
       for (size_t a = 0; a < L; ++a)
@@ -984,12 +997,18 @@ public:
       const auto &r = osdiRefs_[i];
       const size_t L = r.n.size();
       const double *I = osdiI(i), *J = osdiJ(i);
+      constexpr size_t kStackL = 32;
+      double stackV[kStackL];
+      std::vector<double> heapV;
+      if (L > kStackL) heapV.resize(L);
+      double *const xv = L > kStackL ? heapV.data() : stackV;
+      for (size_t u = 0; u < L; ++u) xv[u] = V(r.n[u]);
       for (size_t t = 0; t < L; ++t) {
         if (r.n[t] <= 0) continue;
         double ieq = I[t];
         for (size_t u = 0; u < L; ++u) {
           const double g = J[t * L + u];
-          if (g != 0.0) ieq -= g * V(r.n[u]);
+          if (g != 0.0) ieq -= g * xv[u];
         }
         osdiIeq_[osdiOff_[i] + t] = ieq;
       }
