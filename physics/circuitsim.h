@@ -376,12 +376,16 @@ public:
   // Jacobian's sparsity pattern (circuit topology) changes.
   std::unique_ptr<ContractionPlan> contractionPlan_;
   ContractionCache contractionCache_;  // unchanged subtrees keep their factors between solves
-  SolverResult solveLinear(const Csr_matrix& A, const std::vector<double>& b) {
+  // A Newton iteration's backward-error target: two decades below what the KCL test can see (KCL_RELTOL). A first
+  // solve's error grows with the circuit (1e-16 at 60 stages, 1e-13 at 1e4), so 4 eps refined nearly every solve.
+  static constexpr double kNewtonRefine = PhysicsConstants::KCL_RELTOL / 100.0;
+  SolverResult solveLinear(const Csr_matrix& A, const std::vector<double>& b,
+                           double refineAbove = 4.0 * std::numeric_limits<double>::epsilon()) {
     if (!contractionPlan_ || !contractionPlan_->matches(A)) {
       contractionPlan_ = std::make_unique<ContractionPlan>(planContraction(A));
       contractionCache_ = {};  // factors belong to the old plan
     }
-    SolverResult r = solveContraction(A, b, *contractionPlan_, 2, &contractionCache_, execMode == ExecutionMode::GPU);
+    SolverResult r = solveContraction(A, b, *contractionPlan_, 2, &contractionCache_, execMode == ExecutionMode::GPU, refineAbove);
     gpuFronts += r.gpuFronts;
     return r;
   }

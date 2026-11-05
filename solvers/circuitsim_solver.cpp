@@ -197,7 +197,10 @@ SolverStep CircuitSim::solveDC(TensorNetlist &netlist) {
         prevVoltages_.clear();
       }
 
-      SolverResult result = solveLinear(matrix, rhsVector);
+      // Plain Newton as a transient's; the homotopy keeps full refinement: a chain's ladder near its critical gmin,
+      // where the Jacobian is nearly singular, lands elsewhere without it (9500 MOS1 stages then failed)
+      SolverResult result = gminSteppingUsed || sourceSteppingUsed ? solveLinear(matrix, rhsVector)
+                                                                   : solveLinear(matrix, rhsVector, kNewtonRefine);
       lastPivot = result.smallestPivot;
       lastPivotRow = result.rankDeficientRow;
       // Phase 2.9: Capture pivot diagnostics from LU
@@ -2498,7 +2501,7 @@ bool CircuitSim::coldStartSweep(TensorNetlist &netlist, double totalTime,
 
       Csr_matrix A = matrixBuilder.createCsr();
 
-      subResult = solveLinear(A, rhsVector);
+      subResult = solveLinear(A, rhsVector, kNewtonRefine);
       if (!subResult.converged) break;  // singular: this micro-step fails
 
       std::vector<double> v_new = subResult.solution;
@@ -2643,7 +2646,7 @@ SolverStep CircuitSim::stepTransient(TensorNetlist &netlist, double timeStep,
 
         Csr_matrix A = matrixBuilder.createCsr();
 
-        lastResult = solveLinear(A, rhsVector);
+        lastResult = solveLinear(A, rhsVector, kNewtonRefine);
         if (!lastResult.converged) break;  // singular: a failed attempt (the step halves)
 
         std::vector<double> v_new = lastResult.solution;

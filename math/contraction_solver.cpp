@@ -694,7 +694,7 @@ double residual(const Csr_matrix& A, const std::vector<double>& b, const std::ve
 
 namespace {
 SolverResult solve(const Csr_matrix& A, const std::vector<double>& b, const ContractionPlan& plan,
-                   int refineSteps, ContractionCache* cache, bool gpu) {
+                   int refineSteps, ContractionCache* cache, bool gpu, double refineAbove) {
     static const int gpuMin = [] { const char* s = std::getenv("TREESPICE_GPU_FRONT"); return s ? std::atoi(s) : 512; }();
     SolverResult res;
     res.iterations = 1;
@@ -885,7 +885,8 @@ SolverResult solve(const Csr_matrix& A, const std::vector<double>& b, const Cont
     res.gpuFronts = (int)std::count(onGpu.begin(), onGpu.end(), 1);
     const int steps = res.gpuFronts ? std::max(refineSteps, 10) : refineSteps;
     double omega = residual(A, b, x, r);
-    for (int s = 0; s < steps && omega > 4.0 * eps; ++s) {
+    const double target = res.gpuFronts ? 4.0 * eps : refineAbove;
+    for (int s = 0; s < steps && omega > target; ++s) {
         solveWithFactors(A, plan, F, r, dx);
         for (int i = 0; i < n; ++i) x[i] += dx[i];
         const double prev = omega;
@@ -895,7 +896,7 @@ SolverResult solve(const Csr_matrix& A, const std::vector<double>& b, const Cont
     }
     if (res.gpuFronts && !(omega <= 64.0 * eps)) {  // FP32 factors too weak here: redo in FP64
         if (cache) cache->impl.reset();
-        res = solve(A, b, plan, refineSteps, cache, false);
+        res = solve(A, b, plan, refineSteps, cache, false, refineAbove);
         res.fp64Refactor = true;
         return res;
     }
@@ -910,6 +911,7 @@ SolverResult solve(const Csr_matrix& A, const std::vector<double>& b, const Cont
 }  // namespace
 
 SolverResult solveContraction(const Csr_matrix& A, const std::vector<double>& b,
-                              const ContractionPlan& plan, int refineSteps, ContractionCache* cache, bool gpu) {
-    return solve(A, b, plan, refineSteps, cache, gpu);
+                              const ContractionPlan& plan, int refineSteps, ContractionCache* cache, bool gpu,
+                              double refineAbove) {
+    return solve(A, b, plan, refineSteps, cache, gpu, refineAbove);
 }

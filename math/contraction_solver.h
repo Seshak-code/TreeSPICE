@@ -2,6 +2,7 @@
 
 #include "linalg.h"
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -78,8 +79,10 @@ struct ContractionCache {
 };
 
 /** Factor + solve A x = b along `plan` (A must match plan's pattern), with
- *  up to `refineSteps` iterative-refinement passes against A. `cache`: reuse
- *  unchanged subtrees from the previous solve of the same plan. */
+ *  up to `refineSteps` iterative-refinement passes against A while the componentwise
+ *  backward error is above `refineAbove`. `cache`: reuse unchanged subtrees from the
+ *  previous solve of the same plan. */
 SolverResult solveContraction(const Csr_matrix& A, const std::vector<double>& b,
                               const ContractionPlan& plan, int refineSteps = 2,
-                              ContractionCache* cache = nullptr, bool gpu = true);
+                              ContractionCache* cache = nullptr, bool gpu = true,
+                              double refineAbove = 4.0 * std::numeric_limits<double>::epsilon());
